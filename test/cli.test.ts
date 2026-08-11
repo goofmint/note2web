@@ -2,9 +2,25 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isMainEntry, runCli } from '../src/cli.js';
+import { DoctorError, runDoctorChecks } from '../src/doctor.js';
 import { PARTIAL_FAILURE, PRECONDITION_FAILURE, SUCCESS } from '../src/exit-codes.js';
+
+/**
+ * `doctor` の実チェック(host の ruby/git/gh 等の実在有無)は `src/doctor.test.ts` が
+ * 注入可能な `commandExistsFn`/`runSubprocessFn` で決定的に検証する。ここ(CLI 統合テスト)
+ * では `runDoctorChecks` 自体をモックし、`runCli` が「成功サマリ / `DoctorError.problems`
+ * を stderr 行へ展開する処理」を正しく配線しているかだけを検証する(CodeRabbit review,
+ * PR #48: 実行ホストの状態に依存すると CI 環境間でテスト結果がぶれるため)。
+ */
+vi.mock('../src/doctor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/doctor.js')>();
+  return {
+    ...actual,
+    runDoctorChecks: vi.fn(),
+  };
+});
 
 /** T-04 で追加した schema 検証済み fixture(service: zenn、assets+git を満たす)。 */
 const VALID_CONFIG_PATH = fileURLToPath(new URL('./fixtures/configs/zenn.yaml', import.meta.url));
@@ -44,6 +60,7 @@ describe('runCli', () => {
         process.env[name] = originalEnv[name];
       }
     }
+    vi.mocked(runDoctorChecks).mockReset();
   });
 
   it('exits 2 with usage on stderr when no subcommand is given', async () => {
@@ -92,18 +109,50 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toMatch(/no Publisher implementation is registered yet/);
   });
 
-  it('exits 2 for doctor when --config points to a schema-valid file (doctor is not implemented yet, T-15)', async () => {
-    // doctor はまだ何もチェックしていないため、SUCCESS を返すと「問題無し」と誤解される。
-    // 未実装であることが明確に伝わるよう exit 2 + stderr で報告する(CodeRabbit review, PR #47)。
-    for (const name of VALID_CONFIG_ENV_VARS) {
-      process.env[name] = 'dummy-value';
+  it('exits 0 with the success summary when runDoctorChecks resolves (T-15)', async () => {
+    // `runDoctorChecks` 自体のチェック内容は `src/doctor.test.ts` の責務。ここでは
+    // `runCli` が成功時に stdout へサマリを出し SUCCESS を返す配線だけを検証する。
+    vi.stubEnv('R2_ACCESS_KEY_ID', 'dummy-value');
+    vi.stubEnv('R2_SECRET_ACCESS_KEY', 'dummy-value');
+    try {
+      vi.mocked(runDoctorChecks).mockResolvedValueOnce(undefined);
+
+      const result = await runCli(['doctor', '--config', VALID_CONFIG_PATH]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr).toHaveLength(0);
+      expect(result.stdout.join('\n')).toMatch(/all checks passed for service "zenn"/);
+      expect(runDoctorChecks).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
     }
+  });
 
-    const result = await runCli(['doctor', '--config', VALID_CONFIG_PATH]);
+  it('exits 2 and lists every problem on stderr with the "note2web: doctor:" prefix when runDoctorChecks rejects with DoctorError (T-15)', async () => {
+    // `DoctorError.problems` の中身(何が足りないか)は `src/doctor.test.ts` の責務。
+    // ここでは `runCli` が `problems` を1件ずつ stderr 行へ展開し、`error.exitCode` を
+    // そのまま返す配線だけを検証する(複数件が全件列挙されることも合わせて確認)。
+    vi.stubEnv('R2_ACCESS_KEY_ID', 'dummy-value');
+    vi.stubEnv('R2_SECRET_ACCESS_KEY', 'dummy-value');
+    try {
+      vi.mocked(runDoctorChecks).mockRejectedValueOnce(
+        new DoctorError([
+          { message: 'required command "gh" was not found on PATH' },
+          { message: 'environment variable "GH_TOKEN" is not set' },
+        ]),
+      );
 
-    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
-    expect(result.stdout).toHaveLength(0);
-    expect(result.stderr.join('\n')).toMatch(/doctor is not implemented yet/);
+      const result = await runCli(['doctor', '--config', VALID_CONFIG_PATH]);
+
+      expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+      expect(result.stdout).toHaveLength(0);
+      expect(result.stderr).toEqual([
+        'note2web: doctor: required command "gh" was not found on PATH',
+        'note2web: doctor: environment variable "GH_TOKEN" is not set',
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('exits 2 with an error when --config points to a directory', async () => {

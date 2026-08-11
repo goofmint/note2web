@@ -39,7 +39,8 @@ import { constants as fsConstants } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
-import { DEFAULT_PARSER_PATH, expandHome } from './exporter/apple-notes.js';
+import { DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
+import { expandHome } from './paths.js';
 import { commandExists } from './subprocess.js';
 
 /** 検出された依存不足1件。design.md §5.1「不足内容を呼び出し側へ返す」に対応する。 */
