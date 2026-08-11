@@ -13,7 +13,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 - 添付バイナリの R2 / S3 へのアップロードと本文 URL の差し替え
 - 以下のサービスへの配信
   - Zenn（Git リポジトリ出力）
-  - Hugo(Git リポジトリ出力)
+  - Hugo（Git リポジトリ出力）
   - Jekyll（Git リポジトリ出力）
   - Qiita（外部 CLI `@qiita/qiita-cli`）
   - dev.to（外部 CLI `devto-cli`、または Forem API v1）
@@ -24,8 +24,8 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 
 ### 対象外
 
-- Medium への配信（新規 integration token の発行が停止されており、新規ユーザーが利用できないため)
-- サービス側からの逆同期(配信は片方向)
+- Medium への配信（新規 integration token の発行が停止されており、新規ユーザーが利用できないため）
+- サービス側からの逆同期（配信は片方向）
 - 「9. 非目標」に列挙する各機能
 
 ## 3. 用語定義
