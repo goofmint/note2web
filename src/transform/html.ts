@@ -10,6 +10,13 @@
  *
  * ここで言う「行」はメタデータ抽出(`src/transform/metadata.ts`、T-10)専用の中間表現であり、
  * 本文除去(T-11)は行わない(bodyHtml 自体はこのモジュールでは一切書き換えない)。
+ *
+ * `resolveContainerChildren` / `groupContainerChildrenIntoLines` は BodyTransformer
+ * (`src/transform/body.ts`、T-11)からも再利用される。BodyTransformer はタイトル行
+ * (1行目)・ハッシュタグのみの行を実際に本文から取り除く必要があり、その際
+ * 「どの行がどの hast ノードに対応するか」を本モジュールと同じ規則で判定できないと
+ * 除去対象がずれてしまう。そのため行分割アルゴリズムはここに一元化し、
+ * `LineGroup#nodes`(行を構成した元ノード列)まで公開する。
  */
 
 import { unified } from 'unified';
@@ -34,17 +41,18 @@ const BLOCK_TAG_NAMES: ReadonlySet<string> = new Set([
   'pre',
 ]);
 
-/** hast の要素ノードかどうかを判定する。 */
-function isElement(node: Node): node is Element {
+/** hast の要素ノードかどうかを判定する(`body.ts` からも利用)。 */
+export function isElement(node: Node): node is Element {
   return node.type === 'element';
 }
 
 /**
  * `class` 属性(`hast` では `properties.className`。`rehype-parse` は常に
  * `Array<string>` へ正規化するため、その形のみを扱う)が指定のクラス名を
- * 含むかどうかを判定する。
+ * 含むかどうかを判定する(`body.ts` からも利用。チェックリストの
+ * `li.checked`/`li.unchecked` 判定などに使う)。
  */
-function hasClassName(element: Element, className: string): boolean {
+export function hasClassName(element: Element, className: string): boolean {
   return (element.properties.className ?? []).includes(className);
 }
 
@@ -74,8 +82,14 @@ function findFirstElement(node: Node, predicate: (element: Element) => boolean):
  *    フォールバック。トップレベルの `<html>` 要素をそのまま「行」候補にすると
  *    ブロック要素の区別が失われるため、`<body>` まで潜る必要がある)。
  * 3. `<body>` も無ければ木そのものの直下の子。
+ *
+ * `body.ts`(BodyTransformer)もこの関数で「本文」の範囲を決める。個別 HTML の
+ * メタデータヘッダ(Note UUID・Account・Folder・Title・Created・Modified)は
+ * `<div class="note-content">` の外側にあるため、この関数が返す子ノード列にしか
+ * 現れない——BodyTransformer が変換対象をこの戻り値に限定する限り、メタデータ
+ * ヘッダは変換結果の Markdown に一切現れない。
  */
-function resolveContainerChildren(tree: Root): RootContent[] {
+export function resolveContainerChildren(tree: Root): RootContent[] {
   const contentDiv = findFirstElement(tree, (element) => hasClassName(element, 'note-content'));
   if (contentDiv !== null) {
     return contentDiv.children;
@@ -93,40 +107,60 @@ function extractText(nodes: readonly RootContent[]): string {
 }
 
 /**
- * bodyHtml を解析し、`resolveContainerChildren` が選んだコンテナ(`<div class="note-content">`。
- * 無ければ `<body>`、それも無ければ木そのもの)直下の子を、design.md §5.3 の言う
- * 「行」の並びへ分解する。
+ * `groupContainerChildrenIntoLines` が返す1行分。`text` は行のテキスト内容
+ * (`extractLines` が返すのと同じ値)、`nodes` はその行を構成した元の hast ノード列
+ * (`resolveContainerChildren` が返す配列内での参照。同一配列内の要素そのもの)。
+ * `kind` は `'block'`(ブロック要素1つがそのまま1行になった)か
+ * `'inline'`(`<br>` 区切りで蓄積されたインラインノード列が1行になった)か。
+ *
+ * `body.ts`(BodyTransformer)は `nodes` を使ってタイトル行・ハッシュタグのみの行を
+ * 実際に取り除き、`kind` を使って残った行を(ブロックはそのまま、インラインは
+ * 合成 `<p>` として)Markdown 変換対象の木に組み直す。
+ */
+export interface LineGroup {
+  text: string;
+  nodes: RootContent[];
+  kind: 'block' | 'inline';
+}
+
+/**
+ * コンテナ(`resolveContainerChildren` が返す子ノード列)を、design.md §5.3 の言う
+ * 「行」の並びへ分解する。`extractLines`・`body.ts` の双方から使われる、行分割の
+ * 唯一の実装(規則がずれると、メタデータ抽出が数えた行インデックスと
+ * BodyTransformer が実際に取り除くノードとが食い違ってしまうため)。
  *
  * 分解規則:
  * - ブロック要素(`BLOCK_TAG_NAMES`)は、それ単体で1行になる(内部の `<br>` はその行の中で
- *   無視され、テキストとして結合される)。
+ *   無視され、テキストとして結合される)。テキストを持たないブロック要素(空の `<div>` 等)は
+ *   行として出力しない。
  * - ブロック要素以外(テキストノード・`<a>` `<b>` `<img>` 等のインライン要素)は、直前の行の
  *   続きとして蓄積され、`<br>` 要素・ブロック要素の出現・コンテナの終端のいずれかで
- *   1行として確定する。
- * - 前後の空白のみの行(トリム後に空文字になる行)は「行」として出力しない
- *   (`<br><br>` の間の空行や、テキストを持たない `<img>` のみの行を除外するため)。
- *
- * 空の bodyHtml(パース結果にテキストを持つノードが一切無い)の場合は空配列を返す。
+ *   1行として確定する。空白のみのテキストが並んだだけの蓄積(要素を1つも含まない)は
+ *   行として出力しない(`<br><br>` の間の空行を除外するため)。**ただし要素ノードを
+ *   1つでも含む蓄積は、テキストが空(`text: ''`)であっても行として出力する**——
+ *   `<a href="…"><img … data-apple-notes-zidentifier="…"></a>`(alt 無しの添付・描画
+ *   参照。design.md §13-2)のように、視覚テキストは無いが `body.ts`(BodyTransformer)
+ *   にとっては変換すべき実体を持つ行があるため。`extractLines`(メタデータ抽出専用)は
+ *   このテキスト空の行を末尾で除外し、従来どおり「テキストを持つ行だけ」を返す。
  */
-export function extractLines(bodyHtml: string): string[] {
-  const tree = unified().use(rehypeParse).parse(bodyHtml);
-  const containerChildren = resolveContainerChildren(tree);
-
-  const lines: string[] = [];
+export function groupContainerChildrenIntoLines(children: readonly RootContent[]): LineGroup[] {
+  const groups: LineGroup[] = [];
   let pendingInline: RootContent[] = [];
 
   const flushInline = (): void => {
     if (pendingInline.length === 0) {
       return;
     }
-    const text = extractText(pendingInline);
+    const nodes = pendingInline;
     pendingInline = [];
-    if (text !== '') {
-      lines.push(text);
+    const text = extractText(nodes);
+    const hasElement = nodes.some(isElement);
+    if (text !== '' || hasElement) {
+      groups.push({ text, nodes, kind: 'inline' });
     }
   };
 
-  for (const child of containerChildren) {
+  for (const child of children) {
     if (isElement(child) && child.tagName === 'br') {
       flushInline();
       continue;
@@ -135,7 +169,7 @@ export function extractLines(bodyHtml: string): string[] {
       flushInline();
       const text = extractText([child]);
       if (text !== '') {
-        lines.push(text);
+        groups.push({ text, nodes: [child], kind: 'block' });
       }
       continue;
     }
@@ -143,7 +177,24 @@ export function extractLines(bodyHtml: string): string[] {
   }
   flushInline();
 
-  return lines;
+  return groups;
+}
+
+/**
+ * bodyHtml を解析し、`resolveContainerChildren` が選んだコンテナ(`<div class="note-content">`。
+ * 無ければ `<body>`、それも無ければ木そのもの)直下の子を `groupContainerChildrenIntoLines` で
+ * 行に分解し、テキストを持つ行(`text !== ''`)だけをそのテキストで返す
+ * (`groupContainerChildrenIntoLines` はテキストの無い要素だけの行——alt 無しの `<img>`
+ * 参照など——も `body.ts` のために返すが、メタデータ抽出用のこの関数はそれを除外する)。
+ *
+ * 空の bodyHtml(パース結果にテキストを持つノードが一切無い)の場合は空配列を返す。
+ */
+export function extractLines(bodyHtml: string): string[] {
+  const tree = unified().use(rehypeParse).parse(bodyHtml);
+  const containerChildren = resolveContainerChildren(tree);
+  return groupContainerChildrenIntoLines(containerChildren)
+    .map((group) => group.text)
+    .filter((text) => text !== '');
 }
 
 /** `extractLines` の先頭要素(無ければ `''`)。design.md §5.3「1行目」の取得に使う。 */
