@@ -19,7 +19,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
@@ -166,6 +166,16 @@ export class StateStore {
       });
     }
 
+    // `version` はスキーマ全体の検証より先に単独で判定する。将来のバージョンで
+    // フィールドが増えた状態ファイルは `.strict()` の未知キー拒否に引っかかるため、
+    // 全体検証を先にすると「スキーマ不正」という誤解を招くメッセージになってしまう。
+    const versionOnly = z.object({ version: z.int() }).loose().safeParse(parsed);
+    if (versionOnly.success && versionOnly.data.version !== CURRENT_STATE_VERSION) {
+      throw new StateValidationError(
+        `state file version ${String(versionOnly.data.version)} does not match the supported version ${String(CURRENT_STATE_VERSION)}: ${statePath}`,
+      );
+    }
+
     const result = stateFileSchema.safeParse(parsed);
     if (!result.success) {
       throw new StateValidationError(
@@ -175,11 +185,6 @@ export class StateStore {
     }
     const state = result.data;
 
-    if (state.version !== CURRENT_STATE_VERSION) {
-      throw new StateValidationError(
-        `state file version ${String(state.version)} does not match the supported version ${String(CURRENT_STATE_VERSION)}: ${statePath}`,
-      );
-    }
     if (state.service !== service) {
       throw new StateValidationError(
         `state file service "${state.service}" does not match the configured service "${service}": ${statePath}`,
@@ -258,12 +263,22 @@ export class StateStore {
     const tempPath = `${this.statePath}.tmp-${String(process.pid)}-${randomBytes(6).toString('hex')}`;
     const json = `${JSON.stringify(this.state, null, 2)}\n`;
 
-    await writeFile(tempPath, json, 'utf8');
     try {
+      // rename の前に fsync で一時ファイルの内容をディスクへ到達させる。これがないと
+      // 電源断時に「rename は成功したが内容が空・不完全」な状態ファイルが残りうる。
+      const handle = await open(tempPath, 'w');
+      try {
+        await handle.writeFile(json, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await rename(tempPath, this.statePath);
     } catch (error) {
+      // 書き込み失敗(ディスク満杯等)・rename 失敗のどちらでも部分書き込みの
+      // 一時ファイルを残さない。後始末に失敗しても本来のエラーを隠さない。
       await rm(tempPath, { force: true }).catch(() => {
-        // 一時ファイルの後始末に失敗しても、本来投げるべきエラー(rename 失敗)を隠さない。
+        // 意図的に無視。
       });
       throw error;
     }

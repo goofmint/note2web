@@ -203,6 +203,38 @@ describe('StateStore', () => {
         PRECONDITION_FAILURE,
       );
     });
+
+    it('reports a version mismatch even when the future version adds unknown fields', async () => {
+      // 将来バージョンでフィールドが増えたファイルは .strict() の未知キー拒否にも
+      // 該当するが、原因は「未知バージョン」としてユーザーに伝わるべき。
+      const future = { ...validStateFileObject(), version: 2, addedInV2: true };
+      writeFileSync(statePath, JSON.stringify(future, null, 2));
+
+      const error = await StateStore.load({ statePath, service: SERVICE, target: TARGET }).catch(
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(StateValidationError);
+      expect((error as InstanceType<typeof StateValidationError>).message).toMatch(/version 2/);
+      expect((error as InstanceType<typeof StateValidationError>).message).not.toMatch(
+        /schema validation/,
+      );
+    });
+
+    it('rejects when the state path exists but is not readable as a file (EISDIR)', async () => {
+      // ENOENT(新規作成)以外の読み取り失敗経路。ディレクトリを statePath として
+      // 渡すことでモックなしで再現できる。
+      const error = await StateStore.load({
+        statePath: dir,
+        service: SERVICE,
+        target: TARGET,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(StateValidationError);
+      expect((error as InstanceType<typeof StateValidationError>).exitCode).toBe(
+        PRECONDITION_FAILURE,
+      );
+    });
   });
 
   describe('load: round-trip', () => {
