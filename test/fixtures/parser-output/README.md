@@ -16,7 +16,7 @@
 
 `notes_cloud_ripper.rb`(該当パーサのエントリポイント)を読むと、`--individual-files` 指定時の出力は次の構成になる(`notes_cloud_ripper.rb:241-275` 付近):
 
-```
+```text
 <output_dir>/
   csv/                                  # 本フィクスチャには含めない(note2web は使用しない)
   html/
@@ -46,7 +46,7 @@
 
 ## フィクスチャの内容
 
-1 アカウント(`Sample Notes`)、2 フォルダ(`Tech` がルート、`Archive` が `Tech` の子フォルダ)、4 ノート。UUID・時刻・本文はすべて架空のダミー値(実データは一切含まれない)。
+1 アカウント(`Sample Notes`)、3 フォルダ(`Tech` がルート、`Archive` が `Tech` の子フォルダ、`Dev/Ops: Log` が記号を含むルートフォルダ)、5 ノート。UUID・時刻・本文はすべて架空のダミー値(実データは一切含まれない)。
 
 | ノート | UUID | フォルダ | 検証対象 | 確認区分 |
 |---|---|---|---|---|
@@ -54,6 +54,7 @@
 | Grocery Checklist | `55555555-…` | Tech(ルート) | チェックリストの HTML 表現(§13-1, FR-12) | **実行検証**: `list_indents_gzipped.bin`(実データ)を `AppleNote#generate_html` で実行し、`<ul class="checklist" data-apple-notes-indent-amount="N"><li class="checked">` / `<li class="unchecked">` のネスト構造を実出力のまま流用(テキストのみ差し替え) |
 | Whiteboard Sketch | `66666666-…` | Tech(ルート) | 描画(drawing)の抽出・参照形式(§13-2, FR-13) | **ソース確認 + 経路推論**: `AppleNotesEmbeddedDrawing`(`lib/AppleNotesEmbeddedDrawing.rb`)のファイル配置規約と `generate_html_with_images`(`lib/AppleNotesEmbeddedObject.rb`)の `<a><img></a>` 生成コードを読解して構成。フォールバック画像そのもの(実データの手書き protobuf)は exported_blobs に含まれていないため、この部分は実行検証ではない |
 | 🚀 Launch Notes | `77777777-…` | Tech/Archive(子フォルダ) | 絵文字タイトル・ハッシュタグ・ネストフォルダ(FR-04〜07) | **ソース確認**: `AppleNotesEmbeddedInlineHashtag#to_s` がプレーンテキストの `#タグ` をそのまま返す(ラップ用タグなし)ことをソースで確認。絵文字タイトル自体は emoji_formatting 系 blob の実行結果(本文中の絵文字保持)と整合 |
+| Ops Log | `eeeeeeee-…` | Dev/Ops: Log(記号入りルート) | フォルダ名の `clean_name` サニタイズ(`/`・`:`・`\` → `_`)によるディレクトリ名 `Sample Notes-Dev_Ops_ Log/`(§5.2 のパス再構築規約) | **ソース確認**: `AppleNotesAccount#clean_name` / `AppleNotesFolder#clean_name`(いずれも `name.tr('/:\\', '_')`)と `AppleNotesFolder#to_path` を読解。JSON にはサニタイズ前の名前(`Dev/Ops: Log`)が入り、ディレクトリ名だけが置換される |
 | (JSON トップレベル) | — | — | JSON スキーマ全体(§13-7) | **ソース確認 + 公式ドキュメント**: `JSON.md` と `lib/AppleNoteStore.rb#prepare_json` / `AppleNote#prepare_json` / `AppleNotesFolder#prepare_json` / `AppleNotesAccount#prepare_json` / `AppleNotesEmbeddedObject#prepare_json` / `AppleNotesEmbeddedTable#prepare_json` を直接読解し、フィールド名・入れ子構造をそのまま採用。時刻書式 (`"YYYY-MM-DD HH:MM:SS +0000"`) は実行時に `Time#to_s` 相当の実出力で確認 |
 | (フォルダ階層 index.html) | — | — | フォルダ / アカウントの一覧ページ | **ソース確認のみ(未実行)**: `AppleNotesAccount#generate_html` / `AppleNotesFolder#generate_html` はデータベース接続を要求するため、このタスクの実行環境(実 SQLite 無し)では実行できなかった。構造はソースコードの `Nokogiri::HTML::Builder` 呼び出しを読んで組み立てた近似であり、実行検証ではない |
 

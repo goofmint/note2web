@@ -35,6 +35,16 @@
         }
       },
       "html": "<div>\n<h1><a id=\"folder_10\">Sample Notes - Tech</a></h1>\n<ul></ul>\n</div>"
+    },
+    "12": {
+      "primary_key": 12,
+      "uuid": "dddddddd-4444-4ddd-8ddd-dddddddddddd",
+      "name": "Dev/Ops: Log",
+      "account_id": 1,
+      "account": "Sample Notes",
+      "parent_folder_id": null,
+      "child_folders": {},
+      "html": "<div>\n<h1><a id=\"folder_12\">Sample Notes - Dev/Ops: Log</a></h1>\n<ul></ul>\n</div>"
     }
   },
   "notes": {
@@ -185,6 +195,28 @@
         }
       ],
       "hashtags": ["#planning", "#launch", "#productivity"],
+      "mentions": []
+    },
+    "205": {
+      "account_key": 1,
+      "account": "Sample Notes",
+      "folder_key": 12,
+      "folder": "Dev/Ops: Log",
+      "note_id": 205,
+      "uuid": "eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee",
+      "primary_key": 205,
+      "creation_time": "2026-01-20 08:00:00 +0000",
+      "modify_time": "2026-01-20 08:05:00 +0000",
+      "cloudkit_creator_id": null,
+      "cloudkit_modifier_id": null,
+      "cloudkit_last_modified_device": null,
+      "is_pinned": false,
+      "is_password_protected": false,
+      "title": "Ops Log",
+      "plaintext": "Ops Log\n\nDeployed version 1.2.3 to production.\n",
+      "html": "<div>\n<h1><a id=\"note_205\">Note 205</a></h1>\n<div>\n<b>Account:</b> Sample Notes</div>\n<div>\n<b>Folder:</b> <span><a href=\"#folder_12\">Dev/Ops: Log</a></span>\n</div>\n<div>\n<b>Title:</b> Ops Log</div>\n<div>\n<b>Created:</b> 2026-01-20 08:00:00 +0000</div>\n<div>\n<b>Modified:</b> 2026-01-20 08:05:00 +0000</div>\n<div class=\"note-content\">\n<h1>Ops Log<br>\n</h1>\n<br>Deployed version 1.2.3 to production.</div>\n</div>",
+      "embedded_objects": [],
+      "hashtags": [],
       "mentions": []
     }
   }
