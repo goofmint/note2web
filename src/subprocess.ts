@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process';
 import { stat, access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 
 /**
@@ -51,7 +52,11 @@ export interface RunSubprocessOptions {
   args: string[];
   /** 作業ディレクトリ。未指定なら現在の作業ディレクトリ。 */
   cwd?: string;
-  /** 子プロセスへ渡す環境変数。未指定なら `process.env` をそのまま渡す。 */
+  /**
+   * 子プロセスへ渡す環境変数。指定した場合は `process.env` とマージされ
+   * (`{ ...process.env, ...env }`)、キーが重なる項目は `env` の値が優先される。
+   * 未指定なら `process.env` をそのまま渡す。
+   */
   env?: Record<string, string>;
   /** タイムアウト(ミリ秒)。未指定なら `DEFAULT_TIMEOUTS.default`。 */
   timeoutMs?: number;
@@ -78,8 +83,11 @@ export interface RunSubprocessResult {
  *
  * タイムアウトを超過すると `process.kill(-pid, 'SIGTERM')` でプロセスグループ全体へ
  * SIGTERM を送り、`termGraceMs` 待っても子プロセスが残っていれば `SIGKILL` を送る。
- * タイマーは `close` イベント(stdout/stderr のフラッシュ完了後に発火する)で必ず解除し、
- * ゾンビタイマー・ハンドルを残さない。
+ * 直接の子プロセスの `close`(stdout/stderr のフラッシュ完了後に発火する)は即座に
+ * `runSubprocess` の結果を確定させるが、タイムアウト経路で武装済みの猶予タイマーは
+ * 直接の子の `close` では取り消さない — SIGTERM を無視する孫プロセスが残っていても
+ * `termGraceMs` 経過後に確実にプロセスグループへ SIGKILL が送られるようにするためで、
+ * このタイマーは `unref()` 済みのためイベントループを保持し続けることはない。
  *
  * 戻り値は以下のいずれかに分類される:
  * - `status: 'success'`(exit code 0)
@@ -103,27 +111,29 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd,
-      env: env ?? process.env,
+      env: env !== undefined ? { ...process.env, ...env } : process.env,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let settled = false;
 
     let timeoutTimer: NodeJS.Timeout | undefined;
+    // タイムアウト経路で武装(arm)された後は、直接の子プロセスが `close` しても
+    // (孫プロセスが SIGTERM を無視して生き残っているかもしれないため)
+    // `graceTimer` を取り消さない。`termGraceMs` 経過後に無条件でプロセスグループへ
+    // SIGKILL を送ってから、自身をクリアする。
     let graceTimer: NodeJS.Timeout | undefined;
 
-    const clearTimers = (): void => {
+    const clearTimeoutTimer = (): void => {
       if (timeoutTimer !== undefined) {
         clearTimeout(timeoutTimer);
         timeoutTimer = undefined;
-      }
-      if (graceTimer !== undefined) {
-        clearTimeout(graceTimer);
-        graceTimer = undefined;
       }
     };
 
@@ -139,18 +149,22 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
     };
 
     child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
+      stdout += stdoutDecoder.write(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
+      stderr += stderrDecoder.write(chunk);
     });
 
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       killProcessGroup('SIGTERM');
       graceTimer = setTimeout(() => {
+        // 直接の子が既に `close` していても関知せず、プロセスグループ全体へ
+        // 無条件で SIGKILL を送る(既に全滅していれば ESRCH を無視するだけ)。
         killProcessGroup('SIGKILL');
+        graceTimer = undefined;
       }, termGraceMs);
+      graceTimer.unref();
     }, timeoutMs);
 
     const finish = (result: RunSubprocessResult): void => {
@@ -158,7 +172,10 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
         return;
       }
       settled = true;
-      clearTimers();
+      // `timeoutTimer` は結果確定と同時に不要になるので必ず解除する。一方
+      // `graceTimer` はタイムアウト経路で既に武装されていれば解除せず、上記の
+      // SIGKILL エスカレーションを完走させる(孫プロセスの取り残し防止)。
+      clearTimeoutTimer();
 
       if (result.status === 'failure' && logger !== undefined) {
         logger.warn({
@@ -172,6 +189,10 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
     child.on('error', (error) => {
       // 実行ファイルが存在しない等、起動自体に失敗した場合。`close` が後続しない実装差にも
       // 対応できるよう、ここで確定させる(`close` が来ても `settled` ガードで二重解決しない)。
+      // design.md §6 は失敗分類を timeout / exit_code / signal の3種のみと定めており、
+      // ENOENT のような起動失敗を表す専用分類は存在しない。そのためここでは
+      // `exit_code`(`exitCode: null`)へ意図的に丸めている。呼び出し側でコマンドの
+      // 存在を事前に区別したい場合は `commandExists` で事前検証すること。
       finish({
         status: 'failure',
         classification: 'exit_code',
@@ -183,6 +204,9 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
     });
 
     child.on('close', (code, signal) => {
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
+
       if (timedOut) {
         finish({
           status: 'failure',

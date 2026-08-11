@@ -127,6 +127,31 @@ describe('runSubprocess', () => {
     expect(result.signal).toBe('SIGKILL');
   });
 
+  it('keeps the grace timer armed to SIGKILL a grandchild after the direct child exits on SIGTERM', async () => {
+    const pidFile = join(dir, 'pids.txt');
+
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('term-exits-child-ignores-grandchild.js'), pidFile],
+      timeoutMs: 300,
+      termGraceMs: 300,
+    });
+
+    // 直接の子は SIGTERM を受けて素直に終了するので `close` は timeout 経由で
+    // すぐ発火する。ここで runSubprocess が既に解決していることが、この経路の
+    // バグ(graceTimer が close で取り消されてしまう)を再現する前提になる。
+    expect(result.status).toBe('failure');
+    expect(result.classification).toBe('timeout');
+
+    const [, grandchildPidRaw] = readFileSync(pidFile, 'utf8').trim().split('\n');
+    const grandchildPid = Number(grandchildPidRaw);
+    expect(Number.isInteger(grandchildPid)).toBe(true);
+
+    // runSubprocess は既に resolve 済みだが、termGraceMs 分の猶予が経過するまでは
+    // 孫プロセスがまだ生きていてよい。猶予経過後に確実に死んでいることを確認する。
+    await waitUntilDead(grandchildPid, 2000);
+  });
+
   it('reports the failure classification to an injected logger', async () => {
     const warn = vi.fn();
 
@@ -167,6 +192,33 @@ describe('runSubprocess', () => {
     });
     expect(result.status).toBe('success');
   });
+
+  it('gives the child stdin an immediate EOF instead of hanging (stdio[0] = ignore)', async () => {
+    // stdin を実際に EOF まで読み切るスクリプトを短いタイムアウトで実行し、
+    // ハングせず len=0 で終わることを直接検証する。
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('read-stdin.js')],
+      timeoutMs: 2000,
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.stdout).toContain('stdin-eof:0');
+  });
+
+  it('merges options.env over process.env, with the passed values winning', async () => {
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('print-env.js')],
+      timeoutMs: 2000,
+      env: { X: '1' },
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.stdout).toContain('X=1');
+    // process.env(PATH を含む)がベースとして保持され続けていることを確認する。
+    expect(result.stdout).toContain('PATH_PRESENT=1');
+  });
 });
 
 describe('commandExists', () => {
@@ -180,16 +232,11 @@ describe('commandExists', () => {
 
   it('resolves true for a command name found via PATH', async () => {
     const nodeDir = dirname(process.execPath);
-    const originalPath = process.env.PATH;
-    process.env.PATH = `${nodeDir}${delimiter}${originalPath ?? ''}`;
+    vi.stubEnv('PATH', `${nodeDir}${delimiter}${process.env.PATH ?? ''}`);
     try {
       await expect(commandExists(basename(process.execPath))).resolves.toBe(true);
     } finally {
-      if (originalPath === undefined) {
-        delete process.env.PATH;
-      } else {
-        process.env.PATH = originalPath;
-      }
+      vi.unstubAllEnvs();
     }
   });
 
