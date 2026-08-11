@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 
@@ -66,8 +67,14 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
   }
 
-  if (!existsSync(configPath)) {
-    stderr.push(`note2web: config file not found: ${configPath}`);
+  let isFile: boolean;
+  try {
+    isFile = statSync(configPath).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) {
+    stderr.push(`note2web: config file not found or not a regular file: ${configPath}`);
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
   }
 
@@ -85,11 +92,21 @@ async function main(): Promise<void> {
   for (const line of result.stderr) {
     process.stderr.write(`${line}\n`);
   }
-  process.exit(result.exitCode);
+  // process.exit() はパイプ接続時に未フラッシュの出力を破棄しうるため、
+  // exitCode を設定して自然終了させる。
+  process.exitCode = result.exitCode;
 }
 
-const isMainModule =
-  process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
+/**
+ * 実行中のモジュールがエントリポイントかを判定する。
+ * 手組みの `file://` 連結はパスに空白・`#`・`%` を含むと `import.meta.url` と
+ * 一致しなくなるため、`pathToFileURL` で正規化して比較する。
+ */
+export function isMainEntry(importMetaUrl: string, argv1: string | undefined): boolean {
+  return argv1 !== undefined && importMetaUrl === pathToFileURL(argv1).href;
+}
+
+const isMainModule = isMainEntry(import.meta.url, process.argv[1]);
 
 if (isMainModule) {
   void main();

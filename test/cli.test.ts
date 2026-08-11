@@ -1,8 +1,9 @@
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runCli } from '../src/cli.js';
+import { isMainEntry, runCli } from '../src/cli.js';
 import { PRECONDITION_FAILURE, SUCCESS } from '../src/exit-codes.js';
 
 describe('runCli', () => {
@@ -64,5 +65,46 @@ describe('runCli', () => {
     expect(result.exitCode).toBe(SUCCESS);
     expect(result.stdout.join('\n')).toMatch(/not implemented yet/);
     expect(result.stderr).toHaveLength(0);
+  });
+
+  it('exits 2 with an error when --config points to a directory', async () => {
+    const dirPath = join(dir, 'config-dir');
+    mkdirSync(dirPath);
+
+    const result = await runCli(['sync', '--config', dirPath]);
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.stderr.join('\n')).toContain(dirPath);
+  });
+});
+
+describe('isMainEntry', () => {
+  it('returns false when argv[1] is undefined', () => {
+    expect(isMainEntry('file:///opt/app/dist/cli.js', undefined)).toBe(false);
+  });
+
+  it('matches plain paths', () => {
+    const path = '/opt/app/dist/cli.js';
+    expect(isMainEntry(pathToFileURL(path).href, path)).toBe(true);
+  });
+
+  it.each([
+    '/opt/note 2 web/dist/cli.js',
+    '/opt/note#2web/dist/cli.js',
+    '/opt/note%2web/dist/cli.js',
+  ])(
+    'matches paths with special characters that break naive file:// concatenation (%s)',
+    (path) => {
+      const importMetaUrl = pathToFileURL(path).href;
+      expect(isMainEntry(importMetaUrl, path)).toBe(true);
+      // 手組み連結では一致しない(旧実装の回帰確認)
+      expect(importMetaUrl === `file://${path}`).toBe(false);
+    },
+  );
+
+  it('returns false for a different module path', () => {
+    expect(isMainEntry(pathToFileURL('/opt/app/dist/cli.js').href, '/opt/app/dist/other.js')).toBe(
+      false,
+    );
   });
 });
