@@ -38,7 +38,7 @@ const assetsSchema = z
   .object({
     provider: z.enum(['r2', 's3']),
     bucket: z.string().min(1),
-    endpoint: z.string().min(1).optional(),
+    endpoint: z.url().optional(),
     region: z.string().min(1).optional(),
     prefix: z.string().min(1).optional(),
     public_base_url: z.url(),

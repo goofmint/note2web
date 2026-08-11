@@ -274,6 +274,41 @@ describe('loadConfig', () => {
     }
   });
 
+  it('rejects an r2 endpoint that is not a valid URL', () => {
+    const configPath = join(dir, 'config.yaml');
+    writeFileSync(
+      configPath,
+      [
+        'service: zenn',
+        'source:',
+        '  folders: [tech]',
+        'assets:',
+        '  provider: r2',
+        '  bucket: blog-assets',
+        '  endpoint: not-a-url',
+        '  public_base_url: https://assets.example.com/notes/',
+        '  access_key_id_env: R2_ACCESS_KEY_ID',
+        '  secret_access_key_env: R2_SECRET_ACCESS_KEY',
+        'git:',
+        '  repo_path: ~/src/zenn-content',
+        '  base_branch: main',
+        '  output_dir: articles',
+        '',
+      ].join('\n'),
+    );
+
+    try {
+      loadConfig(configPath);
+      expect.unreachable('loadConfig should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigValidationError);
+      const validationError = error as ConfigValidationError;
+      expect(validationError.problems.some((problem) => problem.path === 'assets.endpoint')).toBe(
+        true,
+      );
+    }
+  });
+
   it('rejects a directly-written secret value as an unknown key (FR-30)', () => {
     const configPath = join(dir, 'config.yaml');
     writeFileSync(
