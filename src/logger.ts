@@ -6,7 +6,7 @@
  * 型で揃った状態を保証する。
  */
 
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync, readSync, statSync } from 'node:fs';
 
 /** ログレベル。`warn` イベント以外は常に `info`。 */
 export type LogLevel = 'info' | 'warn';
@@ -209,7 +209,25 @@ export function createLogger(options: CreateLoggerOptions = {}): Logger {
     const line = `${JSON.stringify(event)}\n`;
     process.stdout.write(line);
     if (file !== undefined) {
-      appendFileSync(file, line);
+      // 既存ファイルが末尾改行なしで終わっている場合でも
+      // 1行1JSON(JSON Lines)を維持するため、改行を1つ補ってから追記する。
+      let needsLeadingNewline = false;
+      try {
+        const stat = statSync(file);
+        if (stat.size > 0) {
+          const fd = openSync(file, 'r');
+          try {
+            const lastByte = Buffer.alloc(1);
+            readSync(fd, lastByte, 0, 1, stat.size - 1);
+            needsLeadingNewline = lastByte[0] !== 0x0a;
+          } finally {
+            closeSync(fd);
+          }
+        }
+      } catch {
+        needsLeadingNewline = false;
+      }
+      appendFileSync(file, needsLeadingNewline ? `\n${line}` : line);
     }
   }
 
@@ -222,25 +240,25 @@ export function createLogger(options: CreateLoggerOptions = {}): Logger {
       emit({ ...withTs('info'), event: 'run_start' });
     },
     runEnd(payload) {
-      emit({ ...withTs('info'), event: 'run_end', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'run_end' });
     },
     exportDone(payload) {
-      emit({ ...withTs('info'), event: 'export_done', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'export_done' });
     },
     notePublished(payload) {
-      emit({ ...withTs('info'), event: 'note_published', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'note_published' });
     },
     noteSkipped(payload) {
-      emit({ ...withTs('info'), event: 'note_skipped', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'note_skipped' });
     },
     noteFailed(payload) {
-      emit({ ...withTs('info'), event: 'note_failed', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'note_failed' });
     },
     assetUploaded(payload) {
-      emit({ ...withTs('info'), event: 'asset_uploaded', ...payload });
+      emit({ ...payload, ...withTs('info'), event: 'asset_uploaded' });
     },
     warn(payload) {
-      emit({ ...withTs('warn'), event: 'warn', ...payload });
+      emit({ ...payload, ...withTs('warn'), event: 'warn' });
     },
   };
 }

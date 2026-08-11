@@ -305,6 +305,20 @@ describe('createLogger file output', () => {
     expect(JSON.parse(lines[1]!)).toMatchObject({ event: 'run_start' });
   });
 
+  it('keeps JSON Lines integrity when the existing file lacks a trailing newline', () => {
+    writeFileSync(filePath, '{"existing":true}');
+    const logger = createLogger({ file: filePath, now: () => new Date('2026-08-11T00:00:00Z') });
+
+    logger.runStart();
+
+    const lines = readFileSync(filePath, 'utf8')
+      .split('\n')
+      .filter((line) => line.length > 0);
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!)).toEqual({ existing: true });
+    expect(JSON.parse(lines[1]!)).toMatchObject({ event: 'run_start' });
+  });
+
   it('does not create a file when file is not configured', () => {
     const logger = createLogger({ now: () => new Date('2026-08-11T00:00:00Z') });
     logger.runStart();
