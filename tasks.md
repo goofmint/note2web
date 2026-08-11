@@ -130,7 +130,7 @@ flowchart LR
 
 #### T-12 正規化 serializer とコンテンツハッシュ(M)
 - §5.6: キー順固定・全文字列ダブルクォートの決定的 YAML serializer、`timezone` 固定オフセットの日時文字列化、UTF-8 / LF / NFC 正規化、SHA-256
-- **受け入れ条件**: golden test(YAML 境界値: `null` / 数値 / 日時に見える文字列、`:` `#` `"` `\` 改行を含む文字列)で直列化結果とハッシュ値が固定される
+- **受け入れ条件**: golden test(YAML 境界値: `null` / 数値 / 日時に見える文字列、`:` `#` `"` `\` 改行を含む文字列)で直列化結果とハッシュ値が固定される。加えて正規化の不変条件を検証する: キー順を入れ替えた同値入力、CRLF と LF、NFC と NFD の各同値入力が同一の正規化結果・同一ハッシュになること、設定 `timezone` により日時文字列が実行環境の TZ によらず期待どおり固定されること
 
 #### T-13 AssetUploader(M)
 - AWS SDK v3 による R2 / S3 アップロード、content hash キー(`prefix + hash先頭2文字/hash.ext`)、StateStore による既アップロードスキップ + 成功時即時保存、本文プレースホルダ(T-11 で定義した形式)の URL 差し替え
@@ -151,7 +151,7 @@ flowchart LR
 
 #### T-16 GitRepoPublisher 共通基盤(L)
 - §5.7: `note2web/sync-<UTC時刻>` ブランチ作成、ファイル書き込み + 保留リスト、差分ゼロならブランチ破棄、コミット・push・`gh pr create`、`auto_merge` 時の `gh pr merge`、PR 作成成功後の一括状態確定、`GH_TOKEN` 検証
-- **受け入れ条件**: モック git / gh で各シナリオが design.md §5.7 どおりであること: 「差分なし」= ブランチ破棄・状態未更新、「push / PR 作成失敗」= 状態未更新で次回再試行、「PR 作成成功」= 状態保存、「auto_merge のマージ失敗」= **状態は保存済みのまま** PR を残して実行を失敗扱い。また `auto_merge: false` で PR が手動クローズされた場合、次回 sync ではハッシュ一致により skip され(再配信しない)、ノート変更時に再配信されることを検証する
+- **受け入れ条件**: モック git / gh で各シナリオが design.md §5.7 どおりであること: 「差分なし」= ブランチ破棄・状態未更新、「push / PR 作成失敗」= 状態未更新で次回再試行、「PR 作成成功」= 状態保存、「auto_merge のマージ失敗」= **状態は保存済みのまま** PR を残して実行を失敗扱い。また `auto_merge: false` で PR が手動クローズされた場合、次回 sync ではハッシュ一致により skip され(再配信しない)、ノート変更時に再配信されることを検証する。さらに `GH_TOKEN` が未設定・空・認証失敗の場合、ブランチ作成・push・PR 作成のいずれの Git / gh 書き込みも行わず、StateStore も更新せずに exit 2 となること(T-15 の検証が全 Git 副作用より前に実行されること)を検証する
 
 #### T-17 ZennPublisher(S)
 - `articles/<uuid小文字>.md`、frontmatter(`title` / `emoji`(既定 📝)/ `type` / `topics` / `published`)、フォルダ名が `tech` / `idea` 以外なら failed
@@ -175,11 +175,11 @@ flowchart LR
 
 #### T-22 DevtoPublisher(M)
 - §5.7 の wire contract(`{"article":{...}}`、ヘッダ、カンマ区切りタグ最大4個、条件付き `canonical_url`)、レスポンス `id` / `url` の保存、タイムアウト 30 秒・POST 非リトライ、`remoteId` 欠落時のタイトル照合(**1件一致のみ採用**。0件 = 新規作成、複数一致 = failed で状態未更新)
-- **受け入れ条件**: HTTP モックで新規 / 更新 / 応答不明→照合復旧のテスト。照合は「1件一致 → 採用」「0件 → 新規作成」「**重複タイトルで複数一致 → failed(誤った記事へ紐付けない・状態未更新)**」の3ケースを検証する
+- **受け入れ条件**: HTTP モックで新規 / 更新 / 応答不明→照合復旧のテスト。照合は「1件一致 → 採用」「0件 → 新規作成」「**重複タイトルで複数一致 → failed(誤った記事へ紐付けない・状態未更新)**」の3ケースを検証する。wire contract の検証として、リクエスト本文(`{"article":{…}}`)・ヘッダ・タグ上限4個・条件付き `canonical_url`・レスポンス `id` / `url` の状態保存を HTTP モックで確認し、タイムアウト時に POST が再送されないこと、失敗分類とログが正しいことも検証する
 
 #### T-23 HatenaPublisher(M)
 - AtomPub XML 生成(`text/x-markdown`、`category`)、Basic 認証、POST / PUT、entry_id 抽出、タイトル照合による復旧(T-22 と同じ規則: 1件一致のみ採用、複数一致は failed)。実機ブログで Markdown 入稿を確認し §13-5 を解消
-- **受け入れ条件**: XML 生成の golden test。HTTP モックで新規 / 更新 / 照合3ケース(1件・0件・重複タイトル)。実機確認結果が design.md に反映される
+- **受け入れ条件**: XML 生成の golden test。HTTP モックで新規 / 更新 / 照合3ケース(1件・0件・重複タイトル)に加え、リクエスト URL・POST / PUT の使い分け・Basic 認証ヘッダ・レスポンスからの entry_id 抽出を個別に検証する。§13-5 の実機確認は「実機ブログへの Markdown 入稿が成功すること」を条件とし、結果を design.md に反映する
 
 #### T-24 スパイク: noet 検証(M)
 - §13-4,6: noet のコマンド体系・認証・記事 ID の取得方法、note.com での外部画像 URL(R2 / S3)の扱いを実機確認し、design.md に反映
