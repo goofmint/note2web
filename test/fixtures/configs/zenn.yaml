@@ -1,0 +1,17 @@
+service: zenn
+source:
+  folders: [tech, idea]
+assets:
+  provider: r2
+  bucket: blog-assets
+  endpoint: https://example-account.r2.cloudflarestorage.com
+  region: auto
+  prefix: notes/
+  public_base_url: https://assets.example.com/notes/
+  access_key_id_env: R2_ACCESS_KEY_ID
+  secret_access_key_env: R2_SECRET_ACCESS_KEY
+git:
+  repo_path: ~/src/zenn-content
+  base_branch: main
+  output_dir: articles
+  auto_merge: true

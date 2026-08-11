@@ -1,0 +1,13 @@
+service: hatena
+source:
+  folders: [tech]
+assets:
+  provider: s3
+  bucket: blog-assets-hatena
+  public_base_url: https://assets.example.com/notes/
+  access_key_id_env: HATENA_S3_ACCESS_KEY_ID
+  secret_access_key_env: HATENA_S3_SECRET_ACCESS_KEY
+hatena:
+  hatena_id: example
+  blog_id: example.hatenablog.com
+  api_key_env: HATENA_API_KEY

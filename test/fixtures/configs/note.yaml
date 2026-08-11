@@ -1,0 +1,11 @@
+service: note
+source:
+  folders: [tech]
+assets:
+  provider: s3
+  bucket: blog-assets-note
+  public_base_url: https://assets.example.com/notes/
+  access_key_id_env: NOTE_S3_ACCESS_KEY_ID
+  secret_access_key_env: NOTE_S3_SECRET_ACCESS_KEY
+note:
+  workspace: ~/src/note-content
