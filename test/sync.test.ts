@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ import type {
 import type { NoteState, StateFile } from '../src/state/store.js';
 import { runSync, type RunSyncOptions } from '../src/sync.js';
 import type { RunSubprocessOptions } from '../src/subprocess.js';
+import { renderZennArticle } from '../src/publishers/zenn.js';
 
 /**
  * `node:fs/promises` の `rename` だけを差し替え可能にするモック(`test/state.test.ts` と
@@ -897,5 +898,106 @@ describe('runSync', () => {
 
     // 状態 JSON には一切反映されない(NFR-06。次回再試行される)。
     expect(existsSync(statePath)).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // T-17(issue #22)対応分: 実際の renderZennArticle を注入した E2E — type 不正ノートの隔離
+  // (FR-24)。cli.ts が config.service === 'zenn' のとき自動的に選ぶ Renderer
+  // (`src/publishers/factory.ts` の `resolveRenderer`)を、ここでは明示的に `renderNote` へ
+  // 注入して runSync レベルで検証する。fixture のフォルダ名(Tech/Archive/Dev/Ops: Log)は
+  // どれも Zenn の type 制約(厳密に tech/idea)を満たさないため、対象ノートの `folder`
+  // フィールドだけを JSON 上で書き換えて「有効な type」と「無効な type」を混在させる
+  // (folder_key はそのままなので source.folders によるフィルタ対象からは外れない)。
+  // ---------------------------------------------------------------------------
+
+  describe('with the real Zenn renderer (T-17)', () => {
+    /**
+     * コピー済み fixture の `json/all_notes_1.json` を読み、指定した note key(JSON トップ
+     * レベルの `notes` のキー。UUID ではない)の `folder` フィールドだけを書き換える。
+     * `folder_key`(フォルダ階層によるフィルタに使われる)には触れないため、
+     * `source.folders` による対象ノートの絞り込み結果は変わらない。
+     */
+    async function rewriteNoteFolder(
+      outDir: string,
+      noteKey: string,
+      folder: string,
+    ): Promise<void> {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const raw = JSON.parse(await readFile(jsonPath, 'utf8')) as {
+        notes: Record<string, { folder: string }>;
+      };
+      const note = raw.notes[noteKey];
+      if (note === undefined) {
+        throw new Error(`test fixture: note key "${noteKey}" not found in ${jsonPath}`);
+      }
+      note.folder = folder;
+      await writeFile(jsonPath, JSON.stringify(raw), 'utf8');
+    }
+
+    it('isolates the invalid-type note: 1 note with folder rewritten to "tech" publishes, the other 3 (Tech/Tech/Archive) fail with InvalidZennTypeError, exit 1', async () => {
+      // fixture note key "201" == uuid TECH_SALES_TABLE_UUID(folder "Tech" in the raw JSON).
+      const { runner } = makeFixtureRunner((outDir) => rewriteNoteFolder(outDir, '201', 'tech'));
+      const { logger, events } = createFakeLogger();
+      const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
+
+      const result = await runSync({
+        config: buildGitConfig({ source: { folders: ['Tech'] } }),
+        publisher: mock.publisher,
+        renderNote: renderZennArticle,
+        ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+      });
+
+      // Tech ルート3件(201 tech に書き換え済み/202 Tech のまま/203 Tech のまま)
+      // + Archive(Tech 配下)1件(204 Archive のまま)= 4件、うち folder "tech" の1件のみ成功。
+      expect(result).toMatchObject({
+        exitCode: PARTIAL_FAILURE,
+        published: 1,
+        skipped: 0,
+        failed: 3,
+      });
+      expect(events).toContain(`note_published:${TECH_SALES_TABLE_UUID}:created`);
+      expect(events).toContain(`note_failed:${TECH_GROCERY_CHECKLIST_UUID}`);
+      expect(events).toContain(`note_failed:${TECH_WHITEBOARD_SKETCH_UUID}`);
+      expect(events).toContain(`note_failed:${ARCHIVE_NOTE_UUID}`);
+
+      // 成功した1件は Publisher.publish() へ Zenn 規約どおりの articles/<uuid小文字>.md で渡る。
+      expect(mock.publishCalls).toHaveLength(1);
+      expect(mock.publishCalls[0]?.article.artifactPath).toBe(
+        `articles/${TECH_SALES_TABLE_UUID}.md`,
+      );
+
+      // 失敗した3件は状態に一切反映されない(NFR-06)。成功した1件のみ finalize() 経由で確定。
+      const onDisk = readStateFile(statePath);
+      expect(onDisk.notes[TECH_SALES_TABLE_UUID]).toBeDefined();
+      expect(onDisk.notes[TECH_GROCERY_CHECKLIST_UUID]).toBeUndefined();
+      expect(onDisk.notes[TECH_WHITEBOARD_SKETCH_UUID]).toBeUndefined();
+      expect(onDisk.notes[ARCHIVE_NOTE_UUID]).toBeUndefined();
+    });
+
+    it('all notes valid ("tech"/"idea"): every note publishes via the real Zenn renderer', async () => {
+      const { runner } = makeFixtureRunner(async (outDir) => {
+        await rewriteNoteFolder(outDir, '204', 'idea'); // Archive/🚀 Launch Notes → idea
+      });
+      const { logger } = createFakeLogger();
+      const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
+
+      const result = await runSync({
+        config: buildGitConfig({ source: { folders: ['Archive'] } }),
+        publisher: mock.publisher,
+        renderNote: renderZennArticle,
+        ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+      });
+
+      expect(result).toMatchObject({ exitCode: SUCCESS, published: 1, skipped: 0, failed: 0 });
+      expect(mock.publishCalls).toHaveLength(1);
+      const article = mock.publishCalls[0]?.article;
+      // Archive ノートは絵文字タイトル("🚀 Launch Notes")→ 先頭絵文字を emoji として抽出済み、
+      // タグは #planning/#launch/#productivity → topics は "#" を除いた語(モジュール冒頭 JSDoc)。
+      expect(article?.artifact).toContain('emoji: "🚀"');
+      expect(article?.artifact).toContain('type: "idea"');
+      expect(article?.artifact).toContain('topics: ["planning","launch","productivity"]');
+      expect(article?.artifact).toContain('published: true');
+      expect(article?.artifactPath).toBe(`articles/${ARCHIVE_NOTE_UUID}.md`);
+    });
   });
 });
