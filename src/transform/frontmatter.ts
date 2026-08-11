@@ -126,9 +126,24 @@ function serializeFrontmatterValue(value: FrontmatterValue): string {
 // frontmatter ブロック全体の直列化。
 // ---------------------------------------------------------------------------
 
-/** 1エントリを `key: value` の1行(末尾改行なし)に直列化する。 */
+/**
+ * frontmatter キーとして安全な文字集合。design.md §5.7 の全キー(`title` /
+ * `emoji` / `published_at` 等)は ASCII の英数字とアンダースコアのみで構成される。
+ * 改行・引用符・`:` 等を含むキーは YAML の構造を壊しうるため、クォートで守るの
+ * ではなく検証で拒否する(キーは呼び出し側=Renderer が §5.7 の定数から渡す前提で、
+ * 動的な値が来ること自体が誤用であるため)。
+ */
+const SAFE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** 1エントリを `key: value` の1行(末尾改行なし)に直列化する。キーは NFC 正規化し、安全な文字集合のみ許可する。 */
 export function serializeFrontmatterEntry(entry: FrontmatterEntry): string {
-  const [key, value] = entry;
+  const [rawKey, value] = entry;
+  const key = rawKey.normalize('NFC');
+  if (!SAFE_KEY_PATTERN.test(key)) {
+    throw new RangeError(
+      `frontmatter key must match ${SAFE_KEY_PATTERN.source} (got ${JSON.stringify(rawKey)})`,
+    );
+  }
   return `${key}: ${serializeFrontmatterValue(value)}`;
 }
 
@@ -139,7 +154,19 @@ export function serializeFrontmatterEntry(entry: FrontmatterEntry): string {
  * サービス別表に従う)は呼び出し側(各 Publisher の Renderer)の責務である。
  */
 export function serializeFrontmatter(entries: readonly FrontmatterEntry[]): string {
-  const lines = entries.map((entry) => `${serializeFrontmatterEntry(entry)}\n`).join('');
+  // NFC 正規化後のキーで重複を検出する(重複キーの YAML は読み手により解釈が
+  // 割れるため、黙って後勝ち・両方出力にはせず誤用として拒否する)。
+  const seenKeys = new Set<string>();
+  const lines = entries
+    .map((entry) => {
+      const normalizedKey = entry[0].normalize('NFC');
+      if (seenKeys.has(normalizedKey)) {
+        throw new RangeError(`duplicate frontmatter key: ${JSON.stringify(normalizedKey)}`);
+      }
+      seenKeys.add(normalizedKey);
+      return `${serializeFrontmatterEntry(entry)}\n`;
+    })
+    .join('');
   return `---\n${lines}---\n`;
 }
 

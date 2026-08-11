@@ -109,6 +109,35 @@ describe('serializeFrontmatterEntry / serializeFrontmatter', () => {
     ];
     expect(serializeFrontmatter(orderA)).toBe(serializeFrontmatter(orderB));
   });
+
+  it('rejects keys outside the safe character set (structure-breaking keys)', () => {
+    // 改行・引用符・コロン等を含むキーは YAML の構造を壊しうるため拒否する。
+    expect(() => serializeFrontmatterEntry(['bad\nkey', 'v'])).toThrow(RangeError);
+    expect(() => serializeFrontmatterEntry(['bad"key', 'v'])).toThrow(RangeError);
+    expect(() => serializeFrontmatterEntry(['bad: key', 'v'])).toThrow(RangeError);
+    expect(() => serializeFrontmatterEntry(['', 'v'])).toThrow(RangeError);
+    // §5.7 の実キーはすべて通る。
+    expect(() => serializeFrontmatterEntry(['published_at', 'v'])).not.toThrow();
+  });
+
+  it('rejects duplicate keys (including duplicates that only appear after NFC normalization)', () => {
+    expect(() =>
+      serializeFrontmatter([
+        ['title', 'a'],
+        ['title', 'b'],
+      ]),
+    ).toThrow(RangeError);
+    // NFC 正規化後に同一になるキーも重複として扱う(結合文字の分解表現)。
+    // 'é'(NFD)→ 'é'(NFC)。SAFE_KEY_PATTERN は ASCII のみ許可するため
+    // どのみち拒否されるが、重複検出はエントリ検証より先に走る設計であることを
+    // 「同一キー2回」の代表ケースとして固定する。
+    expect(() =>
+      serializeFrontmatter([
+        ['tags', ['a']],
+        ['tags', ['b']],
+      ]),
+    ).toThrow(/duplicate frontmatter key/);
+  });
 });
 
 // ---------------------------------------------------------------------------
