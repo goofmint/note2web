@@ -207,6 +207,7 @@ describe('runSubprocess', () => {
   });
 
   it('merges options.env over process.env, with the passed values winning', async () => {
+    const expectedPathPresent = (process.env.PATH ?? '').length > 0 ? '1' : '0';
     const result = await runSubprocess({
       command: process.execPath,
       args: [fixture('print-env.js')],
@@ -217,7 +218,8 @@ describe('runSubprocess', () => {
     expect(result.status).toBe('success');
     expect(result.stdout).toContain('X=1');
     // process.env(PATH を含む)がベースとして保持され続けていることを確認する。
-    expect(result.stdout).toContain('PATH_PRESENT=1');
+    // 親プロセス自体に PATH がない環境でも成立するよう、期待値は親の状態から導出する。
+    expect(result.stdout).toContain(`PATH_PRESENT=${expectedPathPresent}`);
   });
 });
 

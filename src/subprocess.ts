@@ -86,8 +86,10 @@ export interface RunSubprocessResult {
  * 直接の子プロセスの `close`(stdout/stderr のフラッシュ完了後に発火する)は即座に
  * `runSubprocess` の結果を確定させるが、タイムアウト経路で武装済みの猶予タイマーは
  * 直接の子の `close` では取り消さない — SIGTERM を無視する孫プロセスが残っていても
- * `termGraceMs` 経過後に確実にプロセスグループへ SIGKILL が送られるようにするためで、
- * このタイマーは `unref()` 済みのためイベントループを保持し続けることはない。
+ * `termGraceMs` 経過後に確実にプロセスグループへ SIGKILL が送られるようにするため。
+ * このタイマーは意図的に `unref()` しない — ホストプロセスが先に終了すると SIGKILL が
+ * 発火せず、SIGTERM を無視する孫プロセスが孤児として残るため、タイムアウト経路では
+ * 最大 `termGraceMs` だけイベントループを保持してエスカレーションを完走させる。
  *
  * 戻り値は以下のいずれかに分類される:
  * - `status: 'success'`(exit code 0)
@@ -124,11 +126,6 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
     let settled = false;
 
     let timeoutTimer: NodeJS.Timeout | undefined;
-    // タイムアウト経路で武装(arm)された後は、直接の子プロセスが `close` しても
-    // (孫プロセスが SIGTERM を無視して生き残っているかもしれないため)
-    // `graceTimer` を取り消さない。`termGraceMs` 経過後に無条件でプロセスグループへ
-    // SIGKILL を送ってから、自身をクリアする。
-    let graceTimer: NodeJS.Timeout | undefined;
 
     const clearTimeoutTimer = (): void => {
       if (timeoutTimer !== undefined) {
@@ -158,13 +155,15 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       killProcessGroup('SIGTERM');
-      graceTimer = setTimeout(() => {
+      // 猶予タイマーは一度武装したら取り消さない(直接の子が `close` しても、
+      // SIGTERM を無視する孫プロセスが残っているかもしれないため)。意図的に
+      // `unref()` もしない — ホストが先に終了すると SIGKILL が発火しないため、
+      // 最大 `termGraceMs` だけイベントループを保持してエスカレーションを完走させる。
+      setTimeout(() => {
         // 直接の子が既に `close` していても関知せず、プロセスグループ全体へ
         // 無条件で SIGKILL を送る(既に全滅していれば ESRCH を無視するだけ)。
         killProcessGroup('SIGKILL');
-        graceTimer = undefined;
       }, termGraceMs);
-      graceTimer.unref();
     }, timeoutMs);
 
     const finish = (result: RunSubprocessResult): void => {
@@ -172,14 +171,16 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
         return;
       }
       settled = true;
-      // `timeoutTimer` は結果確定と同時に不要になるので必ず解除する。一方
-      // `graceTimer` はタイムアウト経路で既に武装されていれば解除せず、上記の
+      // `timeoutTimer` は結果確定と同時に不要になるので必ず解除する。一方、
+      // タイムアウト経路で武装済みの猶予タイマーは解除せず、上記の
       // SIGKILL エスカレーションを完走させる(孫プロセスの取り残し防止)。
       clearTimeoutTimer();
 
       if (result.status === 'failure' && logger !== undefined) {
         logger.warn({
-          message: `subprocess failed (${result.classification}): ${[command, ...args].join(' ')} (exitCode=${String(result.exitCode)}, signal=${String(result.signal)})`,
+          // コマンドライン(command / args)は API トークン等の秘匿情報を含みうるため
+          // ログには出さない(FR-30)。分類と終了状態のみを記録する。
+          message: `subprocess failed (${result.classification}): exitCode=${String(result.exitCode)}, signal=${String(result.signal)}`,
         });
       }
 
