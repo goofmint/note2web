@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -399,6 +407,174 @@ describe('AssetUploader', () => {
       expect(error).toBeInstanceOf(AssetUploadError);
       expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
       expect(existsSync(statePath)).toBe(false);
+    });
+
+    it('wraps a StateStore.saveAsset failure as AssetUploadError carrying noteUuid/identifier/cause', async () => {
+      writeAttachmentFile('image.png', 'save-asset-failure-bytes');
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: 'image.png' }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const persistenceFailure = new Error('simulated disk error');
+      // アップロード自体は成功させ、直後の状態保存だけを失敗させる
+      // (`StateStore.saveAsset` はクラスの通常メソッドなので prototype 越しに
+      // 差し替えられる)。
+      vi.spyOn(store, 'saveAsset').mockRejectedValueOnce(persistenceFailure);
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('id-1');
+      expect((error as AssetUploadError).cause).toBe(persistenceFailure);
+      // アップロード自体は既に発生している(状態記録だけが失敗した)。
+      expect(client.putObject).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('attachment path containment (files root escape prevention)', () => {
+    it('resolves a legitimate nested attachment path', async () => {
+      const bytes = writeAttachmentFile('nested/deeper/legit.png', 'legit-nested-bytes');
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: 'nested/deeper/legit.png' }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const result = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      });
+
+      expect(client.putObject).toHaveBeenCalledTimes(1);
+      const call = client.putObject.mock.calls[0]?.[0] as PutObjectParams;
+      expect(call.body).toEqual(bytes);
+      expect(result.markdown).not.toContain('note2web-asset://');
+    });
+
+    it('rejects a traversal path ("../..") that escapes the files root', async () => {
+      // filesDir の外(exportDir 直下)に秘密ファイルを置く。
+      writeFileSync(join(exportDir, 'secret.txt'), 'top secret');
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: '../secret.txt' }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('id-1');
+      expect(client.putObject).not.toHaveBeenCalled();
+    });
+
+    it('rejects an absolute attachment path that escapes the files root', async () => {
+      // filesDir の外に秘密ファイルを置き、そのファイルへの絶対パスを attachment.path に使う。
+      const outsidePath = join(dir, 'outside-absolute.txt');
+      writeFileSync(outsidePath, 'top secret via absolute path');
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: outsidePath }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('id-1');
+      expect(client.putObject).not.toHaveBeenCalled();
+    });
+
+    it('rejects a symlink inside the files root that points outside it', async () => {
+      const outsidePath = join(dir, 'outside-symlink-target.txt');
+      writeFileSync(outsidePath, 'top secret via symlink');
+      const linkPath = join(filesDir, 'link-to-outside.txt');
+      symlinkSync(outsidePath, linkPath);
+
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: 'link-to-outside.txt' }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('id-1');
+      expect(client.putObject).not.toHaveBeenCalled();
+    });
+
+    it('still uploads a symlink that points to a legitimate file inside the files root', async () => {
+      const targetBytes = writeAttachmentFile('real/inside-target.png', 'symlink-inside-bytes');
+      const linkPath = join(filesDir, 'link-to-inside.png');
+      symlinkSync(join(filesDir, 'real', 'inside-target.png'), linkPath);
+
+      const attachments: Attachment[] = [{ identifier: 'id-1', path: 'link-to-inside.png' }];
+      const markdown = `![](${makeAssetPlaceholder('id-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: SERVICE,
+        assets: ASSETS_CONFIG,
+        state: store,
+        client,
+      });
+
+      expect(client.putObject).toHaveBeenCalledTimes(1);
+      const call = client.putObject.mock.calls[0]?.[0] as PutObjectParams;
+      expect(call.body).toEqual(targetBytes);
     });
   });
 

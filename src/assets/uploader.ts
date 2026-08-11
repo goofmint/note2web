@@ -29,8 +29,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { extname, resolve, sep } from 'node:path';
 import type { Attachment } from '../model/note.js';
 import type { AssetUploadedPayload } from '../logger.js';
 import type { StateStore } from '../state/store.js';
@@ -50,8 +50,11 @@ export { createS3UploaderClient } from './client.js';
  *
  * 次のいずれかで送出される:
  *   - プレースホルダの `identifier` に対応する `Attachment` が無い(解決不可)
+ *   - `attachment.path` が `<exportDir>/files/` の外側を指している(トラバーサル・
+ *     絶対パス・シンボリックリンクのいずれか。`resolveAttachmentAbsolutePath` 参照)
  *   - 添付ファイル実体が読み取れない(不存在・権限不足等)
  *   - `UploaderClient.putObject` が失敗した
+ *   - アップロード成功後の `StateStore.saveAsset` が失敗した(状態未記録)
  *   - 置換後の本文にプレースホルダが残っている(内部不変条件違反)
  *
  * `process.exit` は呼ばない。ノートを failed とし処理を続行するかどうかは
@@ -187,6 +190,91 @@ function extractPlaceholderIdentifiers(markdown: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// 添付ファイルパスの解決(`<exportDir>/files/` 配下への封じ込め検証つき)。
+// ---------------------------------------------------------------------------
+
+/**
+ * `candidate` が `root` 自身、または `root` 配下(`root + path.sep` で始まる)かどうか。
+ * 文字列比較の前に両者とも正規化済みの絶対パスであることを呼び出し側が保証する。
+ */
+function isPathWithinRoot(root: string, candidate: string): boolean {
+  if (candidate === root) {
+    return true;
+  }
+  const rootWithSep = root.endsWith(sep) ? root : `${root}${sep}`;
+  return candidate.startsWith(rootWithSep);
+}
+
+/**
+ * `attachment.path` を `<exportDir>/files/` 配下の絶対パスへ解決し、`files/` root の
+ * 外側を指していないことを検証する(セキュリティ対応。PR #46 CodeRabbit review)。
+ *
+ * `attachment.path` は parser が出力する JSON(`embedded_objects[].filepath` /
+ * `backup_location`)由来の外部入力であり、信頼できないものとして扱う。
+ * トラバーサル(`../..`)・絶対パスによる root の差し替え・`files/` 配下に置かれた
+ * シンボリックリンクによる root 外への脱出、いずれも許さない:
+ *
+ *   1. `path.resolve(filesRoot, attachment.path)` で候補絶対パスを組み立てる
+ *      (`resolve` は第2引数が絶対パスの場合、第1引数を無視してその絶対パスを
+ *      そのまま返す。これ単体では絶対パス攻撃を防げないため、次の文字列包含
+ *      チェックで弾く)。
+ *   2. 文字列としての包含チェック(`isPathWithinRoot`)で、ファイルシステムに
+ *      触れる前にトラバーサル・絶対パスの両方を拒否する。
+ *   3. `fs.realpath` で `filesRoot` と候補パスそれぞれの実体パス(シンボリック
+ *      リンクを解決した結果)を求め、再度包含チェックする。`files/` 配下に置かれた
+ *      シンボリックリンクが root 外を指している場合はここで拒否する。候補パスが
+ *      存在しない場合(`ENOENT` 等)は「読み取れない」エラーとして扱う。
+ *
+ * いずれの拒否も `AssetUploadError`(`noteUuid`/`identifier` の文脈つき)を送出する。
+ */
+async function resolveAttachmentAbsolutePath(
+  exportDir: string,
+  attachment: Attachment,
+  context: { noteUuid: string; identifier: string },
+): Promise<string> {
+  const { noteUuid, identifier } = context;
+  const filesRoot = resolve(exportDir, 'files');
+  const candidatePath = resolve(filesRoot, attachment.path);
+
+  if (!isPathWithinRoot(filesRoot, candidatePath)) {
+    throw new AssetUploadError(
+      `attachment path escapes the files root (traversal or absolute path rejected) for identifier "${identifier}": "${attachment.path}"`,
+      { noteUuid, identifier },
+    );
+  }
+
+  let realFilesRoot: string;
+  try {
+    realFilesRoot = await realpath(filesRoot);
+  } catch (error) {
+    throw new AssetUploadError(`files root does not exist under exportDir: ${filesRoot}`, {
+      noteUuid,
+      identifier,
+      cause: error,
+    });
+  }
+
+  let realCandidatePath: string;
+  try {
+    realCandidatePath = await realpath(candidatePath);
+  } catch (error) {
+    throw new AssetUploadError(
+      `failed to read attachment file for identifier "${identifier}": ${candidatePath}`,
+      { noteUuid, identifier, cause: error },
+    );
+  }
+
+  if (!isPathWithinRoot(realFilesRoot, realCandidatePath)) {
+    throw new AssetUploadError(
+      `attachment path resolves outside the files root via a symlink for identifier "${identifier}": "${attachment.path}"`,
+      { noteUuid, identifier },
+    );
+  }
+
+  return realCandidatePath;
+}
+
+// ---------------------------------------------------------------------------
 // 入力・出力契約。
 // ---------------------------------------------------------------------------
 
@@ -271,7 +359,10 @@ export async function processNoteBody(
       });
     }
 
-    const absolutePath = join(exportDir, 'files', attachment.path);
+    const absolutePath = await resolveAttachmentAbsolutePath(exportDir, attachment, {
+      noteUuid,
+      identifier,
+    });
     let bytes: Buffer;
     try {
       bytes = await readFile(absolutePath);
@@ -317,7 +408,18 @@ export async function processNoteBody(
     const url = joinPublicUrl(assets.public_base_url, key);
     const uploadedAt = formatTimestamp(now(), timezone);
     // design.md §5.6 書き込みポイント`#1`: アップロード成功ごとに直ちに保存する。
-    await state.saveAsset(contentHash, { key, url, uploadedAt });
+    // アップロード自体は既に成功しているため(実体は R2/S3 に存在する)、この
+    // 保存失敗はノート単位の失敗として文脈(noteUuid/identifier)を保った上で
+    // 呼び出し側に伝える(状態未記録のまま処理を続けると、次回実行時に
+    // 同一アセットを不要に再アップロードしてしまうため)。
+    try {
+      await state.saveAsset(contentHash, { key, url, uploadedAt });
+    } catch (error) {
+      throw new AssetUploadError(
+        `failed to persist state after successful upload for identifier "${identifier}" (uploaded to key "${key}" but not recorded)`,
+        { noteUuid, identifier, cause: error },
+      );
+    }
     logger?.assetUploaded({ service, assetHash: contentHash, key, url });
 
     resolvedUrlByIdentifier.set(identifier, url);
