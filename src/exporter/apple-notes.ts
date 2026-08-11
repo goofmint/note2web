@@ -17,11 +17,12 @@
  */
 
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
+import { expandHome } from '../paths.js';
 import {
   DEFAULT_TIMEOUTS,
   runSubprocess,
@@ -349,20 +350,9 @@ function extractAttachments(
 // ---------------------------------------------------------------------------
 // パス・コマンド組み立て。
 // ---------------------------------------------------------------------------
-
-/**
- * 先頭の `~` を `os.homedir()` へ展開する(`~/foo` および `~` 単体のみ。`~user` 形式は非対応)。
- * 依存チェック(`src/dependencies.ts`、T-14)が `exporter.parser_path` の実体確認に使うため export する。
- */
-export function expandHome(inputPath: string): string {
-  if (inputPath === '~') {
-    return homedir();
-  }
-  if (inputPath.startsWith('~/')) {
-    return join(homedir(), inputPath.slice(2));
-  }
-  return inputPath;
-}
+// `expandHome` は汎用ユーティリティとして `src/paths.ts` へ移した(CodeRabbit review,
+// PR #48)。Exporter・依存チェック(`src/dependencies.ts`)・doctor(`src/doctor.ts`)が
+// 共通で使うため。
 
 async function defaultTmpDirFactory(): Promise<string> {
   return mkdtemp(join(tmpdir(), TMP_DIR_PREFIX));

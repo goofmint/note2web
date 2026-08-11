@@ -37,8 +37,8 @@ import {
   type CheckDependenciesOptions,
   type DependencyProblem,
 } from './dependencies.js';
-import { expandHome } from './exporter/apple-notes.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
+import { expandHome } from './paths.js';
 import { isGitModeService } from './publishers/mode.js';
 import {
   commandExists,

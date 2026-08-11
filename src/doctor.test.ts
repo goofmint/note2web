@@ -144,6 +144,31 @@ describe('runDoctorChecks', () => {
       expect(messages).toMatch(/viewerPermission="READ"/);
     });
 
+    it('treats malformed "gh repo view" stdout as unknown permission (JSON-parse fallback)', async () => {
+      // `gh repo view` 自体は成功(exit 0)したが、stdout が JSON として解釈できない
+      // 場合(将来の `gh` の出力仕様変更等を想定)。`JSON.parse` の catch 節が
+      // `viewerPermission` を `undefined` のままにし、"unknown" として報告されることを確認する。
+      const runSubprocessFn = vi.fn<
+        (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
+      >((options) => {
+        if (options.args.join(' ') === 'auth status') return Promise.resolve(success());
+        return Promise.resolve(success('not json'));
+      });
+
+      const error = await expectDoctorError(
+        buildConfig({ exporter: { parser_path: parserPath, notes_container: '/dev/null' } }),
+        {
+          commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
+          env: { GH_TOKEN: 'token-value' },
+          runSubprocessFn,
+        },
+      );
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/insufficient push\/PR permission/);
+      expect(messages).toMatch(/viewerPermission="unknown"/);
+    });
+
     it('reports a permission-check failure when "gh repo view" itself fails', async () => {
       const runSubprocessFn = vi.fn<
         (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
