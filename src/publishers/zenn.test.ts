@@ -61,18 +61,18 @@ describe('golden: renderZennArticle frontmatter', () => {
   const expectedHash = 'sha256:49848ee48dcdbe49c48bb3be80c6783a91a881ad84d7767415b0c25982199c52';
 
   it('serializes the fixed frontmatter block + body exactly (key order title/emoji/type/topics/published)', () => {
-    const article = renderZennArticle({ note, markdown, config: CONFIG });
+    const article = renderZennArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.artifact).toBe(expectedArtifact);
   });
 
   it('computes the fixed sha256 content hash for the golden artifact', () => {
-    const article = renderZennArticle({ note, markdown, config: CONFIG });
+    const article = renderZennArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.contentHash).toBe(expectedHash);
     expect(article.contentHash).toBe(computeContentHash(expectedArtifact));
   });
 
   it('carries noteUuid and title through to the RenderedArticle', () => {
-    const article = renderZennArticle({ note, markdown, config: CONFIG });
+    const article = renderZennArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.noteUuid).toBe(note.uuid);
     expect(article.title).toBe('こんにちは、世界');
   });
@@ -85,7 +85,7 @@ describe('golden: renderZennArticle frontmatter', () => {
 describe('renderZennArticle artifactPath', () => {
   it('is "articles/<uuid小文字>.md", lowercasing an uppercase uuid', () => {
     const note = buildNote({ uuid: '5C1C2C3D-0000-4000-8000-000000000001', folder: 'idea' });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifactPath).toBe('articles/5c1c2c3d-0000-4000-8000-000000000001.md');
   });
 
@@ -95,7 +95,12 @@ describe('renderZennArticle artifactPath', () => {
       ...CONFIG,
       git: { ...CONFIG.git, output_dir: 'custom-dir' },
     } as Config;
-    const article = renderZennArticle({ note, markdown: 'body', config: customOutputDirConfig });
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: customOutputDirConfig,
+      prev: null,
+    });
     expect(article.artifactPath).toBe('articles/5c1c2c3d-0000-4000-8000-000000000001.md');
   });
 });
@@ -107,13 +112,13 @@ describe('renderZennArticle artifactPath', () => {
 describe('renderZennArticle emoji', () => {
   it('uses note.emoji when present', () => {
     const note = buildNote({ emoji: '🚀' });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('emoji: "🚀"');
   });
 
   it('defaults to 📝 when note.emoji is null', () => {
     const note = buildNote({ emoji: null });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('emoji: "📝"');
   });
 });
@@ -125,19 +130,19 @@ describe('renderZennArticle emoji', () => {
 describe('renderZennArticle topics', () => {
   it('strips exactly one leading "#" from each tag', () => {
     const note = buildNote({ tags: ['#typescript', '#zenn'] });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('topics: ["typescript","zenn"]');
   });
 
   it('produces an empty topics array for a note with no tags', () => {
     const note = buildNote({ tags: [] });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('topics: []');
   });
 
   it('leaves a tag without a leading "#" unchanged (defensive)', () => {
     const note = buildNote({ tags: ['already-plain'] });
-    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('topics: ["already-plain"]');
   });
 });
@@ -149,28 +154,32 @@ describe('renderZennArticle topics', () => {
 describe('renderZennArticle type validation (FR-24)', () => {
   it('accepts folder "tech"', () => {
     const note = buildNote({ folder: 'tech' });
-    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).not.toThrow();
+    expect(() =>
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null }),
+    ).not.toThrow();
   });
 
   it('accepts folder "idea"', () => {
     const note = buildNote({ folder: 'idea' });
-    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).not.toThrow();
+    expect(() =>
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null }),
+    ).not.toThrow();
   });
 
   it.each(['Archive', 'Tech', 'Dev/Ops: Log', ''])(
     'throws InvalidZennTypeError for folder %j (not exactly tech/idea)',
     (folder) => {
       const note = buildNote({ folder });
-      expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).toThrow(
-        InvalidZennTypeError,
-      );
+      expect(() =>
+        renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null }),
+      ).toThrow(InvalidZennTypeError);
     },
   );
 
   it('includes the offending folder and noteUuid in the thrown error', () => {
     const note = buildNote({ uuid: 'note-uuid-under-test', folder: 'Archive' });
     try {
-      renderZennArticle({ note, markdown: 'body', config: CONFIG });
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
       expect.unreachable('renderZennArticle should have thrown');
     } catch (error) {
       expect(error).toBeInstanceOf(InvalidZennTypeError);
@@ -190,20 +199,22 @@ describe('renderZennArticle type validation (FR-24)', () => {
 describe('renderZennArticle slug validation (FR-23, defensive)', () => {
   it('throws InvalidZennSlugError when the lowercased uuid is too short (<12 chars)', () => {
     const note = buildNote({ uuid: 'short-id' });
-    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).toThrow(
+    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null })).toThrow(
       InvalidZennSlugError,
     );
   });
 
   it('throws InvalidZennSlugError when the uuid contains characters outside a-z0-9_-', () => {
     const note = buildNote({ uuid: '5c1c2c3d.0000.4000.8000.000000000001' });
-    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).toThrow(
+    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null })).toThrow(
       InvalidZennSlugError,
     );
   });
 
   it('accepts a normal 36-character Apple Notes uuid (hyphens included)', () => {
     const note = buildNote({ uuid: '5c1c2c3d-0000-4000-8000-000000000001' });
-    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG })).not.toThrow();
+    expect(() =>
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null }),
+    ).not.toThrow();
   });
 });
