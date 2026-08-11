@@ -92,16 +92,18 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toMatch(/no Publisher implementation is registered yet/);
   });
 
-  it('exits 0 for doctor when --config points to a schema-valid file', async () => {
+  it('exits 2 for doctor when --config points to a schema-valid file (doctor is not implemented yet, T-15)', async () => {
+    // doctor はまだ何もチェックしていないため、SUCCESS を返すと「問題無し」と誤解される。
+    // 未実装であることが明確に伝わるよう exit 2 + stderr で報告する(CodeRabbit review, PR #47)。
     for (const name of VALID_CONFIG_ENV_VARS) {
       process.env[name] = 'dummy-value';
     }
 
     const result = await runCli(['doctor', '--config', VALID_CONFIG_PATH]);
 
-    expect(result.exitCode).toBe(SUCCESS);
-    expect(result.stdout).toEqual(['note2web doctor: not implemented yet']);
-    expect(result.stderr).toHaveLength(0);
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.stdout).toHaveLength(0);
+    expect(result.stderr.join('\n')).toMatch(/doctor is not implemented yet/);
   });
 
   it('exits 2 with an error when --config points to a directory', async () => {

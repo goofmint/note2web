@@ -178,15 +178,31 @@ describe('checkDependencies', () => {
   });
 
   it('expands a leading ~ in exporter.parser_path when locating notes_cloud_ripper.rb', async () => {
-    // design.md §7 の既定値どおり ~ 展開されることを、実在しないホームディレクトリ配下の
-    // パスに対するエラーメッセージ経由で確認する(絶対パスに展開されていること)。
+    // 実ファイルシステムに依存せず、fileExistsFn へ渡された実際のパスを記録して検証する
+    // (CodeRabbit review, PR #47: ホスト環境の実在有無に依存させない)。
     const commands = new Set(['ruby', 'git', 'gh']);
+    const checkedPaths: string[] = [];
     const error = await expectDependencyError(buildConfig(), {
       commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+      fileExistsFn: (path) => {
+        checkedPaths.push(path);
+        return Promise.resolve(false);
+      },
       env: { GH_TOKEN: 'token-value' },
     });
 
+    expect(checkedPaths).toHaveLength(1);
+    const checkedPath = checkedPaths[0];
+    if (checkedPath === undefined) {
+      throw new Error('test setup: fileExistsFn was not called');
+    }
+    // `~` が展開され、絶対パス(`~/` を含まない)になっていること。
+    expect(checkedPath).not.toContain('~/');
+    expect(checkedPath).toMatch(/^\//);
+    expect(checkedPath.endsWith('notes_cloud_ripper.rb')).toBe(true);
+
     const message = error.problems.map((problem) => problem.message).join('\n');
     expect(message).not.toContain('~/');
+    expect(message).toContain(checkedPath);
   });
 });

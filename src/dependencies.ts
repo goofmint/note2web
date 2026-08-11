@@ -157,6 +157,16 @@ export async function checkDependencies(
       // config.ts が既に検証済みのため、本モジュールで追加するチェックは無い。
       break;
     }
+    default: {
+      // 網羅性チェック(CodeRabbit review, PR #47 nitpick): `config.service` に
+      // `src/config.ts` の `SERVICES` へ新しいサービスが追加されたのに、ここへの
+      // 対応が漏れた場合にコンパイルエラーとして検出する。実行時にも到達しないはず
+      // だが、型が壊れた呼び出し元(any 経由等)からの防御として例外を投げる。
+      const exhaustiveCheck: never = config.service;
+      throw new Error(
+        `internal error: unhandled service "${String(exhaustiveCheck)}" in checkDependencies`,
+      );
+    }
   }
 
   if (problems.length > 0) {

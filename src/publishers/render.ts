@@ -10,6 +10,14 @@
  * 要るため、ここでは `title`/`tags` のみを frontmatter に含める最小限の実装を提供する。
  * `NoteRenderer` は sync フローの注入点であり、E2E テストではこの既定実装のまま
  * 使うことも、テスト専用の Renderer に差し替えることもできる。
+ *
+ * **`artifactPath`(Git モードのみ)**: design.md §8 の状態 JSON スキーマ例
+ * (`"artifactPath": "articles/5c1c2c3d-….md"`)に合わせ、Git モードでは
+ * `<config.git.output_dir>/<uuid小文字ではなく Note#uuid そのまま>.md` を組み立てる。
+ * サービス別の実際のパス規約(Zenn は UUID 小文字化、Jekyll は日付付きファイル名を
+ * 初回のまま固定、等。design.md §5.7 のサービス別表)は各 Publisher の Renderer
+ * (T-17 以降)が担い、ここでは §8 の例に沿った最小限の共通規約にとどめる
+ * (CodeRabbit review, PR #47)。
  */
 
 import type { Config } from '../config.js';
@@ -19,6 +27,7 @@ import {
   renderArtifact,
   type FrontmatterEntry,
 } from '../transform/frontmatter.js';
+import { isGitModeService } from './mode.js';
 import type { RenderedArticle } from './types.js';
 
 /** `NoteRenderer` の入力。 */
@@ -40,12 +49,16 @@ export type NoteRenderer = (input: RenderNoteInput) => RenderedArticle;
  * (`src/transform/frontmatter.ts`、T-12)の正規化規約(UTF-8/LF/NFC・決定的 YAML)を
  * そのまま利用するため、ハッシュの安定性(FR-15)は T-12 の保証を継承する。
  */
-export function renderGenericArticle({ note, markdown }: RenderNoteInput): RenderedArticle {
+export function renderGenericArticle({ note, markdown, config }: RenderNoteInput): RenderedArticle {
   const entries: FrontmatterEntry[] = [
     ['title', note.title],
     ['tags', note.tags],
   ];
   const artifact = renderArtifact(entries, markdown);
   const contentHash = computeContentHash(artifact);
-  return { noteUuid: note.uuid, title: note.title, artifact, contentHash };
+  const artifactPath =
+    isGitModeService(config.service) && config.git !== undefined
+      ? `${config.git.output_dir}/${note.uuid}.md`
+      : undefined;
+  return { noteUuid: note.uuid, title: note.title, artifact, contentHash, artifactPath };
 }

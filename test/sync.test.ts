@@ -17,6 +17,30 @@ import { runSync, type RunSyncOptions } from '../src/sync.js';
 import type { RunSubprocessOptions } from '../src/subprocess.js';
 
 /**
+ * `node:fs/promises` の `rename` だけを差し替え可能にするモック(`test/state.test.ts` と
+ * 同じパターン)。`src/state/store.ts` の `persist()`(`confirmNote`/`flush` の実体)が
+ * この `rename` を経由するため、CodeRabbit review(PR #47)が要求する「publish() は
+ * 成功したが状態の確定保存が失敗するケース」を、実ファイルシステムの権限操作(root では
+ * 意味を成さない)に頼らず決定的に再現できる。
+ */
+const renameOverride: { impl: ((...args: unknown[]) => Promise<unknown>) | null } = {
+  impl: null,
+};
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (renameOverride.impl) {
+        return renameOverride.impl(...args);
+      }
+      return actual.rename(...args);
+    },
+  };
+});
+
+/**
  * T-08(GitHub issue #13)の成果物。読み取り専用として扱う(`test/exporter.test.ts` と同じ
  * fixture-copy パターン。§12「結合」)。
  */
@@ -102,6 +126,7 @@ function createFakeLogger(): { logger: Logger; events: string[] } {
 interface MockPublisherOptions {
   publishImpl?: (article: RenderedArticle, prev: NoteState | null) => Promise<PublishResult>;
   withPrepare?: boolean;
+  prepareImpl?: () => Promise<void>;
   withFinalize?: boolean;
   finalizeImpl?: () => Promise<void>;
 }
@@ -135,6 +160,9 @@ function createMockPublisher(options: MockPublisherOptions = {}): MockPublisherH
   if (options.withPrepare === true) {
     publisher.prepare = async () => {
       counters.prepareCalls += 1;
+      if (options.prepareImpl) {
+        await options.prepareImpl();
+      }
     };
   }
 
@@ -240,6 +268,7 @@ describe('runSync', () => {
   afterEach(async () => {
     await rm(exportWorkDir, { recursive: true, force: true });
     await rm(stateDir, { recursive: true, force: true });
+    renameOverride.impl = null;
   });
 
   function baseOptions(
@@ -477,6 +506,7 @@ describe('runSync', () => {
     const { logger } = createFakeLogger();
     let statePathExistedDuringFinalize: boolean | undefined;
     const mock = createMockPublisher({
+      withPrepare: true,
       withFinalize: true,
       finalizeImpl: async () => {
         statePathExistedDuringFinalize = existsSync(statePath);
@@ -505,6 +535,7 @@ describe('runSync', () => {
     const { runner } = makeFixtureRunner();
     const { logger, events } = createFakeLogger();
     const mock = createMockPublisher({
+      withPrepare: true,
       withFinalize: true,
       finalizeImpl: async () => {
         throw new Error('simulated PR creation failure');
@@ -555,5 +586,137 @@ describe('runSync', () => {
     // API/CLI モードは publish() 成功ごとに即時確定(design.md §5.6)。
     const onDisk = readStateFile(statePath);
     expect(onDisk.notes[ARCHIVE_NOTE_UUID]).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // CodeRabbit review (PR #47) 対応分。
+  // -------------------------------------------------------------------------
+
+  it('scenario 9a: git-mode Publisher missing prepare() — exit 2 before acquiring the lock or exporting anything', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: false, withFinalize: true });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.error).toContain('prepare');
+    expect(calls).toHaveLength(0);
+    expect(mock.publishCalls).toHaveLength(0);
+    expect(mock.finalizeCalls).toBe(0);
+    // 検証はロック取得より前(design.md §5.7 の JSDoc / CodeRabbit review, PR #47)。
+    expect(existsSync(lockPathFor(statePath))).toBe(false);
+  });
+
+  it('scenario 9b: git-mode Publisher missing finalize() — exit 2 before acquiring the lock or exporting anything', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: true, withFinalize: false });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.error).toContain('finalize');
+    expect(calls).toHaveLength(0);
+    expect(mock.publishCalls).toHaveLength(0);
+    expect(mock.prepareCalls).toBe(0);
+    expect(existsSync(lockPathFor(statePath))).toBe(false);
+  });
+
+  it('scenario 9c: git-mode Publisher missing both prepare() and finalize() — exit 2, message names both', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: false, withFinalize: false });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.error).toContain('prepare');
+    expect(result.error).toContain('finalize');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('scenario 9d: API/CLI-mode Publisher without prepare()/finalize() is not affected by the git-mode contract check', async () => {
+    const { runner } = makeFixtureRunner();
+    // withPrepare/withFinalize 既定は false: このモックは prepare/finalize を一切持たない。
+    const mock = createMockPublisher();
+
+    const result = await runSync({
+      config: buildConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir }),
+    });
+
+    expect(result.exitCode).toBe(SUCCESS);
+  });
+
+  it('scenario 10: Publisher.prepare() failure aborts the run at exit 1 before exporting anything', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const { logger, events } = createFakeLogger();
+    const mock = createMockPublisher({
+      withPrepare: true,
+      withFinalize: true,
+      prepareImpl: async () => {
+        throw new Error('simulated branch creation failure');
+      },
+    });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+    });
+
+    expect(result.exitCode).toBe(PARTIAL_FAILURE);
+    expect(result.error).toMatch(/prepare/i);
+    expect(mock.prepareCalls).toBe(1);
+    // prepare() が失敗した以上、ブランチが存在しないためエクスポート・配信は一切行わない。
+    expect(calls).toHaveLength(0);
+    expect(mock.publishCalls).toHaveLength(0);
+    expect(mock.finalizeCalls).toBe(0);
+    expect(events.some((event) => event.startsWith('warn:'))).toBe(true);
+    // 前提条件不成立に準ずる中断のため run_end は発行しない。
+    expect(events.some((event) => event.startsWith('run_end'))).toBe(false);
+  });
+
+  it('scenario 11: note_published is emitted only after state persistence succeeds; a confirmNote failure logs note_failed instead (API/CLI mode)', async () => {
+    const { runner } = makeFixtureRunner();
+    const { logger, events } = createFakeLogger();
+    const mock = createMockPublisher();
+
+    renameOverride.impl = () => {
+      throw new Error('simulated disk failure during state persistence');
+    };
+
+    const result = await runSync({
+      config: buildConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+    });
+
+    // publish() 自体は成功しているが、confirmNote(状態確定)が失敗したのでノートは failed。
+    expect(result).toMatchObject({
+      exitCode: PARTIAL_FAILURE,
+      published: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    expect(mock.publishCalls).toHaveLength(1);
+    expect(events).toContain(`note_failed:${ARCHIVE_NOTE_UUID}`);
+    expect(events.some((event) => event.startsWith(`note_published:${ARCHIVE_NOTE_UUID}`))).toBe(
+      false,
+    );
+
+    // 状態 JSON には一切反映されない(NFR-06。次回再試行される)。
+    expect(existsSync(statePath)).toBe(false);
   });
 });

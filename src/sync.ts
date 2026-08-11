@@ -114,6 +114,53 @@ function preconditionFailure(message: string): RunSyncResult {
   return { exitCode: PRECONDITION_FAILURE, published: 0, skipped: 0, failed: 0, error: message };
 }
 
+function runAborted(message: string): RunSyncResult {
+  return { exitCode: PARTIAL_FAILURE, published: 0, skipped: 0, failed: 0, error: message };
+}
+
+/**
+ * `value` が `undefined` であれば内部不変条件違反として例外を投げる。Git モードの
+ * `publisher.prepare`/`publisher.finalize` は `runSync` の冒頭
+ * (`validateGitModePublisherContract`)で存在を検証済みのはずであり、ここでの
+ * `undefined` は「検証をすり抜けた」というバグを示す(CodeRabbit review, PR #47)。
+ */
+function requireDefined<T>(value: T | undefined, message: string): T {
+  if (value === undefined) {
+    throw new Error(`internal error: ${message}`);
+  }
+  return value;
+}
+
+/**
+ * Git モード(design.md §5.7 GitRepoPublisher 系)では `publisher.prepare` /
+ * `publisher.finalize` の両方が実装されていることを要求する(`src/publishers/types.ts`
+ * の JSDoc 参照。§5.7 のインターフェース自体では両方とも任意)。欠けている場合、
+ * ロック取得やエクスポートなど一切の作業を行う前に検出できるよう、`runSync` の冒頭
+ * (依存チェックの直後)で呼ぶ。
+ */
+function validateGitModePublisherContract(
+  config: Config,
+  publisher: Publisher,
+): RunSyncResult | undefined {
+  if (!isGitModeService(config.service)) {
+    return undefined;
+  }
+  const missing: string[] = [];
+  if (publisher.prepare === undefined) {
+    missing.push('prepare');
+  }
+  if (publisher.finalize === undefined) {
+    missing.push('finalize');
+  }
+  if (missing.length === 0) {
+    return undefined;
+  }
+  return preconditionFailure(
+    `git-mode service "${config.service}" requires a Publisher implementing both prepare() and ` +
+      `finalize() (design.md §5.7 GitRepoPublisher); missing: ${missing.join(', ')}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // ノート単位処理(design.md §6 手順6。失敗はここで隔離し、決して外へ投げない)。
 // ---------------------------------------------------------------------------
@@ -142,6 +189,21 @@ interface ProcessNoteParams {
  * 自動的に再試行される」)。ただし、アセットアップロードの成功分(`StateStore.saveAsset`
  * 経由)は `processNoteBody` が既に即時保存済みであり、ここでの失敗によって取り消され
  * ない(design.md §5.6 書き込みポイント1)。
+ *
+ * **`logger.notePublished` は状態の確定後にのみ発行する**(CodeRabbit review, PR #47):
+ * API/CLI モードでは `StateStore.confirmNote` の成功後、Git モードでは(ステージングは
+ * メモリ操作のみで実質失敗しないため)`StateStore.stageNote` の直後に発行する。
+ * `publisher.publish` は成功したが `confirmNote` が失敗した場合は `note_published` を
+ * 一切出さず、`note_failed` のみを発行する。
+ *
+ * **既知のリスク(重複作成)**: `publisher.publish` の成功後に `confirmNote`(状態保存)が
+ * 失敗すると、配信自体は完了しているのに状態 JSON には記録されない。この場合、次回
+ * 実行時は `StateStore.getNote(uuid)` が `undefined` を返す(= 初回配信扱い)ため、
+ * 汎用の sync フローだけでは「既に配信済みかどうか」を判別できず、Publisher の実装
+ * 次第では重複記事を作成してしまう可能性がある。design.md §5.7「応答不明時の重複防止」
+ * が定める、サービス固有の `prev`/`remoteId` 照合(dev.to のタイトル一致検索、Qiita の
+ * frontmatter 書き戻し等)は個々の Publisher 実装(T-15 以降)の責務であり、本モジュール
+ * (sync フロー)はその照合結果をそのまま信頼するだけで、汎用的な重複防止機構は持たない。
  */
 async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
   const {
@@ -226,14 +288,6 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
     return 'failed';
   }
 
-  logger.notePublished({
-    service,
-    noteUuid: note.uuid,
-    title: note.title,
-    result: publishResult.result,
-    url: publishResult.url,
-  });
-
   const timestamp = formatTimestamp(now(), config.timezone);
   const entry: NoteState = {
     contentHash: article.contentHash,
@@ -247,8 +301,20 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
 
   // design.md §6 手順6f / §5.6 書き込みポイント2:
   // API/CLI モードは publish() 成功ごとに即時確定、Git モードは finalize() まで保留。
+  // logger.notePublished は状態の確定が終わった後にのみ発行する(このモジュール冒頭の
+  // JSDoc「logger.notePublished は状態の確定後にのみ発行する」参照)。
   if (gitMode) {
+    // stageNote はメモリ上の Map への代入のみで、同期的に例外を投げることは無い
+    // (state/store.ts 参照)。API/CLI モードの confirmNote と異なり失敗し得ないため、
+    // ここで直接 notePublished を発行してよい。
     state.stageNote(note.uuid, entry);
+    logger.notePublished({
+      service,
+      noteUuid: note.uuid,
+      title: note.title,
+      result: publishResult.result,
+      url: publishResult.url,
+    });
     return 'published';
   }
 
@@ -256,7 +322,8 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
     await state.confirmNote(note.uuid, entry);
   } catch (error) {
     // 配信自体は成功しているが状態の確定保存に失敗した。NFR-06 の趣旨(状態未更新なら
-    // 次回再試行される)に沿い、このノートは failed として扱う。
+    // 次回再試行される)に沿い、このノートは failed として扱う——notePublished は
+    // 一切発行しない(このモジュール冒頭の JSDoc「既知のリスク(重複作成)」参照)。
     logger.noteFailed({
       service,
       noteUuid: note.uuid,
@@ -265,6 +332,14 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
     });
     return 'failed';
   }
+
+  logger.notePublished({
+    service,
+    noteUuid: note.uuid,
+    title: note.title,
+    result: publishResult.result,
+    url: publishResult.url,
+  });
   return 'published';
 }
 
@@ -311,9 +386,23 @@ async function runLockedSync(params: RunLockedSyncParams): Promise<RunSyncResult
 
   const gitMode = isGitModeService(config.service);
 
-  // design.md §6 手順5: Git モードなら作業ブランチ作成(Publisher 実装が定義していれば)。
-  if (gitMode && publisher.prepare) {
-    await publisher.prepare();
+  // design.md §6 手順5: Git モードなら作業ブランチ作成。`runSync` 冒頭の
+  // `validateGitModePublisherContract` が gitMode時の prepare 実在を既に検証済みだが、
+  // `requireDefined` はその検証をすり抜けた場合の防御(バグ検出用)として残す。
+  if (gitMode) {
+    const prepare = requireDefined(
+      publisher.prepare,
+      'git-mode Publisher.prepare is missing despite validateGitModePublisherContract',
+    );
+    try {
+      await prepare();
+    } catch (error) {
+      // prepare() 失敗(ブランチ作成不可等)は、以降の手順が前提とするブランチが
+      // 存在しないことを意味する。エクスポート・ノート処理を一切行わず実行全体を
+      // 失敗として中断する(CodeRabbit review, PR #47)。
+      logger.warn({ message: `prepare failed, aborting before export: ${errorMessage(error)}` });
+      return runAborted(`Publisher.prepare() failed: ${errorMessage(error)}`);
+    }
   }
 
   // design.md §6 手順3・4: Exporter 実行(フォルダフィルタは Exporter 内部で適用済み)。
@@ -323,13 +412,7 @@ async function runLockedSync(params: RunLockedSyncParams): Promise<RunSyncResult
   } catch (error) {
     if (error instanceof ExportError) {
       // design.md §10「parser の実行失敗 → 実行全体を中断、exit 1」。
-      return {
-        exitCode: PARTIAL_FAILURE,
-        published: 0,
-        skipped: 0,
-        failed: 0,
-        error: error.message,
-      };
+      return runAborted(error.message);
     }
     throw error;
   }
@@ -358,10 +441,18 @@ async function runLockedSync(params: RunLockedSyncParams): Promise<RunSyncResult
       counts[outcome] += 1;
     }
 
-    // design.md §6 手順7: Git モードの finalize()。
-    if (gitMode && publisher.finalize) {
+    // design.md §6 手順7: Git モードの finalize()。gitMode時の実在は `runSync` 冒頭の
+    // `validateGitModePublisherContract` で検証済み(`requireDefined` は防御的な保険)。
+    // finalize が成功したら必ず state.flush() を実行する経路をここに1本化し、
+    // 「保留分が黙って flush されない」コードパスが生まれないようにする
+    // (CodeRabbit review, PR #47)。
+    if (gitMode) {
+      const finalize = requireDefined(
+        publisher.finalize,
+        'git-mode Publisher.finalize is missing despite validateGitModePublisherContract',
+      );
       try {
-        await publisher.finalize();
+        await finalize();
         // PR 作成成功後に保留分を一括保存する(design.md §5.6 書き込みポイント2)。
         await state.flush();
       } catch (error) {
@@ -426,6 +517,14 @@ export async function runSync(options: RunSyncOptions): Promise<RunSyncResult> {
       return preconditionFailure(error.message);
     }
     throw error;
+  }
+
+  // T-14 で追加した前提条件チェック(`src/publishers/types.ts` の JSDoc 参照):
+  // Git モードは Publisher.prepare/finalize の両方を要求する。ロック取得・エクスポート
+  // 等、一切の作業を行う前にここで検出する(CodeRabbit review, PR #47)。
+  const gitModePublisherProblem = validateGitModePublisherContract(config, publisher);
+  if (gitModePublisherProblem !== undefined) {
+    return gitModePublisherProblem;
   }
 
   // design.md §6「多重起動防止」: 依存チェックの後・StateStore 読み込みの前に取得する。
