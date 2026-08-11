@@ -2,9 +2,11 @@
  * Publisher ファクトリ(design.md §5.7)。
  *
  * T-16(issue #21)で GitRepoPublisher(zenn/hugo/jekyll 共通基盤)が揃ったため、Git モードの
- * 3サービスはここで配線する。Zenn/Hugo/Jekyll 固有のファイルパス・frontmatter
- * (design.md §5.7 サービス別表)は本タスクの範囲外(T-17〜T-19)で、現時点では
- * `src/publishers/render.ts` の汎用 `NoteRenderer` がそれを担う暫定実装のまま。
+ * 3サービスはここで配線する。Hugo/Jekyll 固有のファイルパス・frontmatter
+ * (design.md §5.7 サービス別表)は本タスクの範囲外(T-18〜T-19)で、現時点では
+ * `src/publishers/render.ts` の汎用 `NoteRenderer` がそれを担う暫定実装のまま。Zenn は
+ * T-17(issue #22)で `src/publishers/zenn.ts` の `renderZennArticle` が揃ったため、
+ * `resolveRenderer` で service 別に選択する(下記)。
  * Qiita/dev.to/note.com/はてな(T-21〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
  * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
@@ -13,11 +15,13 @@
  */
 
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
-import type { Config } from '../config.js';
+import type { Config, ServiceName } from '../config.js';
 import type { Logger } from '../logger.js';
 import { createGitRepoPublisher } from './git-repo.js';
 import { isGitModeService } from './mode.js';
+import { renderGenericArticle, type NoteRenderer } from './render.js';
 import type { Publisher } from './types.js';
+import { renderZennArticle } from './zenn.js';
 
 /**
  * `createPublisher` がまだ実装の無いサービスを要求されたことを表す。
@@ -60,4 +64,29 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
     return createGitRepoPublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
+}
+
+/**
+ * service 別の `NoteRenderer` 選択(design.md §5.7 サービス別表、T-17 / issue #22)。
+ *
+ * `createPublisher` が Publisher の実装を service 別に振り分けるのと同じ形で、レンダリング
+ * (`src/publishers/render.ts` の `NoteRenderer`、design.md §6 手順6c)も service 別に振り分ける
+ * ——`Publisher.publish()` は既にレンダリング済みの `RenderedArticle` を受け取るだけで
+ * (`src/publishers/types.ts` 冒頭 JSDoc)、frontmatter の組み立ては Publisher の外側
+ * (sync フローが注入する `NoteRenderer`)の責務であるため、Publisher とは独立してここに
+ * 選択ロジックを置く。呼び出し側(`src/cli.ts`)は `createPublisher` と対になる形で
+ * `resolveRenderer(config.service)` を `runSync({ renderNote: … })` に渡す。
+ *
+ * - `zenn`: `renderZennArticle`(`src/publishers/zenn.ts`、T-17)——slug/type/emoji/topics の
+ *   Zenn 固有規約(FR-23/FR-24)を扱う。
+ * - それ以外(hugo/jekyll/qiita/devto/note/hatena): 後続タスク(T-18〜T-25)でサービス別
+ *   Renderer が揃うまでの暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)
+ *   を返す——`runSync` 自身の既定値と同じにすることで、`renderNote` を明示的に渡す
+ *   (cli.ts)場合と渡さない場合(test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
+ */
+export function resolveRenderer(service: ServiceName): NoteRenderer {
+  if (service === 'zenn') {
+    return renderZennArticle;
+  }
+  return renderGenericArticle;
 }

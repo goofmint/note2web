@@ -7,7 +7,11 @@ import { ConfigValidationError, loadConfig } from './config.js';
 import { DoctorError, runDoctorChecks } from './doctor.js';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 import { createLogger } from './logger.js';
-import { createPublisher, PublisherNotImplementedError } from './publishers/factory.js';
+import {
+  createPublisher,
+  PublisherNotImplementedError,
+  resolveRenderer,
+} from './publishers/factory.js';
 import { resolveStatePath } from './state/derive.js';
 import { runSync } from './sync.js';
 
@@ -129,7 +133,19 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 
   const uploaderClient = createS3UploaderClient(config.assets);
 
-  const result = await runSync({ config, statePath, logger, publisher, uploaderClient });
+  // service 別の NoteRenderer 選択(design.md §5.7、T-17 / issue #22)。zenn は
+  // `renderZennArticle`(src/publishers/zenn.ts)、それ以外は暫定の `renderGenericArticle`
+  // (`src/publishers/factory.ts` の `resolveRenderer` 参照)。
+  const renderNote = resolveRenderer(config.service);
+
+  const result = await runSync({
+    config,
+    statePath,
+    logger,
+    publisher,
+    uploaderClient,
+    renderNote,
+  });
 
   if (result.error !== undefined) {
     stderr.push(`note2web: ${result.error}`);
