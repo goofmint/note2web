@@ -25,6 +25,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
+  fsyncSync,
   linkSync,
   openSync,
   readFileSync,
@@ -61,6 +62,13 @@ export interface AcquireLockOptions {
    * 通常の呼び出し側は指定しない。
    */
   __testOnlyBeforeQuarantine?: () => void;
+  /**
+   * テスト専用の注入点。隔離のための rename が完了した直後に同期的に呼ばれる。
+   * 隔離後に別プロセスが新しいロックを作成する競合(隔離取り消し時の EEXIST 分岐と、
+   * 回収後の新規取得での競り負け)を決定的に再現するためのフックで、
+   * 通常の呼び出し側は指定しない。
+   */
+  __testOnlyAfterQuarantine?: () => void;
 }
 
 /** `acquireLock` が返す、取得済みロックのハンドル。 */
@@ -125,6 +133,11 @@ function defaultCheckAlive(pid: number): ProcessAliveStatus {
  * `ps -p <pid> -o lstart=` による既定の開始時刻取得(design.md §6)。
  * 出力の前後の空白・内部の連続空白を1個へ正規化する。`ps` の実行自体が失敗した場合や
  * 出力が空の場合は `'unknown'`(確認不能)を返す。
+ *
+ * `ps` は本ツールの必須ランタイム依存とする(macOS には常設、Linux では procps)。
+ * `/proc` 等への fallback は意図的に行わない — 記録時と確認時で開始時刻の取得元が
+ * 混在すると、生存中のプロセスのロックを「開始時刻不一致(PID 再利用)」と誤判定して
+ * 奪ってしまう危険があるため、取得できない場合は確認不能として安全側に倒す。
  */
 function defaultGetStartTime(pid: number): string {
   try {
@@ -160,23 +173,35 @@ function parseLockContent(raw: string): LockContent | undefined {
 }
 
 /**
- * `O_CREAT | O_EXCL`(`wx`)でロックファイルの新規作成を試みる。
- * 成功時 `true`、既に存在した場合(`EEXIST`)は `false`。それ以外の例外はそのまま投げる。
+ * ロックファイルの新規作成を試みる。成功時 `true`、既に存在した場合(`EEXIST`)は
+ * `false`。それ以外の例外はそのまま投げる。
+ *
+ * `openSync(lockPath, 'wx')` → `writeSync` の直接書き込みだと、open と write の間で
+ * クラッシュした場合に空のロックファイルが残り、内容不正=確認不能として以後の実行が
+ * 自動回収できなくなる。そのため、自 PID 入りの一時名へ内容を書き切って fsync した後、
+ * `linkSync`(宛先が既存なら `EEXIST` で失敗する)でアトミックに公開する。
+ * 他プロセスから `lockPath` に観測されるのは常に完全な内容のファイルのみとなる。
  */
 function tryCreateLockFile(lockPath: string, content: LockContent): boolean {
-  let fd: number;
+  // 一時名は自 PID 入りなので他プロセスとは衝突しない。過去の自プロセス異常終了の
+  // 残骸があっても上書きしてよいため 'w' で開く。
+  const tempPath = `${lockPath}.tmp-${process.pid}`;
+  const fd = openSync(tempPath, 'w');
   try {
-    fd = openSync(lockPath, 'wx');
+    writeSync(fd, JSON.stringify(content));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    linkSync(tempPath, lockPath);
   } catch (error) {
     if (isErrnoException(error) && error.code === 'EEXIST') {
       return false;
     }
     throw error;
-  }
-  try {
-    writeSync(fd, JSON.stringify(content));
   } finally {
-    closeSync(fd);
+    rmSync(tempPath, { force: true });
   }
   return true;
 }
@@ -207,6 +232,7 @@ function reclaimStaleLock(
   judgedRaw: string,
   ownContent: LockContent,
   testOnlyBeforeQuarantine: (() => void) | undefined,
+  testOnlyAfterQuarantine: (() => void) | undefined,
 ): LockHandle {
   const quarantinePath = `${lockPath}.stale-${process.pid}`;
 
@@ -218,6 +244,8 @@ function reclaimStaleLock(
     // 隔離自体に失敗した(既に別プロセスが取り除いた等)。安全側に倒し、削除は行わず例外を投げる。
     throw new LockError(`failed to quarantine stale lock file: ${lockPath}`, { cause: error });
   }
+
+  testOnlyAfterQuarantine?.();
 
   let quarantinedRaw: string;
   try {
@@ -267,6 +295,7 @@ export function acquireLock(lockPath: string, options: AcquireLockOptions = {}):
     checkAlive = defaultCheckAlive,
     getStartTime = defaultGetStartTime,
     __testOnlyBeforeQuarantine,
+    __testOnlyAfterQuarantine,
   } = options;
 
   const ownStartTime = getStartTime(process.pid);
@@ -274,7 +303,9 @@ export function acquireLock(lockPath: string, options: AcquireLockOptions = {}):
     // 自プロセス自身の開始時刻すら確認できないと、次回実行が本ロックの生死を
     // 安全に判定できなくなる。ロックを作らず確認不能として扱う。
     throw new LockError(
-      `unable to determine this process's own start time (pid=${process.pid}); refusing to create an unverifiable lock`,
+      `unable to determine this process's own start time (pid=${process.pid}); ` +
+        'the "ps" command is a required dependency (preinstalled on macOS; procps on Linux). ' +
+        'Refusing to create an unverifiable lock.',
     );
   }
   const ownContent: LockContent = { pid: process.pid, startTime: ownStartTime };
@@ -328,7 +359,13 @@ export function acquireLock(lockPath: string, options: AcquireLockOptions = {}):
     }
     // ここに到達するのは「PID が既に存在しない」または「PID 再利用」のいずれか(stale)。
 
-    return reclaimStaleLock(lockPath, judgedRaw, ownContent, __testOnlyBeforeQuarantine);
+    return reclaimStaleLock(
+      lockPath,
+      judgedRaw,
+      ownContent,
+      __testOnlyBeforeQuarantine,
+      __testOnlyAfterQuarantine,
+    );
   }
 
   throw new LockError(`failed to acquire lock after ${String(MAX_ATTEMPTS)} attempts: ${lockPath}`);

@@ -150,6 +150,68 @@ describe('acquireLock / releaseLock', () => {
     expect(readdirSync(dir)).toEqual([LOCK_BASENAME]);
   });
 
+  it('e2. 隔離取り消し時の競合: 隔離後に作られた新しいロックを壊さず、隔離コピーだけを削除する', () => {
+    const original = { pid: RECORDED_PID, startTime: 'Tue Aug 11 08:00:00 2026' };
+    writeFileSync(lockPath, JSON.stringify(original));
+    const tampered = { pid: RECORDED_PID + 1, startTime: 'Tue Aug 11 09:50:00 2026' };
+    const raceWinner = { pid: RECORDED_PID + 2, startTime: 'Tue Aug 11 09:55:00 2026' };
+    const options: AcquireLockOptions = {
+      ...inspectorsFor({ [RECORDED_PID]: 'dead' }, { [process.pid]: OWN_START_TIME }),
+      // 判定〜隔離の間に内容が書き換わり(内容不一致で隔離取り消しへ進む)、さらに
+      // 隔離〜取り消しの間に別プロセスが新しいロックを作成した状況を再現する。
+      // 取り消しの linkSync は宛先が既存のため EEXIST となり、新しいロックを
+      // 上書きせず隔離コピーの削除だけが行われるべき(undoQuarantine の EEXIST 分岐)。
+      __testOnlyBeforeQuarantine: () => {
+        writeFileSync(lockPath, JSON.stringify(tampered));
+      },
+      __testOnlyAfterQuarantine: () => {
+        writeFileSync(lockPath, JSON.stringify(raceWinner));
+      },
+    };
+
+    let thrown: unknown;
+    try {
+      acquireLock(lockPath, options);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LockError);
+    expect((thrown as LockError).exitCode).toBe(2);
+    // 隔離後に作られた新しいロックがそのまま残り、上書きされていない。
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual(raceWinner);
+    // 隔離コピー(.stale-*)は削除され、残骸がない。
+    expect(readdirSync(dir)).toEqual([LOCK_BASENAME]);
+  });
+
+  it('e3. 回収後の競り負け: 隔離回収は成功したが新規取得で先を越された場合、相手のロックを壊さず失敗する', () => {
+    const original = { pid: RECORDED_PID, startTime: 'Tue Aug 11 08:00:00 2026' };
+    writeFileSync(lockPath, JSON.stringify(original));
+    const raceWinner = { pid: RECORDED_PID + 1, startTime: 'Tue Aug 11 09:55:00 2026' };
+    const options: AcquireLockOptions = {
+      ...inspectorsFor({ [RECORDED_PID]: 'dead' }, { [process.pid]: OWN_START_TIME }),
+      // 隔離内容は判定時と一致する(本当に stale だった)が、隔離〜新規取得の間に
+      // 別プロセスが先にロックを取得した状況を再現する(reclaimStaleLock の競り負け分岐)。
+      __testOnlyAfterQuarantine: () => {
+        writeFileSync(lockPath, JSON.stringify(raceWinner));
+      },
+    };
+
+    let thrown: unknown;
+    try {
+      acquireLock(lockPath, options);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LockError);
+    expect((thrown as LockError).exitCode).toBe(2);
+    // 先に取得した相手のロックがそのまま残っている。
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual(raceWinner);
+    // 隔離コピー(.stale-*)・一時ファイル(.tmp-*)の残骸がない。
+    expect(readdirSync(dir)).toEqual([LOCK_BASENAME]);
+  });
+
   describe('確認不能 (unverifiable): throws LockError without deleting the existing lock', () => {
     it('f1. unparseable lock content', () => {
       writeFileSync(lockPath, 'not json');
