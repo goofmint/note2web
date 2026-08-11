@@ -4,7 +4,15 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isMainEntry, runCli } from '../src/cli.js';
-import { PRECONDITION_FAILURE, SUCCESS } from '../src/exit-codes.js';
+import { PARTIAL_FAILURE, PRECONDITION_FAILURE, SUCCESS } from '../src/exit-codes.js';
+
+describe('exit codes', () => {
+  it('keeps the documented numeric contract (design.md §5.1)', () => {
+    expect(SUCCESS).toBe(0);
+    expect(PARTIAL_FAILURE).toBe(1);
+    expect(PRECONDITION_FAILURE).toBe(2);
+  });
+});
 
 describe('runCli', () => {
   let dir: string;
@@ -55,7 +63,7 @@ describe('runCli', () => {
     const result = await runCli(['sync', '--config', configPath]);
 
     expect(result.exitCode).toBe(SUCCESS);
-    expect(result.stdout.join('\n')).toMatch(/not implemented yet/);
+    expect(result.stdout).toEqual(['note2web sync: not implemented yet']);
     expect(result.stderr).toHaveLength(0);
   });
 
@@ -63,7 +71,7 @@ describe('runCli', () => {
     const result = await runCli(['doctor', '--config', configPath]);
 
     expect(result.exitCode).toBe(SUCCESS);
-    expect(result.stdout.join('\n')).toMatch(/not implemented yet/);
+    expect(result.stdout).toEqual(['note2web doctor: not implemented yet']);
     expect(result.stderr).toHaveLength(0);
   });
 
