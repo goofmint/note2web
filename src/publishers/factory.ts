@@ -2,10 +2,11 @@
  * Publisher ファクトリ(design.md §5.7)。
  *
  * T-16(issue #21)で GitRepoPublisher(zenn/hugo/jekyll 共通基盤)が揃ったため、Git モードの
- * 3サービスはここで配線する。Hugo/Jekyll 固有のファイルパス・frontmatter
- * (design.md §5.7 サービス別表)は本タスクの範囲外(T-18〜T-19)で、現時点では
+ * 3サービスはここで配線する。Jekyll 固有のファイルパス・frontmatter
+ * (design.md §5.7 サービス別表)は本タスクの範囲外(T-19)で、現時点では
  * `src/publishers/render.ts` の汎用 `NoteRenderer` がそれを担う暫定実装のまま。Zenn は
- * T-17(issue #22)で `src/publishers/zenn.ts` の `renderZennArticle` が揃ったため、
+ * T-17(issue #22)で `src/publishers/zenn.ts` の `renderZennArticle`、Hugo は
+ * T-18(issue #23)で `src/publishers/hugo.ts` の `renderHugoArticle` が揃ったため、
  * `resolveRenderer` で service 別に選択する(下記)。
  * Qiita/dev.to/note.com/はてな(T-21〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
@@ -18,6 +19,7 @@ import { PRECONDITION_FAILURE } from '../exit-codes.js';
 import type { Config, ServiceName } from '../config.js';
 import type { Logger } from '../logger.js';
 import { createGitRepoPublisher } from './git-repo.js';
+import { renderHugoArticle } from './hugo.js';
 import { isGitModeService } from './mode.js';
 import { renderGenericArticle, type NoteRenderer } from './render.js';
 import type { Publisher } from './types.js';
@@ -79,7 +81,9 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  *
  * - `zenn`: `renderZennArticle`(`src/publishers/zenn.ts`、T-17)——slug/type/emoji/topics の
  *   Zenn 固有規約(FR-23/FR-24)を扱う。
- * - それ以外(hugo/jekyll/qiita/devto/note/hatena): 後続タスク(T-18〜T-25)でサービス別
+ * - `hugo`: `renderHugoArticle`(`src/publishers/hugo.ts`、T-18)——`date`/`lastmod`/
+ *   `categories`/`tags` の Hugo 固有規約(design.md §5.7 Hugo 行)を扱う。
+ * - それ以外(jekyll/qiita/devto/note/hatena): 後続タスク(T-19〜T-25)でサービス別
  *   Renderer が揃うまでの暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)
  *   を返す——`runSync` 自身の既定値と同じにすることで、`renderNote` を明示的に渡す
  *   (cli.ts)場合と渡さない場合(test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
@@ -87,6 +91,9 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
 export function resolveRenderer(service: ServiceName): NoteRenderer {
   if (service === 'zenn') {
     return renderZennArticle;
+  }
+  if (service === 'hugo') {
+    return renderHugoArticle;
   }
   return renderGenericArticle;
 }
