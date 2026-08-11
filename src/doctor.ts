@@ -12,12 +12,15 @@
  *     (design.md §5.7 同箇所「対象リポジトリへの push / PR 作成権限を確認」)
  *
  * **sync と doctor の役割分担(design.md §5.7 と `src/dependencies.ts` の既存方針への
- * 追従)**: `checkDependencies`(T-14)は意図的に `gh auth status` 権限確認を行わない
- * (同ファイル冒頭の JSDoc 参照)。理由は、sync の毎回実行のたびに追加のネットワーク
- * 呼び出しを強制しないこと、および design.md §5.1 が `doctor` を独立コマンドとして
- * 用意した意図(事前チェックを sync から分離できるようにする)を尊重すること。
- * したがって本モジュールの `gh auth status` / 権限確認は **doctor 専用**であり、
- * `sync`(`src/sync.ts` → `checkDependencies`)からは呼ばれない。
+ * 追従、T-16 時点で更新)**: `checkDependencies`(T-14)は意図的に `gh auth status` /
+ * 権限確認を行わない(同ファイル冒頭の JSDoc 参照)。理由は、`GH_TOKEN` の存在確認という
+ * 副作用の無いチェックと、実際にネットワーク呼び出しを伴う認証・権限確認とを分離し、
+ * `checkDependencies` 自体は「不要な依存は要求しない」設定検証の一部として副作用なく
+ * 完結させたいため。ただし design.md §5.7 は「`doctor` / `sync` 冒頭で… `gh auth status`
+ * … 権限を確認」と、**両方**での実施を明示的に要求しており、T-16(issue #21)の受け入れ
+ * 条件も「権限が無い場合…Git / gh 書き込みを一切行わず exit 2」を `sync` 自身に要求する
+ * ため、`src/sync.ts` の `runSync` も `src/git-auth.ts` の `checkGitModeAuthAndPermission`
+ * を(`prepare()` 等の Git 副作用より前に)呼び出す。本モジュールはその実装を共有する側。
  *
  * **権限確認の具体的なコマンド**: design.md §5.7 は「対象リポジトリへの push / PR
  * 作成権限を確認」とだけ書き、具体的な `gh` サブコマンドを規定していない
@@ -28,6 +31,12 @@
  * 認証ユーザーの `viewerPermission`(`ADMIN` / `MAINTAIN` / `WRITE` / `TRIAGE` / `READ` /
  * `NONE`)を返す。push / PR 作成には `WRITE` 以上が必要なため、
  * `WRITE` / `MAINTAIN` / `ADMIN` のいずれかであることを要求する。
+ *
+ * **T-16(issue #21)時点の追記**: `gh auth status` / 権限確認の実体は `src/git-auth.ts`
+ * (`checkGitModeAuthAndPermission`)へ切り出した。design.md §5.7 の文言(「`doctor` /
+ * `sync` 冒頭で…確認」)は `sync` 冒頭でも同じ確認を要求しており、`src/sync.ts` の
+ * `runSync` もこれを共有するため(同ファイル冒頭 JSDoc 参照)。本モジュールの挙動は
+ * 変更していない。
  */
 
 import type { Config } from './config.js';
@@ -38,18 +47,13 @@ import {
   type DependencyProblem,
 } from './dependencies.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
-import { expandHome } from './paths.js';
-import { isGitModeService } from './publishers/mode.js';
+import { checkGitModeAuthAndPermission } from './git-auth.js';
 import {
   commandExists,
-  DEFAULT_TIMEOUTS,
   runSubprocess,
   type RunSubprocessOptions,
   type RunSubprocessResult,
 } from './subprocess.js';
-
-/** push / PR 作成が可能とみなす `gh repo view --json viewerPermission` の値(design.md §5.7)。 */
-const SUFFICIENT_REPO_PERMISSIONS = new Set(['WRITE', 'MAINTAIN', 'ADMIN']);
 
 /**
  * `doctor` のチェックに失敗したことを表すエラー。`src/dependencies.ts` の
@@ -78,111 +82,6 @@ export interface RunDoctorOptions {
   env?: NodeJS.ProcessEnv;
   /** サブプロセス実行の注入点(`gh auth status` / `gh repo view` に使う)。既定は本物の `runSubprocess`。 */
   runSubprocessFn?: (options: RunSubprocessOptions) => Promise<RunSubprocessResult>;
-}
-
-/** サブプロセスの stdout/stderr から、エラーメッセージ用に先頭の意味のある1行を取り出す。 */
-function firstNonEmptyLine(text: string): string | undefined {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-}
-
-/**
- * Git モード(zenn/hugo/jekyll)専用の追加チェック: `gh auth status` の成否と、
- * 対象リポジトリ(`config.git.repo_path`)への push / PR 作成権限。
- *
- * `gh` コマンド自体が無い、または `GH_TOKEN` が未設定の場合は、`checkDependencies`
- * (共通・service別チェック)が既にその旨を `problems` へ積んでいるはずなので、
- * ここでは追加のサブプロセス実行を行わない(存在しないコマンドの実行や、無意味な
- * 認証エラーで問題を重複報告することを避けるため)。
- */
-async function checkGitModeAuthAndPermission(
-  config: Config,
-  problems: DependencyProblem[],
-  options: Required<Pick<RunDoctorOptions, 'commandExistsFn' | 'env' | 'runSubprocessFn'>>,
-): Promise<void> {
-  const { commandExistsFn, env, runSubprocessFn } = options;
-
-  if (!isGitModeService(config.service)) {
-    return;
-  }
-
-  const ghToken = env.GH_TOKEN;
-  const hasGhToken = ghToken !== undefined && ghToken !== '';
-  const hasGhCommand = await commandExistsFn('gh');
-  if (!hasGhCommand || !hasGhToken) {
-    // どちらも checkDependencies(共通・service別チェック)が既に報告済み。
-    return;
-  }
-
-  const authResult = await runSubprocessFn({
-    command: 'gh',
-    args: ['auth', 'status'],
-    env: { GH_TOKEN: ghToken },
-    timeoutMs: DEFAULT_TIMEOUTS.default,
-  });
-  if (authResult.status !== 'success') {
-    const detail =
-      firstNonEmptyLine(authResult.stderr) ??
-      firstNonEmptyLine(authResult.stdout) ??
-      'unknown error';
-    problems.push({
-      message: `"gh auth status" failed (design.md §5.7 GH_TOKEN authentication): ${detail}`,
-    });
-    return;
-  }
-
-  // config スキーマ上、git モードの service は git ブロックが必須(src/config.ts の
-  // superRefine)。TS の型は optional のままなので、防御的に undefined を弾く。
-  if (config.git === undefined) {
-    problems.push({
-      message: `internal error: git-mode service "${config.service}" has no "git" config block`,
-    });
-    return;
-  }
-
-  const repoPath = expandHome(config.git.repo_path);
-  const permissionResult = await runSubprocessFn({
-    command: 'gh',
-    args: ['repo', 'view', '--json', 'viewerPermission'],
-    cwd: repoPath,
-    env: { GH_TOKEN: ghToken },
-    timeoutMs: DEFAULT_TIMEOUTS.default,
-  });
-  if (permissionResult.status !== 'success') {
-    const detail = firstNonEmptyLine(permissionResult.stderr) ?? 'unknown error';
-    problems.push({
-      message:
-        `failed to determine push/PR permission on target repository ` +
-        `("gh repo view --json viewerPermission" in ${repoPath}, design.md §5.7): ${detail}`,
-    });
-    return;
-  }
-
-  let viewerPermission: string | undefined;
-  try {
-    const parsed: unknown = JSON.parse(permissionResult.stdout);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      'viewerPermission' in parsed &&
-      typeof (parsed as Record<string, unknown>).viewerPermission === 'string'
-    ) {
-      viewerPermission = (parsed as Record<string, string>).viewerPermission;
-    }
-  } catch {
-    viewerPermission = undefined;
-  }
-
-  if (viewerPermission === undefined || !SUFFICIENT_REPO_PERMISSIONS.has(viewerPermission)) {
-    problems.push({
-      message:
-        `insufficient push/PR permission on target repository (${repoPath}): ` +
-        `viewerPermission="${viewerPermission ?? 'unknown'}" (need one of ` +
-        `${[...SUFFICIENT_REPO_PERMISSIONS].join('/')}, design.md §5.7)`,
-    });
-  }
 }
 
 /**

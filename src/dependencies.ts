@@ -25,13 +25,13 @@
  *     持たない — §13-4 の実装時確認課題であり、T-14 の時点では追加できるチェックが無い)
  *   - hatena: 上記の共通チェックのみ(`HATENA_API_KEY` は config.ts が既にチェック済み)
  *
- * `gh auth status` の実行・対象リポジトリへの push/PR 作成権限確認は doctor
- * (design.md §5.1、T-15)の責務とし、本モジュールでは行わない(design.md §5.7 末尾
- * 「doctor / sync 冒頭で GH_TOKEN の存在・gh auth status・…権限を確認」のうち、
- * sync 冒頭が要求する範囲は「存在確認」のみと解釈する。フルの権限検証は毎回の
- * sync 実行のたびに追加のネットワーク呼び出しを強制することになり、design.md §5.1
- * が doctor を独立コマンドとして用意した意図——事前チェックを sync から分離できる
- * ようにする——にも反するため)。
+ * `gh auth status` の実行・対象リポジトリへの push/PR 作成権限確認は本モジュールでは
+ * 行わない(`GH_TOKEN` の存在確認という副作用の無いチェックのみをここで扱う)。
+ * これらはネットワーク呼び出しを伴うため `src/git-auth.ts`
+ * (`checkGitModeAuthAndPermission`)へ分離してあり、`doctor`(design.md §5.1、T-15。
+ * `src/doctor.ts`)と `sync`(T-16。`src/sync.ts` の `runSync`)の両方が、本モジュールの
+ * チェックとは別の手順としてそれを呼び出す(design.md §5.7「`doctor` / `sync` 冒頭で
+ * `GH_TOKEN` の存在・`gh auth status`・…権限を確認」は両コマンドでの実施を要求している)。
  */
 
 import { access } from 'node:fs/promises';
