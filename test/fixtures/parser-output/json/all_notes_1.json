@@ -31,10 +31,10 @@
           "account": "Sample Notes",
           "parent_folder_id": 10,
           "child_folders": {},
-          "html": "<div>\n<h1><a id=\"folder_11\">Sample Notes - Archive</a></h1>\n<ul></ul>\n</div>"
+          "html": "<div>\n<h1><a id=\"folder_11\">Sample Notes - Tech -&gt; Archive</a></h1>\n<ul><li><a href=\"#note_204\">Note 204</a>: 🚀 Launch Notes</li></ul>\n</div>"
         }
       },
-      "html": "<div>\n<h1><a id=\"folder_10\">Sample Notes - Tech</a></h1>\n<ul></ul>\n</div>"
+      "html": "<div>\n<h1><a id=\"folder_10\">Sample Notes - Tech</a></h1>\n<ul>\n<li><a href=\"#note_201\">Note 201</a>: Q3 Sales Table</li>\n<li><a href=\"#note_202\">Note 202</a>: Grocery Checklist</li>\n<li><a href=\"#note_203\">Note 203</a>: Whiteboard Sketch</li>\n</ul>\n<div>\n<h1><a id=\"folder_11\">Sample Notes - Tech -&gt; Archive</a></h1>\n<ul><li><a href=\"#note_204\">Note 204</a>: 🚀 Launch Notes</li></ul>\n</div>\n</div>"
     },
     "12": {
       "primary_key": 12,
@@ -44,7 +44,7 @@
       "account": "Sample Notes",
       "parent_folder_id": null,
       "child_folders": {},
-      "html": "<div>\n<h1><a id=\"folder_12\">Sample Notes - Dev/Ops: Log</a></h1>\n<ul></ul>\n</div>"
+      "html": "<div>\n<h1><a id=\"folder_12\">Sample Notes - Dev/Ops: Log</a></h1>\n<ul><li><a href=\"#note_205\">Note 205</a>: Ops Log</li></ul>\n</div>"
     }
   },
   "notes": {

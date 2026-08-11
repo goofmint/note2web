@@ -34,7 +34,7 @@
     Accounts/<アカウント ZIDENTIFIER>/...  # 添付・描画の実体。フォルダの見た目上のパスとは無関係で、端末上のパス(Accounts/<uuid>/...)をそのまま踏襲する
 ```
 
-`--uuid` はファイル名・アンカー ID を `ZIDENTIFIER`(UUID)にする(`--uuid` 無しの場合は DB のローカル ID になる)。ソース根拠:
+`--uuid` は**ノートとフォルダのアンカー ID、およびノートのファイル名**を `ZIDENTIFIER`(UUID)にする(`--uuid` 無しの場合は DB のローカル ID になる)。**アカウントのアンカーは `--uuid` の影響を受けず、常に `account_<primary_key>`**(`lib/AppleNotesAccount.rb:154` の `doc.a(id: "account_#{@primary_key}")`)。ソース根拠:
 
 - `lib/AppleNoteStore.rb` `write_individual_html`: `note_file_name = note.title_as_filename('.html', use_uuid: use_uuid)`。ノートのパスは `backup_dir.join(note.folder.to_path, note_file_name)`
 - `lib/AppleNote.rb` `title_as_filename`: `"#{unique_id(use_uuid)} - #{file_title}#{ext}"`(`file_title` は `title.tr('[\\/*"<>?|:]\'', '_')` でサニタイズ)
@@ -73,4 +73,6 @@
 - UUID はすべて `xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx` 形式の固定ダミー値(`4`/`8` 桁目は UUID v4 の形式に寄せた見た目上のダミーで、実際のバージョンビットではない)
 - 本文・タイトル・時刻はすべて架空
 - `files/` 配下の画像は 1x1 の透明 PNG(実データではない)
-- ディレクトリ・ファイル名の記号サニタイズ規則(`tr('[\\/*"<>?|:]\'', '_')`)はソースどおり反映しているが、値そのものはダミー
+- 記号サニタイズ規則はソースどおり反映しているが、値そのものはダミー。規則は**ディレクトリ名とノートファイル名で異なる**:
+  - ディレクトリ名(アカウント・フォルダ): `clean_name` = `name.tr('/:\\', '_')`(`/`・`:`・`\` のみ置換。例: `Dev/Ops: Log` → `Dev_Ops_ Log`)
+  - ノートファイル名のタイトル部分: `title.tr('[\\/*"<>?|:]\'', '_')`(`AppleNote#title_as_filename`。上記に加えて `*`・`"`・`<`・`>`・`?`・`|`・`'`・`[`・`]` も置換対象)
