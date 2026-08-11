@@ -4,6 +4,9 @@
   "description": "Publish Apple Notes to blog services",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "note2web": "dist/cli.js"
+  },
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
@@ -17,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
