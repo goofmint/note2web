@@ -151,7 +151,7 @@ flowchart LR
 
 #### T-16 GitRepoPublisher 共通基盤(L)
 - §5.7: `note2web/sync-<UTC時刻>` ブランチ作成、ファイル書き込み + 保留リスト、差分ゼロならブランチ破棄、コミット・push・`gh pr create`、`auto_merge` 時の `gh pr merge`、PR 作成成功後の一括状態確定、`GH_TOKEN` 検証
-- **受け入れ条件**: モック git / gh で各シナリオが design.md §5.7 どおりであること: 「差分なし」= ブランチ破棄・状態未更新、「push / PR 作成失敗」= 状態未更新で次回再試行、「PR 作成成功」= 状態保存、「auto_merge のマージ失敗」= **状態は保存済みのまま** PR を残して実行を失敗扱い。また `auto_merge: false` で PR が手動クローズされた場合、次回 sync ではハッシュ一致により skip され(再配信しない)、ノート変更時に再配信されることを検証する。さらに `GH_TOKEN` が未設定・空・認証失敗の場合、ブランチ作成・push・PR 作成のいずれの Git / gh 書き込みも行わず、StateStore も更新せずに exit 2 となること(T-15 の検証が全 Git 副作用より前に実行されること)を検証する
+- **受け入れ条件**: モック git / gh で各シナリオが design.md §5.7 どおりであること: 「差分なし」= ブランチ破棄・状態未更新、「push / PR 作成失敗」= 状態未更新で次回再試行、「PR 作成成功」= 状態保存、「auto_merge のマージ失敗」= **状態は保存済みのまま** PR を残して実行を失敗扱い。また `auto_merge: false` で PR が手動クローズされた場合、次回 sync ではハッシュ一致により skip され(再配信しない)、ノート変更時に再配信されることを検証する。さらに `GH_TOKEN` が未設定・空・認証失敗の場合、および `GH_TOKEN` と `gh auth status` が有効でも対象リポジトリへの push / PR 作成権限が無い場合のそれぞれで、ブランチ作成・push・`gh pr create` のいずれの Git / gh 書き込みも行わず、StateStore も更新せずに exit 2 となること(T-15 の検証が全 Git 副作用より前に実行されること)をモックで検証する
 
 #### T-17 ZennPublisher(S)
 - `articles/<uuid小文字>.md`、frontmatter(`title` / `emoji`(既定 📝)/ `type` / `topics` / `published`)、フォルダ名が `tech` / `idea` 以外なら failed
@@ -179,7 +179,7 @@ flowchart LR
 
 #### T-23 HatenaPublisher(M)
 - AtomPub XML 生成(`text/x-markdown`、`category`)、Basic 認証、POST / PUT、entry_id 抽出、タイトル照合による復旧(T-22 と同じ規則: 1件一致のみ採用、複数一致は failed)。実機ブログで Markdown 入稿を確認し §13-5 を解消
-- **受け入れ条件**: XML 生成の golden test。HTTP モックで新規 / 更新 / 照合3ケース(1件・0件・重複タイトル)に加え、リクエスト URL・POST / PUT の使い分け・Basic 認証ヘッダ・レスポンスからの entry_id 抽出を個別に検証する。§13-5 の実機確認は「実機ブログへの Markdown 入稿が成功すること」を条件とし、結果を design.md に反映する
+- **受け入れ条件**: XML 生成の golden test。HTTP モックで新規 / 更新 / 照合3ケース(1件・0件・重複タイトル)に加え、リクエスト URL・POST / PUT の使い分け・Basic 認証ヘッダ・レスポンスからの entry_id 抽出を個別に検証する。entry_id の永続化は2回の実行を通して検証する: 初回 POST のレスポンスから抽出した entry_id が StateStore に保存され、2回目の更新が `PUT <blog>/atom/entry/<entry_id>` の URL でその値を再利用すること。§13-5 の実機確認は「実機ブログへの Markdown 入稿が成功すること」を条件とし、結果を design.md に反映する
 
 #### T-24 スパイク: noet 検証(M)
 - §13-4,6: noet のコマンド体系・認証・記事 ID の取得方法、note.com での外部画像 URL(R2 / S3)の扱いを実機確認し、design.md に反映
