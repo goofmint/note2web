@@ -49,8 +49,31 @@ export class MetadataExtractionError extends Error {
 // タイトル・絵文字抽出(design.md §5.3「絵文字判定」、FR-04/FR-05)。
 // ---------------------------------------------------------------------------
 
-/** `\p{Extended_Pictographic}` にマッチする grapheme cluster のみを絵文字として扱う(design.md §5.3)。 */
+/** `\p{Extended_Pictographic}` にマッチする grapheme cluster を絵文字として扱う(design.md §5.3)。 */
 const EXTENDED_PICTOGRAPHIC_PATTERN = /\p{Extended_Pictographic}/u;
+
+/**
+ * 国旗絵文字(Regional Indicator のペア。例 🇯🇵)。RI 記号は
+ * `\p{Extended_Pictographic}` に含まれないため個別に判定する。
+ */
+const REGIONAL_INDICATOR_PAIR_PATTERN = /^\p{Regional_Indicator}{2}$/u;
+
+/**
+ * キーキャップ絵文字(例 #️⃣・1️⃣)。ベース文字(`#` `*` `0-9`)+ 任意の VS16(U+FE0F)+
+ * COMBINING ENCLOSING KEYCAP(U+20E3)の並び。ベース文字自体は
+ * `\p{Extended_Pictographic}` に含まれないため個別に判定する。単独の `#`
+ * (例 "#planning" の先頭)は U+20E3 を伴わないためマッチしない。
+ */
+const KEYCAP_SEQUENCE_PATTERN = /^[0-9#*]\u{FE0F}?\u{20E3}$/u;
+
+/** 先頭 grapheme cluster が絵文字かどうか(FR-05。上記3パターンのいずれか)。 */
+function isEmojiCluster(cluster: string): boolean {
+  return (
+    EXTENDED_PICTOGRAPHIC_PATTERN.test(cluster) ||
+    REGIONAL_INDICATOR_PAIR_PATTERN.test(cluster) ||
+    KEYCAP_SEQUENCE_PATTERN.test(cluster)
+  );
+}
 
 /**
  * grapheme cluster 単位の分割器。ZWJ で連結された絵文字(例 👨‍👩‍👧‍👦)や
@@ -71,8 +94,9 @@ export interface TitleAndEmoji {
  * 1行分のテキスト(`html.ts` の `firstLine`/`extractLines` が返すもの)から
  * タイトルと絵文字を分離する(design.md §5.3・FR-04/FR-05)。
  *
- * 先頭 grapheme cluster を取得し、`\p{Extended_Pictographic}` にマッチする場合のみ
- * 絵文字として扱う。絵文字だった場合、タイトルは先頭 grapheme と直後の空白を
+ * 先頭 grapheme cluster を取得し、`\p{Extended_Pictographic}` にマッチする場合、
+ * または国旗(RI ペア)・キーキャップ列の場合のみ絵文字として扱う。
+ * 絵文字だった場合、タイトルは先頭 grapheme と直後の空白を
  * 除去した残り。空文字列を渡した場合は `{ title: '', emoji: null }` を返す
  * (呼び出し側で「行が取得できない」ことのハンドリングは別途行う。下記
  * `completeNoteMetadata` を参照)。
@@ -84,7 +108,7 @@ export function splitTitleAndEmoji(line: string): TitleAndEmoji {
   }
 
   const cluster = firstSegment.value.segment;
-  if (!EXTENDED_PICTOGRAPHIC_PATTERN.test(cluster)) {
+  if (!isEmojiCluster(cluster)) {
     return { title: line, emoji: null };
   }
 

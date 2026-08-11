@@ -69,7 +69,24 @@ describe('splitTitleAndEmoji', () => {
     });
   });
 
+  it('treats a flag emoji (Regional Indicator pair) as an emoji', () => {
+    const flag = '🇯🇵';
+    expect(splitTitleAndEmoji(`${flag} Japan Notes`)).toEqual({
+      title: 'Japan Notes',
+      emoji: flag,
+    });
+  });
+
+  it('treats a keycap sequence as an emoji', () => {
+    const keycap = '#️⃣';
+    expect(splitTitleAndEmoji(`${keycap} Keycap Notes`)).toEqual({
+      title: 'Keycap Notes',
+      emoji: keycap,
+    });
+  });
+
   it('handles a title that is a hashtag mixed with an emoji-less leading word', () => {
+    // キーキャップ判定は U+20E3 を要求するため、素の "#" で始まる行は絵文字扱いしない。
     expect(splitTitleAndEmoji('#planning kickoff')).toEqual({
       title: '#planning kickoff',
       emoji: null,
