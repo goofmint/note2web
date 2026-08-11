@@ -4,7 +4,7 @@ requirements.md(以下「要件」)に基づく設計書。要件の FR / NFR �
 
 ## 1. 設計方針
 
-- **パイプライン構成**: 「エクスポート → 変換 → 公開」を単方向のパイプラインとして実装する(FR-31)。各段は前段の出力のみに依存し、状態を共有しない
+- **パイプライン構成**: 「エクスポート → 変換 → 公開」を単方向のパイプラインとして実装する(FR-31)。各段は「前段の出力」と、唯一の副作用ポートである **StateStore** のみに依存する。StateStore は実行開始時に読み取りスナップショットを提供し(AssetUploader の既アップロード判定、Publisher への `prev: NoteState` 受け渡しはこのスナップショットから行う)、書き込みは「アセットアップロード成功時」と「ノート配信の確定時」の2箇所に限定する(§5.6)
 - **Publisher の抽象化**: 配信先ごとの差異は Publisher インターフェースの実装に閉じ込める。Git リポジトリ出力(Zenn / Hugo / Jekyll)は共通基盤 + サービス別の frontmatter・パス規約のみ差し替える
 - **外部ツールはサブプロセス**: `apple_cloud_notes_parser`・`gh`・`@qiita/qiita-cli`・`noet` はすべて外部 CLI として呼び出す。ライブラリとしてリンクしない
 - **失敗の局所化**: 1ノートの失敗が実行全体を止めない。失敗したノートは状態を更新せず、次回実行で自動的に再試行される(NFR-06)
@@ -54,7 +54,7 @@ note2web sync --config ~/.config/note2web/zenn.yaml
 
 | 未決事項 | 結論 |
 |---|---|
-| `apple_cloud_notes_parser` の出力形式 | HTML(表を実際の表として描画)・JSON(アカウント / フォルダ / ノートの要約、更新日時含む)・CSV・SQLite を出力。埋め込みファイル(画像・**描画**)は `files` フォルダに抽出される。UUID(`ZIDENTIFIER`)は HTML / CSV / JSON に出力可能。Markdown 出力は無い → **HTML を本文ソース、JSON をメタデータソースとする** |
+| `apple_cloud_notes_parser` の出力形式 | HTML(表を実際の表として描画)・JSON(アカウント / フォルダ / ノートの要約、更新日時含む)・CSV・SQLite を出力。埋め込みファイル(画像・**描画**)は `files` フォルダに抽出される。UUID(`ZIDENTIFIER`)は HTML / CSV / JSON に出力可能で、`--individual-files` によるノート単位の HTML 出力と `--uuid` による UUID ベースの命名に対応。Markdown 出力は無い → **HTML を本文ソース、JSON をメタデータソースとする**(対応規約は §5.2) |
 | 同・チェックリストの形式 | README に言及なし → HTML 出力での表現を実装初期に実機確認する(§13) |
 | 同・手書きの形式 | 描画(drawings)は埋め込みファイルとして抽出される。抽出物が画像でない場合のフォールバックは実機確認(§13) |
 | はてなブログ AtomPub の Markdown 入稿 | `content type="text/x-markdown"` で入稿可能(複数の実装事例で確認。公式仕様書はネットワーク制約で未参照のため実装時に実機確認)。**ブログの編集モードが Markdown であることを利用条件とする** |
@@ -85,8 +85,9 @@ note2web doctor --config <path>   # 依存 CLI・環境変数・権限の事前�
 
 `apple_cloud_notes_parser` をサブプロセスで実行し、一時ディレクトリに出力させる。
 
-- 実行例: `ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o <tmpdir>` + UUID 出力オプション
+- 実行例: `ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o <tmpdir> --individual-files --uuid`
 - parser のインストール先パスと Notes コンテナパスは設定 YAML の `exporter` 項目で指定(既定値あり、§8)
+- **HTML と UUID の対応規約**: `--individual-files` でノートごとの個別 HTML を出力させ、`--uuid` でファイル名・出力内の識別子を `ZIDENTIFIER`(UUID)にする。JSON 側の UUID から個別 HTML の相対パスを一意に解決できることを本文取得の前提とし、対応する HTML が見つからないノートはそのノートのみ failed 扱いにする。オプション名・出力パス形式は parser の更新で変わり得るため、複数ノートを含む fixture の結合テストで検証する(§12)
 - 出力のうち利用するもの:
   - **JSON**: フォルダ階層、ノート一覧、UUID、作成 / 更新日時 → `Note` モデルの骨格
   - **HTML**: ノート本文(表・書式を保持)→ 本文変換の入力
@@ -104,7 +105,7 @@ interface Note {
   tags: string[];        // ノート内ハッシュタグ（FR-07）
   createdAt: Date;       // FR-08
   updatedAt: Date;       // FR-08
-  bodyHtml: string;      // parser の HTML 出力から該当ノート部分を切り出したもの
+  bodyHtml: string;      // parser が出力した当該ノートの個別 HTML（UUID で解決。§5.2）
   attachments: Attachment[];  // files/ 配下の実体への参照
 }
 ```
@@ -140,7 +141,14 @@ HTML → Markdown 変換。unified(rehype-parse → rehype-remark → remark-str
 
 - サービス別の frontmatter(§9)+ 変換済み Markdown 本文を連結した**最終成果物の文字列**に対して SHA-256 を取る。これが「コンテンツハッシュ」(FR-15)
 - frontmatter に実行時刻など毎回変わる値を**入れない**こと(冪等性が壊れるため)。日付はノートの作成 / 更新日時のみ使用する
-- StateStore は状態 JSON(§8)の読み書きを担う。書き込みは「一時ファイルに書いて rename」のアトミック更新とし、ノート1件の配信成功ごとに保存する(途中クラッシュで成功済み分が失われないように)
+- **直列化の正規化規約**(実行環境が変わっても同一入力から同一ハッシュになるように固定する):
+  - 文字コードは UTF-8、改行は LF、テキストは Unicode NFC に正規化
+  - frontmatter のキー順は §5.7 のサービス別表の記載順で固定。YAML は決定的な自前 serializer(キー順保持・クォート規則固定: 文字列は必要な場合のみダブルクォート + `\` エスケープ)で生成し、ライブラリ既定の並べ替え・スタイル選択に依存しない
+  - 日時は秒精度の ISO 8601 で、設定 `timezone`(既定 `Asia/Tokyo`)の固定オフセットにより文字列化する。実行マシンの TZ・ロケールに依存しない
+  - 同一入力 → 同一直列化結果 → 同一ハッシュを golden test で固定する(§12)
+- StateStore は状態 JSON(§8)の読み書きを担う。読み取りは実行開始時のスナップショット1回。書き込みは「一時ファイルに書いて rename」のアトミック更新とし、書き込みポイントは次の2つに限定する(途中クラッシュで成功済み分が失われないように、いずれも都度保存):
+  1. **アセットアップロード成功時**: `assets` エントリのみ即時保存する。後段でそのノートの配信が失敗しても保存は維持され、次回実行で再アップロードしない(FR-17)
+  2. **ノート配信の確定時**: API / CLI モードでは `publish()` 成功ごと、Git モードでは `finalize()` の PR 作成成功後に一括(§5.7)
 
 ### 5.7 Publisher(`src/publishers/`)
 
@@ -155,13 +163,14 @@ interface Publisher {
 
 #### GitRepoPublisher(Zenn / Hugo / Jekyll 共通基盤)
 
-1. 実行開始時に `repo_path` で `git fetch` → `base_branch` から作業ブランチ `note2web/sync-<実行開始時刻>` を作成(FR-19)
-2. `publish()` は変更のあったノートのファイルを規約パス(§9)へ書き込むだけ
+1. 実行開始時に `repo_path` で `git fetch` → `base_branch` から作業ブランチ `note2web/sync-<UTC時刻>` を作成(FR-19)。時刻部分は `YYYYMMDDTHHMMSSZ` 形式とし、Git の ref 名に使えない `:` 等を含めない
+2. `publish()` は変更のあったノートのファイルを規約パス(§9)へ書き込み、結果を**保留リスト**に積むだけ(この時点では状態 JSON を更新しない)
 3. `finalize()`:
    - `git status` で差分ゼロなら、ブランチを削除して終了。コミットも PR も作らない(FR-22)
    - 差分があればコミット・`git push` し、`gh pr create` で PR 作成(FR-20)
    - `auto_merge: true` なら `gh pr merge --merge --delete-branch` を実行(FR-21)。ブランチ保護等でマージ不能なら PR を残したまま失敗として報告
-4. 状態 JSON のハッシュ更新は **PR 作成成功時点**で確定する(マージ待ちの間に再実行されても同内容のブランチが乱立しないように)。auto_merge なしで PR がクローズされた場合、その内容は再配信されない(次にノートが変更されるまで)。この挙動は README に明記する
+4. **状態更新のトランザクション**: 保留リストのハッシュ確定・保存は **PR 作成成功後に一括**で行う。push や PR 作成に失敗した場合は何も確定せず、全ノートが次回実行で再試行される。確定基準をマージではなく PR 作成に置くのは、マージ待ちの間に再実行されても同内容のブランチが乱立しないようにするため。auto_merge なしで PR がクローズされた場合、その内容は再配信されない(次にノートが変更されるまで)。この挙動は README に明記する
+5. **認証**: `gh` は `GH_TOKEN` 環境変数で認証する(NFR-03。対話ログインに依存しない)。`doctor` / `sync` 冒頭で `GH_TOKEN` の存在・`gh auth status`・対象リポジトリへの push / PR 作成権限を確認し、不備があれば配信前に exit 2
 
 サービス別差分:
 
@@ -183,9 +192,13 @@ interface Publisher {
 
 #### DevtoPublisher
 
-- Forem API v1 を直接呼ぶ(FR-26)。新規 `POST /api/articles`、更新 `PUT /api/articles/{id}`(ID は状態 JSON から)
-- `tags` は先頭4個に切り詰め(超過時は警告ログ)。`canonical_url` は設定にベース URL がある場合のみ付与
-- 認証: `api-key` ヘッダ。値は環境変数(既定 `DEVTO_API_KEY`)
+- Forem API v1 を直接呼ぶ(FR-26)。新規 `POST /api/articles`、更新 `PUT /api/articles/{id}`(`{id}` は状態 JSON の `remoteId`)
+- **wire contract**:
+  - ヘッダ: `api-key: <トークン>`、`Content-Type: application/json`、`Accept: application/vnd.forem.api-v1+json`
+  - リクエストボディ(新規・更新共通): `{"article": {"title": …, "body_markdown": …, "published": true, "tags": "<カンマ区切り・最大4個>", "canonical_url": …}}`。`canonical_url` は設定 `canonical_base_url` がある場合のみ含める
+  - 成功レスポンスの `id` を状態 JSON の `remoteId` に、`url` を `url` に保存する
+- `tags` は先頭4個に切り詰め(超過時は警告ログ)
+- 認証トークンは環境変数(既定 `DEVTO_API_KEY`)
 
 #### NotePublisher
 
@@ -198,34 +211,60 @@ interface Publisher {
 - `content type="text/x-markdown"` で Markdown 本文をそのまま入稿。`<category term="フォルダ名"/>`、タグもはてなではカテゴリとして表現されるため `category` 要素で送る
 - 認証: Basic(はてな ID + API キー)。API キーは環境変数(既定 `HATENA_API_KEY`)
 
+#### 応答不明時の重複防止(API / CLI 系 Publisher 共通)
+
+新規作成の要求が受理されたのに応答が失われた場合(タイムアウト・接続断)、記事は作成済みだが `remoteId` が未保存になり、素朴に再試行すると重複記事を作る。次の規約で防ぐ:
+
+- HTTP はタイムアウト 30 秒。**新規作成(POST)は自動リトライしない**。更新(PUT)は同一内容の再送が冪等なので、接続系エラーに限り1回だけ再試行してよい
+- `remoteId` の無いノートを新規作成する**前に、既存記事の照合**を行う:
+  - dev.to: 自分の記事一覧 API からタイトル一致で検索
+  - はてな: コレクション URI の entry 一覧からタイトル一致で検索
+  - Qiita: qiita-cli が投稿後に frontmatter へ書き戻す `id` をワークスペースのファイルから読む(CLI 側の機構をそのまま利用し、独自照合はしない)
+  - note.com: noet の記事一覧 / エクスポート機能で照合(具体手段は実装時確認、§13)
+- 照合で一意に見つかった場合はその ID を `remoteId` に採用し、更新として配信する。見つからない・複数一致の場合は新規作成し、重複の可能性を警告ログに残す(重複記事の削除は手動。孤児を許容する FR-18 の方針と整合)
+
 ## 6. 処理フロー
 
 ```
 sync:
   1. 設定 YAML 読み込み・検証(環境変数の存在チェック含む)
-  2. 依存チェック(ruby / parser / 各サービスの CLI / gh)         … 失敗なら exit 2
+  2. 依存チェック（下表。service ごとに必要なものだけ）        … 失敗なら exit 2
   3. Exporter 実行 → 一時ディレクトリ
   4. JSON からノート一覧を構築、設定の folders でフィルタ(FR-02)
   5. Git モードなら作業ブランチ作成
   6. 各ノートについて（1件ずつ、失敗は隔離）:
      a. メタデータ抽出 → 本文変換
-     b. アセット: 状態 JSON に無い hash のみアップロード
+     b. アセット: 状態 JSON に無い hash のみアップロードし、
+        成功ごとに assets エントリを即時保存（§5.6。後段が失敗しても維持）
      c. frontmatter + 本文をレンダリング → SHA-256
      d. 状態 JSON の content_hash と一致 → skip をログして次へ
      e. 不一致 → Publisher.publish()
-     f. 成功 → 状態 JSON 更新・保存、published/updated をログ
-        失敗 → 状態は触らず failed をログ（次回再試行）
-  7. Git モード: finalize()（差分ゼロならブランチ破棄）
+     f. 成功 → published/updated をログ。ノート状態の確定は
+        API / CLI モード: この時点で保存、Git モード: 保留（finalize() で一括。§5.7）
+        失敗 → ノート状態は触らず failed をログ（次回再試行）
+  7. Git モード: finalize()（差分ゼロならブランチ破棄。PR 作成成功後に保留分を一括保存）
   8. 一時ディレクトリ削除、サマリログ、終了コード決定
 ```
 
-- 同一ノートの二重処理を避けるため、状態 JSON と同じ場所にロックファイルを置き、多重起動時は即座に exit 2(cron の実行間隔より処理が長引いた場合の保護)
+依存チェック(手順2)の対象は service と公開モードで決まる。不要な依存は要求しない:
+
+| service | 必須依存(共通分を除く) |
+|---|---|
+| 共通 | `ruby` + `apple_cloud_notes_parser`、R2 / S3 の認証環境変数 |
+| zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
+| qiita | Node.js、`@qiita/qiita-cli`、`QIITA_TOKEN` |
+| devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |
+| note | `noet` と認証設定 |
+| hatena | `HATENA_API_KEY` のみ(API 直接。CLI 不要) |
+
+- **多重起動防止**: 状態 JSON と同じ場所にロックファイルを置く。`O_CREAT | O_EXCL` によるアトミック作成とし、PID と開始時刻を記録する。既にロックが存在する場合は記録された PID の生存を確認し、生存中なら exit 2、プロセスが存在しなければ stale とみなして削除・再取得する(異常終了でロックが残っても以後の実行が恒久的に止まらないように)
 
 ## 7. 設定 YAML スキーマ
 
 ```yaml
 # 共通部
 service: zenn                  # zenn | hugo | jekyll | qiita | devto | note | hatena
+timezone: Asia/Tokyo           # frontmatter 日時の固定オフセット（ハッシュ安定化のため。既定 Asia/Tokyo）
 source:
   folders: [tech, idea]        # 配信対象フォルダ（FR-02）。Zenn ではフォルダ名が type になる
 exporter:
@@ -277,6 +316,7 @@ hatena:
 {
   "version": 1,
   "service": "zenn",
+  "target": "配信先の識別子。Git モード: repo_path、qiita / note: workspace、hatena: blog_id、devto: API ホスト",
   "notes": {
     "5c1c2c3d-…-uuid": {
       "contentHash": "sha256:ab12…",
@@ -297,7 +337,7 @@ hatena:
 }
 ```
 
-- `version` はスキーマ移行用。読み込み時に未知の version なら exit 2
+- 読み込み時に `version`・`service`・`target` を検証する。未知の `version`、または `service` / `target` が現在の設定と一致しない場合は exit 2(状態ファイルの流用によって、別の配信先の `contentHash` で skip したり別サービスの `remoteId` で更新したりする事故を防ぐ)。`target` は新規作成時に設定から記録する
 - ノートの削除・移動時もエントリは削除しない(FR-18。単に参照されなくなるだけ)
 
 ## 9. ログ設計(NFR-01)
@@ -329,7 +369,7 @@ JSON Lines。1行1イベント。標準出力へ常時、設定があればフ�
 | 個別ノートの変換・配信失敗 | そのノートのみ failed、状態未更新、処理続行(NFR-06) |
 | アセットアップロード失敗 | そのノートを failed 扱い(URL 未確定の本文を配信しない) |
 | `gh pr merge` 失敗(保護ルール等) | PR は残し、実行は失敗として報告 |
-| 多重起動 | ロックファイル検出で即 exit 2 |
+| 多重起動 | 生存プロセスのロック検出で即 exit 2(stale ロックは自動回収して続行。§6) |
 
 ## 11. リポジトリ構成(本体)
 
@@ -350,8 +390,9 @@ note2web/
 
 ## 12. テスト方針
 
-- **ユニット**: メタデータ抽出(grapheme / 絵文字判定・ハッシュタグ行の除去)、HTML→Markdown(表・チェックリスト)、frontmatter 生成、ハッシュの安定性(同一入力 → 同一ハッシュ)、タグ制約の切り詰めロジック
-- **結合**: parser の実出力を fixture 化し、エクスポート以降を通しで検証。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
+- **ユニット**: メタデータ抽出(grapheme / 絵文字判定・ハッシュタグ行の除去)、HTML→Markdown(表・チェックリスト)、frontmatter 生成、タグ制約の切り詰めロジック
+- **golden test**: 正規化直列化の固定(§5.6)。同一入力ノートに対して期待する直列化文字列とハッシュ値をリポジトリに固定し、serializer・依存更新でハッシュが変わったら検知する
+- **結合**: parser の実出力(**複数ノートを含む** fixture)でエクスポート以降を通しで検証。JSON の UUID と個別 HTML(`--individual-files --uuid`)の対応が一意に解決できることをここで検証する。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
 - **実機確認**(CI 不能なもの): parser のチェックリスト / 描画出力、qiita-cli の無人認証、noet の公開フロー、はてな AtomPub の Markdown 入稿。§13 の項目と対応
 
 ## 13. 実装時に確認が必要な残課題
