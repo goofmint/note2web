@@ -8,3 +8,8 @@ package-lock.json
 
 # Local Claude Code settings (not tracked in git)
 .claude/
+
+# apple_cloud_notes_parser output fixtures: HTML is reproduced verbatim from the
+# parser's real generation code (see test/fixtures/parser-output/README.md), not
+# hand-authored, so it is intentionally left in the parser's own formatting.
+test/fixtures/parser-output/html/

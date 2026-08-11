@@ -54,9 +54,9 @@ note2web sync --config ~/.config/note2web/zenn.yaml
 
 | 未決事項 | 結論 |
 |---|---|
-| `apple_cloud_notes_parser` の出力形式 | HTML(表を実際の表として描画)・JSON(アカウント / フォルダ / ノートの要約、更新日時含む)・CSV・SQLite を出力。埋め込みファイル(画像・**描画**)は `files` フォルダに抽出される。UUID(`ZIDENTIFIER`)は HTML / CSV / JSON に出力可能で、`--individual-files` によるノート単位の HTML 出力と `--uuid` による UUID ベースの命名に対応。Markdown 出力は無い → **HTML を本文ソース、JSON をメタデータソースとする**(対応規約は §5.2) |
-| 同・チェックリストの形式 | README に言及なし → HTML 出力での表現を実装初期に実機確認する(§13) |
-| 同・手書きの形式 | 描画(drawings)は埋め込みファイルとして抽出される。抽出物が画像でない場合のフォールバックは実機確認(§13) |
+| `apple_cloud_notes_parser` の出力形式 | HTML(表を実際の表として描画)・JSON(アカウント / フォルダ / ノートの要約、更新日時含む)・CSV・SQLite を出力。埋め込みファイル(画像・**描画**)は `files` フォルダに抽出される。UUID(`ZIDENTIFIER`)は HTML / CSV / JSON に出力可能で、`--individual-files` によるノート単位の HTML 出力と `--uuid` による UUID ベースの命名に対応。Markdown 出力は無い → **HTML を本文ソース、JSON をメタデータソースとする**(対応規約は §5.2)。**確認方法**: パーサ(commit `4754a2b`)を clone し、同梱の実エクスポート blob(`spec/data/exported_blobs/*.bin`)に対して実コード(`AppleNote#generate_html` 等)を実行し、`lib/` のソースと同梱 `JSON.md` を突き合わせて確認した。macOS 実機での `NoteStore.sqlite` に対するエンドツーエンド実行は未実施(§13 冒頭の注記、および `test/fixtures/parser-output/README.md` 参照) |
+| 同・チェックリストの形式 | **確認済み(§13-1 解消)**。`<ul class="checklist" data-apple-notes-indent-amount="N">` の下に `<li class="checked">` / `<li class="unchecked">` が並ぶ(ネストは `li` の中に入れ子の `ul.checklist` を置く形)。実データ blob (`list_indents_gzipped.bin`) をパーサの実コードで実行して確認済み。詳細は §13 |
+| 同・手書きの形式 | **確認済み(§13-2 解消)**。描画(`com.apple.drawing.2` / `com.apple.drawing` / `com.apple.paper`)は `files/Accounts/<アカウント UUID>/FallbackImages/<UUID>/...` にラスター画像(png/jpg/jpeg。実体は Apple 側が生成する「フォールバック画像」)として抽出され、ベクターデータそのものは出力されない。本文には `<a href="…"><img src="…" data-apple-notes-zidentifier="…"></a>` が挿入される。ソースコード読解により確認(exported_blobs に手書きの実データが無いため実行検証は未実施)。詳細は §13 |
 | はてなブログ AtomPub の Markdown 入稿 | `content type="text/x-markdown"` で入稿可能(複数の実装事例で確認。公式仕様書はネットワーク制約で未参照のため実装時に実機確認)。**ブログの編集モードが Markdown であることを利用条件とする** |
 | はてなブログの認証方式 | **Basic 認証(はてな ID + API キー)を採用**。HTTPS 経由のため十分であり、実装が最も単純 |
 | dev.to の方式 | **Forem API v1 を直接叩く方式を採用**。`@sinedied/devto-cli` は「GitHub リポジトリに画像をホストする」ワークフロー前提で、本ツールの R2 / S3 方式と競合するため |
@@ -88,6 +88,9 @@ note2web doctor --config <path>   # 依存 CLI・環境変数・権限の事前�
 - 実行例: `ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o <tmpdir> --individual-files --uuid`
 - parser のインストール先パスと Notes コンテナパスは設定 YAML の `exporter` 項目で指定(既定値あり、§8)
 - **HTML と UUID の対応規約**: `--individual-files` でノートごとの個別 HTML を出力させ、`--uuid` でファイル名・出力内の識別子を `ZIDENTIFIER`(UUID)にする。JSON 側の UUID から個別 HTML の相対パスを一意に解決できることを本文取得の前提とし、対応する HTML が見つからないノートはそのノートのみ failed 扱いにする。オプション名・出力パス形式は parser の更新で変わり得るため、複数ノートを含む fixture の結合テストで検証する(§12)
+  - **具体的な対応規則(パーサのソース `lib/AppleNoteStore.rb` `write_individual_html` / `lib/AppleNote.rb` `title_as_filename` / `lib/AppleNotesFolder.rb` `to_path` を確認して確定。§13-7 と同一の確認方法)**: 出力ディレクトリは `<出力先>/html/note_store<N>/` を起点とし、その配下に `<アカウント名>-<ルートフォルダ名>/`(ルートフォルダ)→ 子フォルダはアカウント名を繰り返さずそのまま入れ子(`<親フォルダのパス>/<子フォルダ名>/`)という階層が並ぶ。各フォルダディレクトリの直下に、そのフォルダに属するノートの個別 HTML `<UUID> - <サニタイズ済みタイトル>.html` が置かれる(`file_title` は `title.tr('[\\/*"<>?|:]\'', '_')` でサニタイズ)。この「フォルダ名を辿ってノートファイルを探す」経路は JSON 側にも `folder_key` / `folder` として同じフォルダ情報があるため、**JSON の `folders` 階層(`parent_folder_id` / `child_folders`)から対象フォルダの `<アカウント名>-...` パスを再構築し、そのディレクトリ内で `<uuid> - *.html` を UUID 前方一致で探す**、という解決手順を NoteReader の実装規約とする(タイトルのサニタイズ結果を NoteReader 側で再現する必要がないようにするため)。ただし、ディレクトリ名にはアカウント名・フォルダ名そのままではなく **parser の `clean_name`(`name.tr('/:\\', '_')`。`lib/AppleNotesAccount.rb` / `lib/AppleNotesFolder.rb`)による置換後の名前**が使われるため、パス再構築時は JSON の未変換の名前に対して同じ置換(`/`・`:`・`\` → `_`)を適用すること(記号を含むフォルダ名の例は fixture の `Dev/Ops: Log` → `Sample Notes-Dev_Ops_ Log/` を参照)
+  - JSON の各ノートオブジェクトが持つ `"html"` フィールド(`generate_html()` を引数省略で呼んだ結果。`individual_files: false, use_uuid: false` 相当)は、`--individual-files --uuid` で書き出される個別 HTML ファイルとは**アンカー形式・`files/` への相対パスの深さが異なる**別物であり、本文ソースとしては使わない(個別 HTML ファイルのみを本文ソースとする、という上記の規約はこの差異を踏まえたもの)
+  - 添付・描画の実体は `<出力先>/files/Accounts/<アカウント UUID>/...`(端末上のパスをそのまま踏襲。フォルダの見た目上のパスとは無関係)に置かれ、個別 HTML ファイルからの相対パスの `../` の数はノートの入っているフォルダの深さに応じて変わる(ルートフォルダのノートで3階層分)。具体例は `test/fixtures/parser-output/`(§12)を参照
 - 出力のうち利用するもの:
   - **JSON**: フォルダ階層、ノート一覧、UUID、作成 / 更新日時 → `Note` モデルの骨格
   - **HTML**: ノート本文(表・書式を保持)→ 本文変換の入力
@@ -110,9 +113,11 @@ interface Note {
 }
 ```
 
+- **JSON フィールドとの対応(§13-7 で確定)**: `uuid` ← JSON ノートオブジェクトの `uuid`、`folder` ← 同 `folder`(フォルダ名の文字列。フォルダ階層自体が必要な場合は JSON トップレベルの `folders`(`parent_folder_id` / `child_folders` で表現される入れ子構造)を別途辿る)、`createdAt` ← `creation_time`、`updatedAt` ← `modify_time`(いずれも `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列。固定書式のため専用パーサ不要)、`bodyHtml` ← 個別 HTML ファイル(JSON の `html` フィールドではない。§5.2 参照)
+  - **差分(調査により判明)**: 当初想定していなかったが、JSON のノートオブジェクトは `hashtags`(例 `["#タグ"]`)フィールドを**パーサ自身が抽出済み**の形で持つ(`lib/AppleNote.rb` `prepare_json`。埋め込みオブジェクト中の `AppleNotesEmbeddedInlineHashtag` を機械的に収集したもの)。したがって `tags` は本文 HTML の正規表現走査ではなく、この JSON の `hashtags` を第一の情報源とする方が頑健(絵文字や記号を含むタグの誤検出を避けられる)。ただし JSON の `hashtags` は「本文中のインラインタグ」と「タグ置き場として末尾に置かれた行のタグ」を区別しない一覧に過ぎず、**本文からタグのみの行を除去するかどうかの判定(下記)は引き続き HTML 側のテキスト解析が必要**であるため、`tags` の値の取得元だけを JSON に置き換え、本文除去ロジックは変更しない
 - **1行目**: HTML 中の最初のブロック要素のテキストとする
 - **絵文字判定**: `Intl.Segmenter` で先頭 grapheme を取得し、`\p{Extended_Pictographic}` にマッチする場合のみ絵文字として扱う。絵文字だった場合、タイトルは先頭 grapheme と直後の空白を除去した残り
-- **ハッシュタグ**: 本文テキスト中の `#タグ` パターンを抽出する。**ハッシュタグのみで構成される行**(タグ置き場として末尾に置かれる行)は本文から除去し、文中に現れるものは本文に残す
+- **ハッシュタグ**: `tags` の値は JSON ノートオブジェクトの `hashtags` フィールド(parser が抽出済み。上記差分参照)のみを情報源とし、本文からの正規表現抽出は行わない。**ハッシュタグのみで構成される行**(タグ置き場として末尾に置かれる行)を本文から除去するかどうかの判定にのみ、引き続き HTML 側のテキスト解析を用いる(文中に現れるタグは本文に残す)
 
 ### 5.4 BodyTransformer(`src/transform/`)
 
@@ -121,8 +126,8 @@ HTML → Markdown 変換。unified(rehype-parse → rehype-remark → remark-str
 | 入力(HTML) | 出力(Markdown) | 要件 |
 |---|---|---|
 | `<table>` | GFM の表 | FR-11 |
-| チェックリスト(表現は実機確認) | `- [ ]` / `- [x]` | FR-12 |
-| 描画への参照 | 画像参照 `![](アセットURL)` | FR-13 |
+| チェックリスト: `<ul class="checklist" data-apple-notes-indent-amount="N"><li class="checked">` / `<li class="unchecked">`(§13-1 で確認済み。ネストは `li` 内の入れ子 `ul.checklist`) | `- [x]` / `- [ ]`(インデントに応じてネスト) | FR-12 |
+| 描画への参照: `<a href="…"><img src="…FallbackImages/<UUID>/…" data-apple-notes-zidentifier="…"></a>`(§13-2 で確認済み。実体は `files/Accounts/<アカウント UUID>/FallbackImages/…` 配下のラスター画像) | 画像参照 `![](アセットURL)` | FR-13 |
 | 添付への参照 | アセット URL(画像は `![]()`、それ以外はリンク) | FR-14 |
 | 見出し・リスト・強調等 | 対応する Markdown | FR-10 |
 
@@ -389,7 +394,12 @@ note2web/
     state/store.ts
     publishers/{base,git-repo,zenn,hugo,jekyll,qiita,devto,note,hatena}.ts
   test/
-    fixtures/        # parser 出力（HTML/JSON）のサンプル
+    fixtures/
+      parser-output/  # apple_cloud_notes_parser の実出力を模したサンプル(--individual-files --uuid)
+        json/all_notes_1.json
+        html/note_store1/…            # フォルダ階層を反映した個別 HTML(§5.2 のパス規約どおり)
+        files/Accounts/<uuid>/…       # 添付・描画の実体
+        README.md                     # 由来・確認方法・匿名化方針(§13 参照)
   requirements.md  design.md  README.md
 ```
 
@@ -397,17 +407,20 @@ note2web/
 
 - **ユニット**: メタデータ抽出(grapheme / 絵文字判定・ハッシュタグ行の除去)、HTML→Markdown(表・チェックリスト)、frontmatter 生成、タグ制約の切り詰めロジック
 - **golden test**: 正規化直列化の固定(§5.6)。同一入力ノートに対して期待する直列化文字列とハッシュ値をリポジトリに固定し、serializer・依存更新でハッシュが変わったら検知する。ケースには YAML の境界値(`null` / 真偽値 / 数値 / 日時に見える文字列、`:` `#` `"` `\` 改行を含む文字列)を必ず含める
-- **結合**: parser の実出力(**複数ノートを含む** fixture)でエクスポート以降を通しで検証。JSON の UUID と個別 HTML(`--individual-files --uuid`)の対応が一意に解決できることをここで検証する。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
-- **実機確認**(CI 不能なもの): parser のチェックリスト / 描画出力、qiita-cli の無人認証、noet の公開フロー、はてな AtomPub の Markdown 入稿。§13 の項目と対応
+- **結合**: `test/fixtures/parser-output/`(**表・チェックリスト・描画参照・絵文字タイトル+ハッシュタグ+ネストフォルダを含む複数ノート**の fixture)でエクスポート以降を通しで検証。JSON の UUID と個別 HTML(`--individual-files --uuid`)の対応が一意に解決できることをここで検証する。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
+  - この fixture は実機の `NoteStore.sqlite` からではなく、parser 実装をパーサ同梱の実エクスポート blob に対して実行した結果 + ソースコード読解によって構成した(T-08, §13)。由来・確認方法・各ノートがどこまで実行検証済みかは `test/fixtures/parser-output/README.md` に明記する
+- **実機確認**(CI 不能なもの): qiita-cli の無人認証、noet の公開フロー、はてな AtomPub の Markdown 入稿。§13 の項目と対応。parser のチェックリスト / 描画出力は §13-1 / §13-2 のとおりパーサ実装の実行 + ソース読解で確認済みのため、本項目からは除外した(macOS 実機での `NoteStore.sqlite` に対するエンドツーエンド実行は依然未実施)
 
 ## 13. 実装時に確認が必要な残課題
 
-1. parser の HTML 出力における**チェックリストの表現**(→ rehype-remark の変換ルールを確定)
-2. parser が抽出する**描画ファイルの形式**(画像でない場合の画像化手段)
+**確認方法についての注記(1・2・7 に共通)**: 本タスクの実行環境には macOS も実機の Apple Notes データベースも無いため、「実機確認」は `apple_cloud_notes_parser`(commit `4754a2b62686570cca46690d101079e80cf6ae66`, 2026-07-25)の**実装をパーサ同梱の実エクスポート blob(`spec/data/exported_blobs/*.bin`)に対して実行**し、加えて `lib/` のソースコードと同梱 `JSON.md` を読解する、という方法で代替した。macOS 実機で `NoteStore.sqlite` に対してパーサをエンドツーエンドで実行する確認は行っていない。詳細な根拠・引用元は `test/fixtures/parser-output/README.md` を参照
+
+1. ~~parser の HTML 出力における**チェックリストの表現**~~ → **確認済み**。`<ul class="checklist" data-apple-notes-indent-amount="N">` の下に `<li class="checked">` または `<li class="unchecked">` が並ぶ。ネストは `li` 要素の中に入れ子の `ul class="checklist" data-apple-notes-indent-amount="N+1"` を置く形(`lib/ProtoPatches.rb:383-385,464-467`)。実データ blob (`list_indents_gzipped.bin`) を `AppleNote#generate_html` で実行して確認。→ BodyTransformer(§5.4)は `li.checked` → `- [x]`、`li.unchecked` → `- [ ]`、ネストしたインデント量に応じて Markdown 側のリストもネストする変換ルールとする
+2. ~~parser が抽出する**描画ファイルの形式**~~ → **確認済み**。描画(`ZTYPEUTI` が `com.apple.drawing.2` / `com.apple.drawing` / `com.apple.paper`)は常に**ラスター画像(png/jpg/jpeg のいずれか。Apple が生成する「フォールバック画像」)**として `files/Accounts/<アカウント ZIDENTIFIER>/FallbackImages/<描画オブジェクトの UUID>/…/FallbackImage.<拡張子>` に抽出される(`lib/AppleNotesEmbeddedDrawing.rb`)。ベクター(手書きストローク)そのものは出力されないため、「画像でない場合のフォールバック」という論点自体が発生しない(常に画像)。本文には `generate_html_with_images`(`lib/AppleNotesEmbeddedObject.rb:694-721`)により `<a href="…"><img src="…" data-apple-notes-zidentifier="…" width="…"></a>` が挿入される。この経路はソースコード読解で確認(exported_blobs に手書きの実データが含まれないため実行検証は未実施)。→ AssetUploader(§5.5)・BodyTransformer(§5.4)の「手書き描画はそのまま画像としてアップロードする」という設計は変更不要
 3. `qiita-cli` を **`QIITA_TOKEN` 環境変数だけで無人実行**する方法(認証情報ファイルの生成先・形式)
 4. `noet` の公開コマンド体系・記事 ID の取得方法・認証方法
 5. はてなブログ AtomPub の `text/x-markdown` 入稿の実機確認(一次資料未参照。複数の実装事例では動作)
 6. note.com が本文中の**外部画像 URL(R2 / S3)をどう扱うか**
-7. parser の JSON スキーマの詳細(フォルダ階層・作成日時のフィールド名)
+7. ~~parser の JSON スキーマの詳細(フォルダ階層・作成日時のフィールド名)~~ → **確認済み**。トップレベルは `{version, file_path, backup_type, html, accounts, cloudkit_participants, folders, notes}`。`folders` は **ルートフォルダのみ**を key(`z_pk` の文字列)に持ち、子フォルダは各フォルダオブジェクトの `child_folders`(同じ形の入れ子オブジェクト)の中に再帰的に格納される(`parent_folder_id` で親を指す。トップレベルの `folders` には子フォルダは並ばない)。`notes` はネストせず、`note_id` をキーにしたフラットな辞書で、各ノートは `folder_key` / `folder`(フォルダの `z_pk` / 名前)で所属フォルダを参照する。ノートのフィールドは `account_key, account, folder_key, folder, note_id, uuid, primary_key, creation_time, modify_time, cloudkit_creator_id, cloudkit_modifier_id, cloudkit_last_modified_device, is_pinned, is_password_protected, title, plaintext, html, note_proto, embedded_objects, hashtags, mentions`。作成日時 / 更新日時のフィールド名は `creation_time` / `modify_time`(`title` や `uuid`のような単純な名前ではない点に注意)で、値は `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列(`Time#to_s` 相当。実行して確認)。ソース: `JSON.md` と `lib/AppleNoteStore.rb#prepare_json`、`lib/AppleNote.rb#prepare_json`、`lib/AppleNotesFolder.rb#prepare_json`、`lib/AppleNotesAccount.rb#prepare_json`。具体例は `test/fixtures/parser-output/json/all_notes_1.json`。→ §5.3 の Note モデルのフィールド対応・§5.2 のパス解決規約はこのスキーマに基づいて記述した(差分は §5.3 内に明記)
 
-いずれも該当 Publisher / Transformer 内部に閉じており、確認結果によってアーキテクチャは変わらない。
+いずれも該当 Publisher / Transformer 内部に閉じており、確認結果によってアーキテクチャは変わらない(1・2・7 は確認完了。3〜6 は引き続き実装時の確認課題として残る)。
