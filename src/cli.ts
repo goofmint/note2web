@@ -2,8 +2,13 @@
 
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { createS3UploaderClient } from './assets/uploader.js';
 import { ConfigValidationError, loadConfig } from './config.js';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
+import { createLogger } from './logger.js';
+import { createPublisher, PublisherNotImplementedError } from './publishers/factory.js';
+import { resolveStatePath } from './state/derive.js';
+import { runSync } from './sync.js';
 
 /** 許可されたサブコマンド(design.md §5.1)。 */
 const SUBCOMMANDS = ['sync', 'doctor'] as const;
@@ -67,8 +72,9 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
   }
 
+  let config;
   try {
-    loadConfig(configPath);
+    config = loadConfig(configPath);
   } catch (error) {
     if (error instanceof ConfigValidationError) {
       for (const problem of error.problems) {
@@ -80,10 +86,39 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     throw error;
   }
 
-  // プレースホルダ: sync / doctor 本体は後続タスク(T-14, T-15)で実装する。
-  // ここでは設定ファイルの読み込み・検証(T-04)までを前提条件チェックとして通過させる。
-  stdout.push(`note2web ${subcommand}: not implemented yet`);
-  return { exitCode: SUCCESS, stdout, stderr };
+  if (subcommand === 'doctor') {
+    // プレースホルダ: doctor 本体は後続タスク(T-15)で実装する(design.md §5.1)。
+    // sync(本関数、T-14)は既に実フローへ配線済みだが、doctor は依存チェックのみを
+    // 独立コマンドとして提供する専用実装がまだ無い。
+    stdout.push('note2web doctor: not implemented yet');
+    return { exitCode: SUCCESS, stdout, stderr };
+  }
+
+  // subcommand === 'sync'(T-14。design.md §6 の実フローへ接続する)。
+  let publisher;
+  try {
+    publisher = createPublisher(config);
+  } catch (error) {
+    if (error instanceof PublisherNotImplementedError) {
+      // 実サービスへの Publisher 実装は T-16 以降(design.md §5.7)。sync フロー自体
+      // (src/sync.ts)は完成しているが、CLI からの実配信はまだ何も行えないため、
+      // ロック取得・エクスポート等を試みる前にここで打ち切る(「何も配信せず exit 2」)。
+      stderr.push(`note2web: ${error.message}`);
+      return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+    }
+    throw error;
+  }
+
+  const statePath = resolveStatePath(configPath, config);
+  const logger = createLogger({ file: config.log?.file, timezone: config.timezone });
+  const uploaderClient = createS3UploaderClient(config.assets);
+
+  const result = await runSync({ config, statePath, logger, publisher, uploaderClient });
+
+  if (result.error !== undefined) {
+    stderr.push(`note2web: ${result.error}`);
+  }
+  return { exitCode: result.exitCode, stdout, stderr };
 }
 
 async function main(): Promise<void> {

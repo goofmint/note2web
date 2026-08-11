@@ -350,8 +350,11 @@ function extractAttachments(
 // パス・コマンド組み立て。
 // ---------------------------------------------------------------------------
 
-/** 先頭の `~` を `os.homedir()` へ展開する(`~/foo` および `~` 単体のみ。`~user` 形式は非対応)。 */
-function expandHome(inputPath: string): string {
+/**
+ * 先頭の `~` を `os.homedir()` へ展開する(`~/foo` および `~` 単体のみ。`~user` 形式は非対応)。
+ * 依存チェック(`src/dependencies.ts`、T-14)が `exporter.parser_path` の実体確認に使うため export する。
+ */
+export function expandHome(inputPath: string): string {
   if (inputPath === '~') {
     return homedir();
   }

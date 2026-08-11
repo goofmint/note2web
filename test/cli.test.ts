@@ -77,16 +77,19 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toContain(missingPath);
   });
 
-  it('exits 0 for sync when --config points to a schema-valid file', async () => {
+  it('exits 2 for sync when --config points to a schema-valid file (no Publisher implementation yet, T-16+)', async () => {
+    // T-14 は sync フロー自体(src/sync.ts)を実装するが、実サービスの Publisher は
+    // T-16 以降まで存在しない(src/publishers/factory.ts)。そのため、設定検証を通過した
+    // 有効な設定であっても、ロック取得・エクスポート等を試みる前に exit 2 で打ち切られる。
     for (const name of VALID_CONFIG_ENV_VARS) {
       process.env[name] = 'dummy-value';
     }
 
     const result = await runCli(['sync', '--config', VALID_CONFIG_PATH]);
 
-    expect(result.exitCode).toBe(SUCCESS);
-    expect(result.stdout).toEqual(['note2web sync: not implemented yet']);
-    expect(result.stderr).toHaveLength(0);
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.stdout).toHaveLength(0);
+    expect(result.stderr.join('\n')).toMatch(/no Publisher implementation is registered yet/);
   });
 
   it('exits 0 for doctor when --config points to a schema-valid file', async () => {
