@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+
+# Existing docs are intentionally left untouched by Prettier
+*.md
+
+# Local Claude Code settings (not tracked in git)
+.claude/
