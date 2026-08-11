@@ -33,7 +33,7 @@
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
@@ -83,6 +83,20 @@ function firstNonEmptyLine(text: string): string | undefined {
     .split('\n')
     .map((line) => line.trim())
     .find((line) => line.length > 0);
+}
+
+/**
+ * `absolutePath` が `root` の配下(`root` 自身を含む)かどうかを判定する(CodeRabbit review,
+ * PR #49。`src/assets/uploader.ts` の `isPathWithinRoot` と同じ防御パターン)。
+ * `article.artifactPath` は現状 Renderer(`src/publishers/render.ts` 等)が組み立てる内部値
+ * だが、将来のサービス別 Renderer(T-17〜T-19)がノートのタイトル・UUID 等の外部由来の値を
+ * ファイル名へ混ぜ込む可能性があり、トラバーサル(`../`)や絶対パスによる `repo_path` 外への
+ * 書き込みを許してはならない。`relative(root, absolutePath)` が `..` から始まる、または
+ * それ自体が絶対パスになる場合は `root` の外側を指している。
+ */
+function isPathWithinRoot(root: string, absolutePath: string): boolean {
+  const rel = relative(root, absolutePath);
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 /** `publish()` で書き込み・保留リストに積んだ1件。 */
@@ -193,7 +207,19 @@ export function createGitRepoPublisher(options: CreateGitRepoPublisherOptions): 
       );
     }
 
-    const absolutePath = join(repoPath, article.artifactPath);
+    // `resolve`(`join` ではなく)を使う: `join` は第2引数が絶対パスに見えても連結して
+    // 正規化するだけで実際には `repoPath` 配下に収めてしまい、絶対パスによる置き換え攻撃を
+    // 見逃す。`resolve` は絶対パスの引数をそのまま採用する(POSIX の実際のパス解決と同じ
+    // 挙動)ため、直後の `isPathWithinRoot` 検査が絶対パス・トラバーサルの両方を正しく
+    // 検出できる(CodeRabbit review, PR #49)。
+    const absolutePath = resolve(repoPath, article.artifactPath);
+    // mkdir/writeFile の前に repo_path 配下であることを検証する。
+    if (!isPathWithinRoot(repoPath, absolutePath)) {
+      throw new Error(
+        `GitRepoPublisher.publish: note "${article.noteUuid}" has an artifactPath that escapes ` +
+          `repo_path (traversal or absolute path rejected): "${article.artifactPath}"`,
+      );
+    }
     await mkdir(dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, article.artifact, 'utf8');
 
@@ -288,7 +314,20 @@ export function createGitRepoPublisher(options: CreateGitRepoPublisherOptions): 
       return { persist: true };
     }
 
-    const mergeResult = await run('gh', ['pr', 'merge', '--merge', '--delete-branch']);
+    // `gh pr create` は成功時、stdout の先頭行に作成した PR の URL を出力する。カレント
+    // ブランチから対象 PR を暗黙解決させず、明示的に URL を渡す(CodeRabbit review, PR #49。
+    // 曖昧な解決に頼らないほうが安全で、他コマンドの失敗調査時にもログの手掛かりが残る)。
+    // URL が取れない(想定外の出力形式)場合でも、カレントブランチからの暗黙解決に
+    // フォールバックする。
+    const prUrl = firstNonEmptyLine(prResult.stdout);
+    const mergeArgs = [
+      'pr',
+      'merge',
+      ...(prUrl !== undefined ? [prUrl] : []),
+      '--merge',
+      '--delete-branch',
+    ];
+    const mergeResult = await run('gh', mergeArgs);
     if (mergeResult.status !== 'success') {
       // design.md §10「`gh pr merge` 失敗(保護ルール等) → PR は残し、実行は失敗として報告」。
       // issue #21「auto_merge のマージ失敗時は状態保存済みのまま失敗扱い」: PR は既に作成

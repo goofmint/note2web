@@ -14,6 +14,7 @@
 
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
 import type { Config } from '../config.js';
+import type { Logger } from '../logger.js';
 import { createGitRepoPublisher } from './git-repo.js';
 import { isGitModeService } from './mode.js';
 import type { Publisher } from './types.js';
@@ -39,14 +40,24 @@ export class PublisherNotImplementedError extends Error {
   }
 }
 
+/** `createPublisher` のオプション。 */
+export interface CreatePublisherOptions {
+  /**
+   * ログ出力先(任意)。Git モードでは `createGitRepoPublisher` へそのまま渡す
+   * ——差分ゼロでのブランチ破棄など診断的な `warn` を発行するため(CodeRabbit review, PR #49。
+   * 未指定のままだと本番実行でその `warn` が一切発行されない)。
+   */
+  logger?: Logger;
+}
+
 /**
  * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
- * `createGitRepoPublisher`(T-16)を返す。それ以外のサービスは後続タスク(T-21〜T-25)
- * 待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
+ * `createGitRepoPublisher`(T-16)を返す(`options.logger` を渡す)。それ以外のサービスは
+ * 後続タスク(T-21〜T-25)待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
  */
-export function createPublisher(config: Config): Publisher {
+export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
   if (isGitModeService(config.service) && config.git !== undefined) {
-    return createGitRepoPublisher({ config });
+    return createGitRepoPublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
 }

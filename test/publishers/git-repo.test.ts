@@ -153,8 +153,8 @@ describe('createGitRepoPublisher', () => {
         expect(joinArgs(calls[1]!)).toBe(
           'git checkout -b note2web/sync-20260811T090000Z origin/main',
         );
-        // FR-19: ref 名に使えない ':' を含まない。
-        expect(calls[1]!.args[1]).not.toContain(':');
+        // FR-19: ref 名に使えない ':' を含まない(args: ['checkout', '-b', <branch>, <start>])。
+        expect(calls[1]!.args[2]).not.toContain(':');
       },
     );
 
@@ -201,6 +201,37 @@ describe('createGitRepoPublisher', () => {
       expect(result).toEqual({ result: 'created', remoteId: null });
       const written = await readFile(join(repoPath, 'articles/nested/uuid-1.md'), 'utf8');
       expect(written).toBe('BODY');
+    });
+
+    it('rejects an artifactPath that escapes repo_path via traversal ("../"), before touching the filesystem (CodeRabbit review, PR #49)', async () => {
+      const { runner } = makeMockRunner();
+      const publisher = createGitRepoPublisher({
+        config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
+        runner,
+        now: FIXED_NOW,
+      });
+
+      const article = buildArticle({ artifactPath: '../escape.md' });
+
+      await expect(publisher.publish(article, null)).rejects.toThrow(
+        /artifactPath that escapes repo_path/,
+      );
+      await expect(readFile(join(repoPath, '..', 'escape.md'), 'utf8')).rejects.toThrow();
+    });
+
+    it('rejects an absolute artifactPath (CodeRabbit review, PR #49)', async () => {
+      const { runner } = makeMockRunner();
+      const publisher = createGitRepoPublisher({
+        config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
+        runner,
+        now: FIXED_NOW,
+      });
+
+      const article = buildArticle({ artifactPath: '/etc/passwd' });
+
+      await expect(publisher.publish(article, null)).rejects.toThrow(
+        /artifactPath that escapes repo_path/,
+      );
     });
 
     it('reports "updated" when a previous NoteState is given', async () => {
@@ -349,10 +380,17 @@ describe('createGitRepoPublisher', () => {
       await expect(publisher.finalize?.()).rejects.toThrow(/gh pr create.*failed/);
     });
 
-    it('auto_merge: true and merge succeeds: issues "gh pr merge --merge --delete-branch" and persists', async () => {
-      const { runner, calls } = makeMockRunner((call) =>
-        call.args[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
-      );
+    const PR_URL = 'https://github.com/example/zenn-content/pull/42';
+
+    it('auto_merge: true and merge succeeds: issues "gh pr merge <PR URL> --merge --delete-branch" and persists', async () => {
+      const { runner, calls } = makeMockRunner((call) => {
+        if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
+        if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'create') {
+          // `gh pr create` は成功時、stdout の先頭行に作成した PR の URL を出す。
+          return success(`${PR_URL}\n`);
+        }
+        return undefined;
+      });
       const publisher = await prepareAndPublish(runner, { autoMerge: true });
       calls.length = 0;
 
@@ -363,13 +401,34 @@ describe('createGitRepoPublisher', () => {
         (call) => call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'merge',
       );
       expect(mergeCall).toBeDefined();
+      // CodeRabbit review, PR #49: カレントブランチからの暗黙解決に頼らず、`gh pr create`
+      // の stdout から得た PR URL を明示的に渡す。
+      expect(mergeCall?.args).toContain(PR_URL);
       expect(mergeCall?.args).toContain('--merge');
       expect(mergeCall?.args).toContain('--delete-branch');
+    });
+
+    it('auto_merge: true and gh pr create has no usable stdout: falls back to implicit branch resolution (no URL arg)', async () => {
+      const { runner, calls } = makeMockRunner((call) =>
+        call.args[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+      );
+      const publisher = await prepareAndPublish(runner, { autoMerge: true });
+      calls.length = 0;
+
+      await publisher.finalize?.();
+
+      const mergeCall = calls.find(
+        (call) => call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'merge',
+      );
+      expect(mergeCall?.args).toEqual(['pr', 'merge', '--merge', '--delete-branch']);
     });
 
     it('auto_merge: true and merge fails: persists (PR already created) but reports failure, leaving the PR open', async () => {
       const { runner, calls } = makeMockRunner((call) => {
         if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
+        if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'create') {
+          return success(`${PR_URL}\n`);
+        }
         if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'merge') {
           return failure('branch protection rules prevent merging');
         }
@@ -383,6 +442,10 @@ describe('createGitRepoPublisher', () => {
       expect(outcome?.persist).toBe(true);
       expect(outcome?.failed).toBe(true);
       expect(outcome?.reason).toMatch(/branch protection rules prevent merging/);
+      const mergeCall = calls.find(
+        (call) => call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'merge',
+      );
+      expect(mergeCall?.args).toContain(PR_URL);
       // マージ失敗後にブランチを削除する等の後始末は行わない(PR を残す)。
       expect(calls.some((call) => call.args.join(' ').includes('branch -D'))).toBe(false);
     });
@@ -407,7 +470,7 @@ describe('createGitRepoPublisher', () => {
       expect(calls.every((call) => call.env?.GH_TOKEN === 'secret-token')).toBe(true);
     });
 
-    it('never issues gh/git write commands when GH_TOKEN is absent from the injected env (no credentials to send)', async () => {
+    it('commands receive no injected env when GH_TOKEN is absent from the injected env (CodeRabbit review, PR #49: this does not mean no commands run)', async () => {
       const { runner, calls } = makeMockRunner();
       const publisher = createGitRepoPublisher({
         config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
@@ -417,8 +480,12 @@ describe('createGitRepoPublisher', () => {
       });
       await publisher.prepare?.();
 
-      const preparedCalls = [...calls];
-      expect(preparedCalls.every((call) => call.env === undefined)).toBe(true);
+      // prepare() 自体は GH_TOKEN 無しでも git fetch/checkout を試みる(SSH 鍵等の他の認証
+      // 手段があり得るため、GitRepoPublisher は GH_TOKEN の有無で git コマンドの実行有無を
+      // 変えない)。ここで検証するのは、渡す `env` に GH_TOKEN が無ければ、コマンドへは
+      // 何も注入しない(`{ GH_TOKEN: ... }` を付けない)という一点のみ。
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every((call) => call.env === undefined)).toBe(true);
     });
   });
 });
