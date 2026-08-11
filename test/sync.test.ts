@@ -603,7 +603,9 @@ describe('runSync', () => {
     });
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
-    expect(result.error).toContain('prepare');
+    // 不足 hook の動的部分(missing: 以降)を検証する(固定文言だけでは 9a/9b を区別できない)。
+    expect(result.error).toContain('missing: prepare');
+    expect(result.error).not.toContain('missing: prepare, finalize');
     expect(calls).toHaveLength(0);
     expect(mock.publishCalls).toHaveLength(0);
     expect(mock.finalizeCalls).toBe(0);
@@ -622,7 +624,7 @@ describe('runSync', () => {
     });
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
-    expect(result.error).toContain('finalize');
+    expect(result.error).toContain('missing: finalize');
     expect(calls).toHaveLength(0);
     expect(mock.publishCalls).toHaveLength(0);
     expect(mock.prepareCalls).toBe(0);
@@ -640,8 +642,7 @@ describe('runSync', () => {
     });
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
-    expect(result.error).toContain('prepare');
-    expect(result.error).toContain('finalize');
+    expect(result.error).toContain('missing: prepare, finalize');
     expect(calls).toHaveLength(0);
   });
 
