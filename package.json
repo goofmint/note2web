@@ -33,6 +33,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1107.0",
     "hast-util-to-mdast": "^10.1.2",
     "hast-util-to-text": "^4.0.2",
     "rehype-parse": "^9.0.1",
