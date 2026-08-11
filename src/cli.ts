@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { statSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { ConfigValidationError, loadConfig } from './config.js';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 
 /** 許可されたサブコマンド(design.md §5.1)。 */
@@ -67,19 +67,21 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
   }
 
-  let isFile: boolean;
   try {
-    isFile = statSync(configPath).isFile();
-  } catch {
-    isFile = false;
-  }
-  if (!isFile) {
-    stderr.push(`note2web: config file not found or not a regular file: ${configPath}`);
-    return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+    loadConfig(configPath);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      for (const problem of error.problems) {
+        const location = problem.path === '' ? '' : ` at ${problem.path}`;
+        stderr.push(`note2web: config error${location}: ${problem.message}`);
+      }
+      return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+    }
+    throw error;
   }
 
   // プレースホルダ: sync / doctor 本体は後続タスク(T-14, T-15)で実装する。
-  // ここでは「設定ファイルの存在確認」までを前提条件チェックとして通過させる。
+  // ここでは設定ファイルの読み込み・検証(T-04)までを前提条件チェックとして通過させる。
   stdout.push(`note2web ${subcommand}: not implemented yet`);
   return { exitCode: SUCCESS, stdout, stderr };
 }

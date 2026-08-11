@@ -1,0 +1,14 @@
+service: jekyll
+source:
+  folders: [tech]
+assets:
+  provider: r2
+  bucket: blog-assets-jekyll
+  endpoint: https://example-account.r2.cloudflarestorage.com
+  public_base_url: https://assets.example.com/notes/
+  access_key_id_env: JEKYLL_R2_ACCESS_KEY_ID
+  secret_access_key_env: JEKYLL_R2_SECRET_ACCESS_KEY
+git:
+  repo_path: ~/src/jekyll-content
+  base_branch: main
+  output_dir: _posts
