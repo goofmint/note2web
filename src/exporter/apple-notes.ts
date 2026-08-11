@@ -10,7 +10,7 @@
  * 責務(`ExportResult.exportDir` を返すのみ)。
  */
 
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -129,7 +129,10 @@ const embeddedObjectJsonSchema = z
 const noteJsonSchema = z
   .object({
     uuid: z.string(),
-    folder_key: z.union([z.number(), z.string()]),
+    // 数値、または整数として解釈できる文字列のみ受け付ける。"invalid" 等が
+    // NaN に化けてフォルダフィルタで黙って除外される事故を防ぎ、スキーマ検証の
+    // 段階で ExportError(parser JSON 不正)として顕在化させる。
+    folder_key: z.union([z.number().int(), z.string().regex(/^-?\d+$/)]),
     folder: z.string(),
     title: z.string(),
     creation_time: z.string(),
@@ -244,15 +247,26 @@ function resolveIncludedFolderIds(
  * `folderDir` 直下で `<uuid> - *.html` に前方一致するファイルを探し、生の HTML を
  * 未加工のまま返す(design.md §5.2。JSON の `html` フィールドは使わない)。
  * 一致が0件・複数件のいずれの場合も呼び出し側で failed 扱いにできるよう例外を投げる。
+ *
+ * 同じフォルダに属するノートごとに `readdir` を繰り返さないよう、ディレクトリ一覧は
+ * `dirCache`(フォルダパス → エントリ一覧)で1回だけ読んで使い回す。UUID の重複
+ * (複数件一致)検出はキャッシュ後も一覧全体に対して行うため、挙動は変わらない。
  */
-async function resolveNoteHtml(folderDir: string, uuid: string): Promise<string> {
-  let entries: string[];
-  try {
-    entries = await readdir(folderDir);
-  } catch (error) {
-    throw new Error(`folder directory not found for HTML resolution: ${folderDir}`, {
-      cause: error,
-    });
+async function resolveNoteHtml(
+  folderDir: string,
+  uuid: string,
+  dirCache: Map<string, string[]>,
+): Promise<string> {
+  let entries = dirCache.get(folderDir);
+  if (entries === undefined) {
+    try {
+      entries = await readdir(folderDir);
+    } catch (error) {
+      throw new Error(`folder directory not found for HTML resolution: ${folderDir}`, {
+        cause: error,
+      });
+    }
+    dirCache.set(folderDir, entries);
   }
 
   const prefix = `${uuid} - `;
@@ -394,8 +408,9 @@ async function locateNotesJsonFile(
  *    読み込む。解決できなかったノートのみ `failed` へ回し、`logger.noteFailed` を
  *    発行して処理を続行する(design.md §5.2)。
  *
- * 一時出力ディレクトリは削除しない(`ExportResult.exportDir` として返すのみ)。
- * 削除は呼び出し側(sync フロー、T-14)の責務。
+ * 成功時、一時出力ディレクトリは削除しない(`ExportResult.exportDir` として返すのみ。
+ * 削除は呼び出し側=sync フロー(T-14)の責務)。一方、失敗して例外を投げる場合は
+ * 呼び出し側がパスを知り得ないため、ベストエフォートで削除してから元のエラーを再送出する。
  */
 export async function exportAppleNotes(options: ExportAppleNotesOptions): Promise<ExportResult> {
   const { config, logger, runner = runSubprocess, tmpDirFactory = defaultTmpDirFactory } = options;
@@ -404,6 +419,28 @@ export async function exportAppleNotes(options: ExportAppleNotesOptions): Promis
   const notesContainer = expandHome(config.exporter?.notes_container ?? DEFAULT_NOTES_CONTAINER);
 
   const exportDir = await tmpDirFactory();
+  try {
+    return await runExport({ config, logger, runner, parserPath, notesContainer, exportDir });
+  } catch (error) {
+    // 失敗時は exportDir が呼び出し側に渡らないため、ここで後始末する。
+    // 後始末自体の失敗で元のエラーを隠さない。
+    await rm(exportDir, { recursive: true, force: true }).catch(() => {
+      // 意図的に無視。
+    });
+    throw error;
+  }
+}
+
+/** `exportAppleNotes` の本体(一時ディレクトリ確保後の処理)。 */
+async function runExport(params: {
+  config: Config;
+  logger: Logger | undefined;
+  runner: SubprocessRunner;
+  parserPath: string;
+  notesContainer: string;
+  exportDir: string;
+}): Promise<ExportResult> {
+  const { config, logger, runner, parserPath, notesContainer, exportDir } = params;
 
   const subprocessResult = await runner({
     command: 'ruby',
@@ -451,6 +488,8 @@ export async function exportAppleNotes(options: ExportAppleNotesOptions): Promis
 
   const notes: Note[] = [];
   const failed: FailedNote[] = [];
+  // フォルダごとの readdir 結果のキャッシュ(同一フォルダの全ノートで使い回す)。
+  const dirCache = new Map<string, string[]>();
 
   for (const noteJson of Object.values(parsed.notes)) {
     const folderId =
@@ -477,7 +516,7 @@ export async function exportAppleNotes(options: ExportAppleNotesOptions): Promis
 
     let bodyHtml: string;
     try {
-      bodyHtml = await resolveNoteHtml(join(htmlRoot, folderEntry.path), noteJson.uuid);
+      bodyHtml = await resolveNoteHtml(join(htmlRoot, folderEntry.path), noteJson.uuid, dirCache);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failed.push({ uuid: noteJson.uuid, title: noteJson.title, error: message });

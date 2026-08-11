@@ -317,6 +317,58 @@ describe('exportAppleNotes', () => {
     await expect(promise).rejects.toMatchObject({ classification: 'exit_code' });
   });
 
+  it('cleans up the temporary export directory when the run fails (runner failure)', async () => {
+    const { mkdir } = await import('node:fs/promises');
+    const { existsSync } = await import('node:fs');
+    // 失敗経路の後始末を検証するため、テストが場所を知っている専用ディレクトリを注入する。
+    const doomedDir = join(workDir, 'doomed-export');
+    await mkdir(doomedDir, { recursive: true });
+
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'timeout',
+      exitCode: null,
+      signal: 'SIGKILL',
+      stdout: '',
+      stderr: '',
+    });
+
+    await expect(
+      exportAppleNotes({
+        config: buildConfig({ source: { folders: ['Tech'] } }),
+        runner,
+        tmpDirFactory: async () => doomedDir,
+      }),
+    ).rejects.toBeInstanceOf(ExportError);
+
+    // 失敗時は exportDir が呼び出し側へ渡らないため、Exporter 自身が後始末する。
+    expect(existsSync(doomedDir)).toBe(false);
+  });
+
+  it('rejects a non-numeric folder_key as ExportError instead of silently dropping the note', async () => {
+    const { readFile: read, writeFile } = await import('node:fs/promises');
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const data = JSON.parse(await read(jsonPath, 'utf8')) as {
+        notes: Record<string, { folder_key: unknown }>;
+      };
+      const firstNote = Object.values(data.notes)[0];
+      if (firstNote === undefined) {
+        throw new Error('test setup: fixture has no notes');
+      }
+      firstNote.folder_key = 'invalid';
+      await writeFile(jsonPath, JSON.stringify(data));
+    });
+
+    await expect(
+      exportAppleNotes({
+        config: buildConfig({ source: { folders: ['Tech'] } }),
+        runner,
+        tmpDirFactory: async () => workDir,
+      }),
+    ).rejects.toBeInstanceOf(ExportError);
+  });
+
   it('does not call process.exit and does not mutate the fixture source directory', async () => {
     // このテストは「fixture を書き換えない」という制約の回帰チェック。実行前後で
     // fixture の json ファイルが変わっていないことを確認する。
