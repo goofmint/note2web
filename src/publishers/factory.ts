@@ -1,9 +1,11 @@
 /**
  * Publisher ファクトリ(design.md §5.7)。
  *
- * サービス別 Publisher の実装(GitRepoPublisher 系は T-16〜T-19、Qiita/dev.to/note.com/
- * はてなは T-21〜T-25)はまだ存在しない。本モジュールは `src/cli.ts` が `sync` を
- * 実配線するために必要とするファクトリの置き場所を用意しつつ、現時点では
+ * T-16(issue #21)で GitRepoPublisher(zenn/hugo/jekyll 共通基盤)が揃ったため、Git モードの
+ * 3サービスはここで配線する。Zenn/Hugo/Jekyll 固有のファイルパス・frontmatter
+ * (design.md §5.7 サービス別表)は本タスクの範囲外(T-17〜T-19)で、現時点では
+ * `src/publishers/render.ts` の汎用 `NoteRenderer` がそれを担う暫定実装のまま。
+ * Qiita/dev.to/note.com/はてな(T-21〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
  * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
  * 駆動する E2E テストは `test/sync.test.ts`)、実サービスへの接続だけが後続タスク待ちで
@@ -12,6 +14,9 @@
 
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
 import type { Config } from '../config.js';
+import type { Logger } from '../logger.js';
+import { createGitRepoPublisher } from './git-repo.js';
+import { isGitModeService } from './mode.js';
 import type { Publisher } from './types.js';
 
 /**
@@ -35,11 +40,24 @@ export class PublisherNotImplementedError extends Error {
   }
 }
 
+/** `createPublisher` のオプション。 */
+export interface CreatePublisherOptions {
+  /**
+   * ログ出力先(任意)。Git モードでは `createGitRepoPublisher` へそのまま渡す
+   * ——差分ゼロでのブランチ破棄など診断的な `warn` を発行するため(CodeRabbit review, PR #49。
+   * 未指定のままだと本番実行でその `warn` が一切発行されない)。
+   */
+  logger?: Logger;
+}
+
 /**
- * `config.service` に対応する Publisher を生成する。T-14 時点では全サービスについて
- * `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。後続タスクがサービスごとの
- * 分岐を追加していく想定の唯一の差し込み口。
+ * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
+ * `createGitRepoPublisher`(T-16)を返す(`options.logger` を渡す)。それ以外のサービスは
+ * 後続タスク(T-21〜T-25)待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
  */
-export function createPublisher(config: Config): Publisher {
+export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
+  if (isGitModeService(config.service) && config.git !== undefined) {
+    return createGitRepoPublisher({ config, logger: options.logger });
+  }
   throw new PublisherNotImplementedError(config.service);
 }

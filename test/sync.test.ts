@@ -11,7 +11,12 @@ import type { SubprocessRunner } from '../src/exporter/apple-notes.js';
 import { acquireLock, lockPathFor, releaseLock, type LockHandle } from '../src/lock.js';
 import type { Logger } from '../src/logger.js';
 import type { PutObjectParams, UploaderClient } from '../src/assets/uploader.js';
-import type { Publisher, PublishResult, RenderedArticle } from '../src/publishers/types.js';
+import type {
+  FinalizeOutcome,
+  Publisher,
+  PublishResult,
+  RenderedArticle,
+} from '../src/publishers/types.js';
 import type { NoteState, StateFile } from '../src/state/store.js';
 import { runSync, type RunSyncOptions } from '../src/sync.js';
 import type { RunSubprocessOptions } from '../src/subprocess.js';
@@ -128,7 +133,12 @@ interface MockPublisherOptions {
   withPrepare?: boolean;
   prepareImpl?: () => Promise<void>;
   withFinalize?: boolean;
-  finalizeImpl?: () => Promise<void>;
+  /**
+   * T-16(issue #21)で `Publisher.finalize()` の戻り値が `FinalizeOutcome` になった
+   * (`src/publishers/types.ts` 参照)。既定は `{ persist: true }`(旧来の「finalize が
+   * 例外を投げなければ確定・flush」という挙動と等価)。
+   */
+  finalizeImpl?: () => Promise<FinalizeOutcome>;
 }
 
 interface MockPublisherHandle {
@@ -170,8 +180,9 @@ function createMockPublisher(options: MockPublisherOptions = {}): MockPublisherH
     publisher.finalize = async () => {
       counters.finalizeCalls += 1;
       if (options.finalizeImpl) {
-        await options.finalizeImpl();
+        return options.finalizeImpl();
       }
+      return { persist: true };
     };
   }
 
@@ -244,6 +255,13 @@ const NOOP_CHECK_DEPENDENCIES = async (): Promise<void> => {
   // ホスト環境の実コマンド(ruby/git/gh 等)の有無に左右されないよう常に成功させる。
 };
 
+const NOOP_CHECK_GIT_AUTH = async (): Promise<void> => {
+  // T-16(issue #21)で追加した `checkGitAuthFn` の既定は実 `gh auth status` / `gh repo view`
+  // を呼ぶため、ホスト環境の `gh` コマンド・`GH_TOKEN` の有無に依存させないよう、
+  // このテストスイートの既定では常に成功させる(`src/git-auth.test.ts` で個別に検証)。
+  // 認証・権限チェック自体を検証するテストだけがこれを上書きする。
+};
+
 const FIXED_NOW = () => new Date('2026-08-11T00:00:00Z');
 
 function readStateFile(statePath: string): StateFile {
@@ -278,6 +296,7 @@ describe('runSync', () => {
       statePath,
       now: FIXED_NOW,
       checkDependenciesFn: NOOP_CHECK_DEPENDENCIES,
+      checkGitAuthFn: NOOP_CHECK_GIT_AUTH,
       uploaderClient: createFakeUploaderClient(),
       logger: createFakeLogger().logger,
       ...overrides,
@@ -510,6 +529,7 @@ describe('runSync', () => {
       withFinalize: true,
       finalizeImpl: async () => {
         statePathExistedDuringFinalize = existsSync(statePath);
+        return { persist: true };
       },
     });
 
@@ -555,6 +575,64 @@ describe('runSync', () => {
 
     // 保留(stageNote)されたエントリは一切ディスクへ書かれない。
     expect(existsSync(statePath)).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // T-16(issue #21)対応分: `FinalizeOutcome`(persist/failed の独立した2軸)。
+  // -------------------------------------------------------------------------
+
+  it('scenario 8c: git mode zero-diff (persist: false) — exit 0, but staged notes are not flushed to disk', async () => {
+    const { runner } = makeFixtureRunner();
+    const { logger, events } = createFakeLogger();
+    const mock = createMockPublisher({
+      withPrepare: true,
+      withFinalize: true,
+      finalizeImpl: async () => ({ persist: false }),
+    });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+    });
+
+    // design.md §5.7 手順3「差分ゼロならブランチを削除して終了」: PR が作られていないため
+    // 確定基準(手順4)を満たさず、実行自体は失敗でもない(exit 0)。
+    expect(result.exitCode).toBe(SUCCESS);
+    expect(mock.publishCalls).toHaveLength(1);
+    expect(mock.finalizeCalls).toBe(1);
+    expect(events.every((event) => !event.startsWith('warn:'))).toBe(true);
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('scenario 8d: git mode auto_merge merge failure (persist: true, failed: true) — state IS persisted, but the run is reported failed (exit 1)', async () => {
+    const { runner } = makeFixtureRunner();
+    const { logger, events } = createFakeLogger();
+    const mock = createMockPublisher({
+      withPrepare: true,
+      withFinalize: true,
+      finalizeImpl: async () => ({
+        persist: true,
+        failed: true,
+        reason: 'gh pr merge failed: branch protection rules prevent merging',
+      }),
+    });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
+    });
+
+    // issue #21「auto_merge のマージ失敗時は状態保存済みのまま失敗扱い」。
+    expect(result.exitCode).toBe(PARTIAL_FAILURE);
+    expect(mock.finalizeCalls).toBe(1);
+    expect(
+      events.some((event) => event.startsWith('warn:') && event.includes('branch protection')),
+    ).toBe(true);
+
+    const onDisk = readStateFile(statePath);
+    expect(onDisk.notes[ARCHIVE_NOTE_UUID]).toBeDefined();
   });
 
   it('calls Publisher.prepare() before exporting when the git-mode Publisher defines it', async () => {
@@ -658,6 +736,106 @@ describe('runSync', () => {
     });
 
     expect(result.exitCode).toBe(SUCCESS);
+  });
+
+  // -------------------------------------------------------------------------
+  // T-16(issue #21)対応分: GH_TOKEN 認証・リポジトリ権限の事前検証
+  // (`src/git-auth.ts` の `checkGitModeAuthAndPermission`。design.md §5.7)。
+  // -------------------------------------------------------------------------
+
+  it('scenario 12a: "gh auth status" failure — exit 2 before the lock, export, prepare(), or any Publisher call; StateStore untouched', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({
+        runner,
+        tmpDirFactory: async () => exportWorkDir,
+        checkGitAuthFn: async () => {
+          throw new DependencyCheckError([
+            {
+              message:
+                '"gh auth status" failed (design.md §5.7 GH_TOKEN authentication): not logged in',
+            },
+          ]);
+        },
+      }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.error).toMatch(/gh auth status/);
+    // Git / gh の書き込み副作用(prepare() のブランチ作成含む)は一切行われない。
+    expect(calls).toHaveLength(0);
+    expect(mock.prepareCalls).toBe(0);
+    expect(mock.publishCalls).toHaveLength(0);
+    expect(mock.finalizeCalls).toBe(0);
+    // ロック・状態 JSON のいずれも作られない。
+    expect(existsSync(lockPathFor(statePath))).toBe(false);
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('scenario 12b: insufficient push/PR permission on the target repository — exit 2 before any Git/gh write or Publisher call; StateStore untouched', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({
+        runner,
+        tmpDirFactory: async () => exportWorkDir,
+        checkGitAuthFn: async () => {
+          throw new DependencyCheckError([
+            {
+              message:
+                'insufficient push/PR permission on target repository (/repos/zenn-content): ' +
+                'viewerPermission="READ" (need one of WRITE/MAINTAIN/ADMIN, design.md §5.7)',
+            },
+          ]);
+        },
+      }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(result.error).toMatch(/insufficient push\/PR permission/);
+    expect(calls).toHaveLength(0);
+    expect(mock.prepareCalls).toBe(0);
+    expect(mock.publishCalls).toHaveLength(0);
+    expect(mock.finalizeCalls).toBe(0);
+    expect(existsSync(lockPathFor(statePath))).toBe(false);
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('scenario 12c: the git-auth check runs after checkDependencies/validateGitModePublisherContract but before lock acquisition', async () => {
+    const { runner, calls } = makeFixtureRunner();
+    const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
+    const order: string[] = [];
+
+    const result = await runSync({
+      config: buildGitConfig({ source: { folders: ['Archive'] } }),
+      publisher: mock.publisher,
+      ...baseOptions({
+        runner,
+        tmpDirFactory: async () => exportWorkDir,
+        checkDependenciesFn: async () => {
+          order.push('checkDependencies');
+        },
+        checkGitAuthFn: async () => {
+          order.push('checkGitAuth');
+          throw new DependencyCheckError([{ message: 'auth failed' }]);
+        },
+        acquireLockFn: (path) => {
+          order.push('acquireLock');
+          return acquireLock(path);
+        },
+      }),
+    });
+
+    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+    expect(order).toEqual(['checkDependencies', 'checkGitAuth']);
+    expect(calls).toHaveLength(0);
   });
 
   it('scenario 10: Publisher.prepare() failure aborts the run at exit 1 before exporting anything', async () => {

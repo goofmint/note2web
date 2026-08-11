@@ -48,9 +48,50 @@
  * 両方任意のままにする——この制約は「型」ではなく「Git モード時の実行時契約」であり、
  * 型を必須にしてしまうと API/CLI 系のモック/実装がわざわざダミーの `prepare`/
  * `finalize` を書く必要が生じてしまう。
+ *
+ * **`finalize()` の戻り値(`FinalizeOutcome`)は design.md §5.7 に無い拡張(T-16 / issue #21)**:
+ * design.md §5.7 の `finalize?(): Promise<void>` は「確定するか」「実行を失敗として報告するか」
+ * を1ビットの成功/例外でしか表現できない。しかし §5.7 手順4・§10 は次の**独立した2軸**を
+ * 要求する:
+ *
+ *   - 保留ノートを確定保存してよいか(確定基準は「PR 作成成功」。差分ゼロでブランチのみ
+ *     破棄した場合は PR が無いので確定しない)
+ *   - 実行全体を失敗として報告すべきか(`gh pr merge` 失敗時、design.md §10「PR は残し、
+ *     実行は失敗として報告」——このとき状態は**保存済みのまま**失敗扱いにする必要があり、
+ *     「確定する」と「失敗として報告する」が両立するケースが存在する)
+ *
+ * この2軸は素朴な `void`(＋ throw で失敗を表す)だけでは表現できない(throw は「確定しない
+ * ・失敗」の1点にしか対応できない)。CodeRabbit issue #21 プランの Design Choice 3 が検討した
+ * 2案のうち、Option 1(戻り値オブジェクトで表現)を採用する。Option 2(`StateStore.flush`
+ * コールバックを `finalize()` に注入し、publisher 自身が確定タイミングを制御する)は
+ * publisher が実質的に「いつ確定するか」という StateStore 側の関心事を能動的に握ることになり、
+ * 「publisher は StateStore に触れない」というこのファイル冒頭からの分担(sync フローが
+ * 唯一 StateStore を所有する)をぼかしてしまうため採用しない。
  */
 
 import type { NoteState } from '../state/store.js';
+
+/**
+ * `Publisher.finalize()` の戻り値(T-16 拡張。design.md §5.7 手順4「状態更新のトランザクション」
+ * / §10「`gh pr merge` 失敗… PR は残し、実行は失敗として報告」)。
+ */
+export interface FinalizeOutcome {
+  /**
+   * 保留ノート(`StateStore.stageNote` 済み)を確定保存してよいか。`true` の場合のみ
+   * sync フローが `StateStore.flush()` を呼ぶ(design.md §5.7 手順4「確定基準は
+   * PR 作成成功」)。差分ゼロでブランチを破棄しただけの場合は `false`(PR 未作成のため)。
+   */
+  persist: boolean;
+  /**
+   * `finalize()` の処理を実行全体の失敗として報告すべきか。省略時は `false`。
+   * `persist: true` と同時に `true` になり得る——auto_merge のマージ失敗
+   * (design.md §10)は「状態は保存済みのまま(`persist: true`)実行は失敗
+   * (`failed: true`)」という組み合わせで表現する。
+   */
+  failed?: boolean;
+  /** `failed: true` のときの `logger.warn` 用の理由(コマンド・トークン等の秘匿情報は含めない)。 */
+  reason?: string;
+}
 
 /**
  * レンダリング済みの最終成果物(design.md §5.6「Renderer と冪等判定」)。
@@ -96,6 +137,11 @@ export interface Publisher {
    * Exporter 実行前に一度だけ呼ぶ。
    */
   prepare?(): Promise<void>;
-  /** Git モードのみ: 全ノート処理後のコミット・PR 作成(design.md §5.7)。 */
-  finalize?(): Promise<void>;
+  /**
+   * Git モードのみ: 全ノート処理後のコミット・PR 作成(design.md §5.7)。
+   * 戻り値 `FinalizeOutcome` は design.md §5.7 に無い拡張(このファイル冒頭の JSDoc 参照)。
+   * push / `gh pr create` に失敗した場合は(戻り値を返さず)例外を投げること
+   * ——sync フローはその場合、確定せず(`flush` を呼ばず)実行を失敗として扱う。
+   */
+  finalize?(): Promise<FinalizeOutcome>;
 }

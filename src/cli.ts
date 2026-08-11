@@ -107,9 +107,15 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   }
 
   // subcommand === 'sync'(T-14。design.md §6 の実フローへ接続する)。
+  // logger は createPublisher より前に用意する(CodeRabbit review, PR #49): Git モードの
+  // GitRepoPublisher(T-16)は差分ゼロでのブランチ破棄などを `logger.warn` で報告するため、
+  // 生成時点で渡せる必要がある。
+  const statePath = resolveStatePath(configPath, config);
+  const logger = createLogger({ file: config.log?.file, timezone: config.timezone });
+
   let publisher;
   try {
-    publisher = createPublisher(config);
+    publisher = createPublisher(config, { logger });
   } catch (error) {
     if (error instanceof PublisherNotImplementedError) {
       // 実サービスへの Publisher 実装は T-16 以降(design.md §5.7)。sync フロー自体
@@ -121,8 +127,6 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     throw error;
   }
 
-  const statePath = resolveStatePath(configPath, config);
-  const logger = createLogger({ file: config.log?.file, timezone: config.timezone });
   const uploaderClient = createS3UploaderClient(config.assets);
 
   const result = await runSync({ config, statePath, logger, publisher, uploaderClient });

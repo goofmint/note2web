@@ -17,6 +17,13 @@
  * ロック(design.md §6「多重起動防止」)は依存チェックの後・StateStore 読み込みの前に
  * 取得し、`finally` で必ず解放する(T-06)。
  *
+ * **T-16(issue #21)で追加した前提条件**: Git モード(zenn/hugo/jekyll)では、依存チェック・
+ * `validateGitModePublisherContract` の直後、ロック取得より前に `GH_TOKEN` の有効性
+ * (`gh auth status`)と対象リポジトリへの push / PR 作成権限を確認する
+ * (`src/git-auth.ts` の `checkGitModeAuthAndPermission`。design.md §5.7「`doctor` /
+ * `sync` 冒頭で… 確認」)。不備があれば `prepare()`(ブランチ作成等の Git 副作用)は
+ * 一切実行せず、StateStore 読み込み・ロック取得も行わずに exit 2 とする。
+ *
  * **エラーハンドリングの方針**: `runCli`(`src/cli.ts`)が `ConfigValidationError` を
  * 自身で catch して `CliResult` に変換する既存の非 throw 型パターンに合わせ、`runSync`
  * も前提条件不成立(依存欠如・多重起動・状態検証失敗・parser 実行失敗)を型付きエラーの
@@ -36,6 +43,7 @@ import {
   checkDependencies,
   DependencyCheckError,
   type CheckDependenciesOptions,
+  type DependencyProblem,
 } from './dependencies.js';
 import { PARTIAL_FAILURE, PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 import {
@@ -44,15 +52,22 @@ import {
   type ExportResult,
   type SubprocessRunner,
 } from './exporter/apple-notes.js';
+import { checkGitModeAuthAndPermission } from './git-auth.js';
 import { acquireLock, lockPathFor, LockError, releaseLock, type LockHandle } from './lock.js';
 import type { Logger } from './logger.js';
 import type { Note } from './model/note.js';
 import { isGitModeService } from './publishers/mode.js';
 import { renderGenericArticle, type NoteRenderer } from './publishers/render.js';
-import type { Publisher, PublishResult, RenderedArticle } from './publishers/types.js';
+import type {
+  FinalizeOutcome,
+  Publisher,
+  PublishResult,
+  RenderedArticle,
+} from './publishers/types.js';
 import { deriveTarget } from './state/derive.js';
 import { StateStore, StateValidationError, type NoteState } from './state/store.js';
 import { processNoteBody, type UploaderClient } from './assets/uploader.js';
+import { commandExists, runSubprocess } from './subprocess.js';
 import { completeNoteMetadata } from './transform/metadata.js';
 import { transformBody } from './transform/body.js';
 import { formatTimestamp } from './transform/normalize.js';
@@ -90,6 +105,14 @@ export interface RunSyncOptions {
   releaseLockFn?: typeof releaseLock;
   /** 依存チェックの注入点(テスト用)。既定は `src/dependencies.ts` の `checkDependencies`。 */
   checkDependenciesFn?: (config: Config, options?: CheckDependenciesOptions) => Promise<void>;
+  /**
+   * Git モードの `gh auth status` / リポジトリ権限検証の注入点(テスト用)。既定は
+   * `src/git-auth.ts` の `checkGitModeAuthAndPermission` を本物の `commandExists` /
+   * `runSubprocess` / `process.env` で呼ぶ実装(design.md §5.7、T-16 / issue #21)。
+   * Git モードでない場合は何もしない(既定実装・注入実装のいずれも呼び出し側で
+   * `isGitModeService` を判定する必要はない)。
+   */
+  checkGitAuthFn?: (config: Config) => Promise<void>;
 }
 
 /** `runSync` の戻り値。 */
@@ -116,6 +139,24 @@ function preconditionFailure(message: string): RunSyncResult {
 
 function runAborted(message: string): RunSyncResult {
   return { exitCode: PARTIAL_FAILURE, published: 0, skipped: 0, failed: 0, error: message };
+}
+
+/**
+ * `RunSyncOptions.checkGitAuthFn` の既定実装(T-16 / issue #21)。Git モードでなければ
+ * 何もしない(`checkGitModeAuthAndPermission` 自身が判定する)。問題が見つかった場合は
+ * `DependencyCheckError` として投げ、`runSync` 側の既存の `preconditionFailure` 経路に
+ * 乗せる(`checkDependenciesFn` の失敗と同じ扱い)。
+ */
+async function defaultCheckGitAuth(config: Config): Promise<void> {
+  const problems: DependencyProblem[] = [];
+  await checkGitModeAuthAndPermission(config, problems, {
+    commandExistsFn: commandExists,
+    env: process.env,
+    runSubprocessFn: runSubprocess,
+  });
+  if (problems.length > 0) {
+    throw new DependencyCheckError(problems);
+  }
 }
 
 /**
@@ -443,21 +484,34 @@ async function runLockedSync(params: RunLockedSyncParams): Promise<RunSyncResult
 
     // design.md §6 手順7: Git モードの finalize()。gitMode時の実在は `runSync` 冒頭の
     // `validateGitModePublisherContract` で検証済み(`requireDefined` は防御的な保険)。
-    // finalize が成功したら必ず state.flush() を実行する経路をここに1本化し、
-    // 「保留分が黙って flush されない」コードパスが生まれないようにする
-    // (CodeRabbit review, PR #47)。
+    //
+    // T-16(issue #21)で `FinalizeOutcome`(`src/publishers/types.ts`)を導入し、
+    // 「確定するか」「実行を失敗として報告するか」の独立した2軸を扱えるようにした
+    // (同ファイル冒頭の JSDoc 参照)。`finalize()` が例外を投げた場合(push / PR 作成失敗)は
+    // 従来どおり確定させず(`flush` を呼ばず)失敗として扱う。
     if (gitMode) {
       const finalize = requireDefined(
         publisher.finalize,
         'git-mode Publisher.finalize is missing despite validateGitModePublisherContract',
       );
       try {
-        await finalize();
-        // PR 作成成功後に保留分を一括保存する(design.md §5.6 書き込みポイント2)。
-        await state.flush();
+        const finalizeOutcome: FinalizeOutcome = await finalize();
+        if (finalizeOutcome.persist) {
+          // PR 作成成功後に保留分を一括保存する(design.md §5.6 書き込みポイント2、
+          // §5.7 手順4「確定基準は PR 作成成功」)。
+          await state.flush();
+        }
+        if (finalizeOutcome.failed === true) {
+          // design.md §10「`gh pr merge` 失敗… PR は残し、実行は失敗として報告」。
+          // `persist: true` と同時に成立しうる(状態は保存済みのまま失敗扱い)。
+          logger.warn({
+            message: `finalize reported failure (state ${finalizeOutcome.persist ? 'was' : 'was not'} persisted): ${finalizeOutcome.reason ?? 'unknown reason'}`,
+          });
+          finalizeFailed = true;
+        }
       } catch (error) {
-        // design.md §5.7 手順4 / §10: finalize 失敗時は保留分を確定させない
-        // (flush 済みでなければ何も確定しない。flush 自体が失敗した場合も同様に扱う)。
+        // design.md §5.7 手順4 / §10: finalize が例外を投げた場合(push / gh pr create の
+        // 失敗)は保留分を確定させない(何も確定しない。全ノートが次回実行で再試行される)。
         // 実行全体を失敗として報告する。
         logger.warn({
           message: `finalize failed, staged notes were not persisted: ${errorMessage(error)}`,
@@ -505,6 +559,7 @@ export async function runSync(options: RunSyncOptions): Promise<RunSyncResult> {
     acquireLockFn = acquireLock,
     releaseLockFn = releaseLock,
     checkDependenciesFn = checkDependencies,
+    checkGitAuthFn = defaultCheckGitAuth,
   } = options;
 
   logger.runStart();
@@ -525,6 +580,19 @@ export async function runSync(options: RunSyncOptions): Promise<RunSyncResult> {
   const gitModePublisherProblem = validateGitModePublisherContract(config, publisher);
   if (gitModePublisherProblem !== undefined) {
     return gitModePublisherProblem;
+  }
+
+  // T-16(issue #21)で追加した前提条件チェック: Git モードの GH_TOKEN 有効性
+  // (`gh auth status`)・対象リポジトリへの push / PR 作成権限(design.md §5.7)。
+  // ロック取得・StateStore 読み込み・`prepare()`(ブランチ作成)等、一切の Git / gh
+  // 副作用を起こす前にここで検出する(このファイル冒頭 JSDoc 参照)。
+  try {
+    await checkGitAuthFn(config);
+  } catch (error) {
+    if (error instanceof DependencyCheckError) {
+      return preconditionFailure(error.message);
+    }
+    throw error;
   }
 
   // design.md §6「多重起動防止」: 依存チェックの後・StateStore 読み込みの前に取得する。
