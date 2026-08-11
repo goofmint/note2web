@@ -4,7 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createS3UploaderClient } from './assets/uploader.js';
 import { ConfigValidationError, loadConfig } from './config.js';
-import { PRECONDITION_FAILURE } from './exit-codes.js';
+import { DoctorError, runDoctorChecks } from './doctor.js';
+import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 import { createLogger } from './logger.js';
 import { createPublisher, PublisherNotImplementedError } from './publishers/factory.js';
 import { resolveStatePath } from './state/derive.js';
@@ -87,13 +88,22 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   }
 
   if (subcommand === 'doctor') {
-    // プレースホルダ: doctor 本体は後続タスク(T-15)で実装する(design.md §5.1)。
-    // sync(本関数、T-14)は既に実フローへ配線済みだが、doctor は依存チェックのみを
-    // 独立コマンドとして提供する専用実装がまだ無い。SUCCESS を返すと「チェック済みで
-    // 問題無し」と誤解される(何もチェックしていない)ため、未実装であることが明確に
-    // 伝わるよう exit 2 + stderr で報告する(CodeRabbit review, PR #47)。
-    stderr.push('note2web: doctor is not implemented yet (T-15); no checks were performed');
-    return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+    // design.md §5.1「doctor は … 事前チェックのみ実行」(T-15、issue #20)。
+    // `runDoctorChecks` は `sync` の依存チェック(`src/dependencies.ts`)を再利用しつつ、
+    // Git モードでは `gh auth status` / 対象リポジトリの push・PR 作成権限も確認する。
+    try {
+      await runDoctorChecks(config);
+    } catch (error) {
+      if (error instanceof DoctorError) {
+        for (const problem of error.problems) {
+          stderr.push(`note2web: doctor: ${problem.message}`);
+        }
+        return { exitCode: error.exitCode, stdout, stderr };
+      }
+      throw error;
+    }
+    stdout.push(`note2web: doctor: all checks passed for service "${config.service}"`);
+    return { exitCode: SUCCESS, stdout, stderr };
   }
 
   // subcommand === 'sync'(T-14。design.md §6 の実フローへ接続する)。

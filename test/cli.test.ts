@@ -92,9 +92,11 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toMatch(/no Publisher implementation is registered yet/);
   });
 
-  it('exits 2 for doctor when --config points to a schema-valid file (doctor is not implemented yet, T-15)', async () => {
-    // doctor はまだ何もチェックしていないため、SUCCESS を返すと「問題無し」と誤解される。
-    // 未実装であることが明確に伝わるよう exit 2 + stderr で報告する(CodeRabbit review, PR #47)。
+  it('exits 2 for doctor when --config points to a schema-valid file but dependencies are missing on this host (T-15)', async () => {
+    // このテスト環境には apple_cloud_notes_parser 等が実在しないため、実 commandExistsFn /
+    // fileExistsFn を使う `runCli` 経由の doctor は必ず不足を報告する。「何も配信せず
+    // exit 2」に加え、doctor 固有のプレフィックス("note2web: doctor: ")が付くことを検証する
+    // (T-15 実装後は「未実装」ではなく、実チェック結果として exit 2 になる)。
     for (const name of VALID_CONFIG_ENV_VARS) {
       process.env[name] = 'dummy-value';
     }
@@ -103,7 +105,58 @@ describe('runCli', () => {
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
     expect(result.stdout).toHaveLength(0);
-    expect(result.stderr.join('\n')).toMatch(/doctor is not implemented yet/);
+    // git モード(zenn)なのに、この実行環境には apple_cloud_notes_parser も `gh` も
+    // `GH_TOKEN` も無いため、複数件の不足が同時に報告される(1件で打ち切らない)。
+    expect(result.stderr.length).toBeGreaterThanOrEqual(2);
+    for (const line of result.stderr) {
+      expect(line).toMatch(/^note2web: doctor: /);
+    }
+  });
+
+  it('exits 0 for doctor when every dependency is actually satisfiable on this host (T-15, no injection)', async () => {
+    // `devto` は API 直接配信のため git/gh 系の追加チェックが一切走らない(§6 依存表)。
+    // ここでは実 commandExistsFn/fileExistsFn を経由させたまま(モックなし)、
+    // `ruby` は実行環境に実在する前提で、`exporter.parser_path` だけこのテスト用の
+    // 一時ディレクトリへ差し替えて「本当に全部揃っている」状態を作る。
+    const parserPath = join(dir, 'parser');
+    mkdirSync(parserPath, { recursive: true });
+    writeFileSync(join(parserPath, 'notes_cloud_ripper.rb'), '# fixture stub\n');
+
+    const devtoConfigPath = join(dir, 'devto-doctor-ok.yaml');
+    writeFileSync(
+      devtoConfigPath,
+      [
+        'service: devto',
+        'source:',
+        '  folders: [tech]',
+        'exporter:',
+        `  parser_path: ${parserPath}`,
+        'assets:',
+        '  provider: s3',
+        '  bucket: blog-assets-devto',
+        '  public_base_url: https://assets.example.com/notes/',
+        '  access_key_id_env: DEVTO_DOCTOR_S3_ACCESS_KEY_ID',
+        '  secret_access_key_env: DEVTO_DOCTOR_S3_SECRET_ACCESS_KEY',
+        'devto:',
+        '  api_key_env: DEVTO_DOCTOR_API_KEY',
+        '',
+      ].join('\n'),
+    );
+
+    process.env.DEVTO_DOCTOR_S3_ACCESS_KEY_ID = 'dummy-value';
+    process.env.DEVTO_DOCTOR_S3_SECRET_ACCESS_KEY = 'dummy-value';
+    process.env.DEVTO_DOCTOR_API_KEY = 'dummy-value';
+    try {
+      const result = await runCli(['doctor', '--config', devtoConfigPath]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr).toHaveLength(0);
+      expect(result.stdout.join('\n')).toMatch(/all checks passed for service "devto"/);
+    } finally {
+      delete process.env.DEVTO_DOCTOR_S3_ACCESS_KEY_ID;
+      delete process.env.DEVTO_DOCTOR_S3_SECRET_ACCESS_KEY;
+      delete process.env.DEVTO_DOCTOR_API_KEY;
+    }
   });
 
   it('exits 2 with an error when --config points to a directory', async () => {
