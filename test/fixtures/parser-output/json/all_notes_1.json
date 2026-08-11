@@ -1,0 +1,191 @@
+{
+  "version": 17,
+  "file_path": "/Users/sample/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite",
+  "backup_type": 2,
+  "html": "[omitted in fixture: full combined HTML for all notes, identical in structure to the per-note \"html\" fields below concatenated together. Not used by note2web -- see README.md]",
+  "accounts": {
+    "1": {
+      "primary_key": 1,
+      "name": "Sample Notes",
+      "identifier": "11111111-1111-4111-8111-111111111111",
+      "cloudkit_identifier": null,
+      "cloudkit_last_modified_device": null,
+      "html": "<div>\n<h1><a id=\"account_1\">Sample Notes</a></h1>\n</div>"
+    }
+  },
+  "cloudkit_participants": {},
+  "folders": {
+    "10": {
+      "primary_key": 10,
+      "uuid": "22222222-2222-4222-8222-222222222222",
+      "name": "Tech",
+      "account_id": 1,
+      "account": "Sample Notes",
+      "parent_folder_id": null,
+      "child_folders": {
+        "11": {
+          "primary_key": 11,
+          "uuid": "33333333-3333-4333-8333-333333333333",
+          "name": "Archive",
+          "account_id": 1,
+          "account": "Sample Notes",
+          "parent_folder_id": 10,
+          "child_folders": {},
+          "html": "<div>\n<h1><a id=\"folder_11\">Sample Notes - Archive</a></h1>\n<ul></ul>\n</div>"
+        }
+      },
+      "html": "<div>\n<h1><a id=\"folder_10\">Sample Notes - Tech</a></h1>\n<ul></ul>\n</div>"
+    }
+  },
+  "notes": {
+    "201": {
+      "account_key": 1,
+      "account": "Sample Notes",
+      "folder_key": 10,
+      "folder": "Tech",
+      "note_id": 201,
+      "uuid": "44444444-4444-4444-8444-444444444444",
+      "primary_key": 201,
+      "creation_time": "2026-01-10 09:15:00 +0000",
+      "modify_time": "2026-01-12 18:42:00 +0000",
+      "cloudkit_creator_id": null,
+      "cloudkit_modifier_id": null,
+      "cloudkit_last_modified_device": null,
+      "is_pinned": false,
+      "is_password_protected": false,
+      "title": "Q3 Sales Table",
+      "plaintext": "Q3 Sales Table\n\nItem\tRevenue\nWidgets\t1,200\nGadgets\t3,400\n",
+      "html": "<div>\n<h1><a id=\"note_201\">Note 201</a></h1>\n<div>\n<b>Account:</b> Sample Notes</div>\n<div>\n<b>Folder:</b> <span><a href=\"#folder_10\">Tech</a></span>\n</div>\n<div>\n<b>Title:</b> Q3 Sales Table</div>\n<div>\n<b>Created:</b> 2026-01-10 09:15:00 +0000</div>\n<div>\n<b>Modified:</b> 2026-01-12 18:42:00 +0000</div>\n<div class=\"note-content\">\n<h1>Q3 Sales Table<br>\n</h1>\n<br><table>\n<tr>\n<td>Item</td>\n<td>Revenue</td>\n</tr>\n<tr>\n<td>Widgets</td>\n<td>1,200</td>\n</tr>\n<tr>\n<td>Gadgets</td>\n<td>3,400</td>\n</tr>\n</table>\n</div>\n</div>",
+      "embedded_objects": [
+        {
+          "primary_key": 401,
+          "parent_primary_key": null,
+          "note_id": 201,
+          "uuid": "99999999-9999-4999-8999-999999999999",
+          "type": "com.apple.notes.table",
+          "conforms_to": "com.apple.notes.table",
+          "is_password_protected": false,
+          "html": "<table>\n<tr>\n<td>Item</td>\n<td>Revenue</td>\n</tr>\n<tr>\n<td>Widgets</td>\n<td>1,200</td>\n</tr>\n<tr>\n<td>Gadgets</td>\n<td>3,400</td>\n</tr>\n</table>",
+          "table": [
+            ["Item", "Revenue"],
+            ["Widgets", "1,200"],
+            ["Gadgets", "3,400"]
+          ]
+        }
+      ],
+      "hashtags": [],
+      "mentions": []
+    },
+    "202": {
+      "account_key": 1,
+      "account": "Sample Notes",
+      "folder_key": 10,
+      "folder": "Tech",
+      "note_id": 202,
+      "uuid": "55555555-5555-4555-8555-555555555555",
+      "primary_key": 202,
+      "creation_time": "2026-01-08 07:05:00 +0000",
+      "modify_time": "2026-01-14 11:20:00 +0000",
+      "cloudkit_creator_id": null,
+      "cloudkit_modifier_id": null,
+      "cloudkit_last_modified_device": null,
+      "is_pinned": false,
+      "is_password_protected": false,
+      "title": "Grocery Checklist",
+      "plaintext": "Grocery Checklist\n\nBuy milk\nBuy eggs\nLarge eggs\nFree-range\nBuy bread\n",
+      "html": "<div>\n<h1><a id=\"note_202\">Note 202</a></h1>\n<div>\n<b>Account:</b> Sample Notes</div>\n<div>\n<b>Folder:</b> <span><a href=\"#folder_10\">Tech</a></span>\n</div>\n<div>\n<b>Title:</b> Grocery Checklist</div>\n<div>\n<b>Created:</b> 2026-01-08 07:05:00 +0000</div>\n<div>\n<b>Modified:</b> 2026-01-14 11:20:00 +0000</div>\n<div class=\"note-content\">\n<h1>Grocery Checklist<br>\n</h1>\n<br><ul class=\"checklist\" data-apple-notes-indent-amount=\"0\"><li class=\"unchecked\">Buy milk</li>\n<li class=\"checked\">Buy eggs<ul class=\"checklist\" data-apple-notes-indent-amount=\"1\">\n<li class=\"checked\">Large eggs</li>\n<li class=\"unchecked\">Free-range</li>\n</ul>\n</li>\n<li class=\"unchecked\">Buy bread</li>\n</ul>\n</div>",
+      "embedded_objects": [],
+      "hashtags": [],
+      "mentions": []
+    },
+    "203": {
+      "account_key": 1,
+      "account": "Sample Notes",
+      "folder_key": 10,
+      "folder": "Tech",
+      "note_id": 203,
+      "uuid": "66666666-6666-4666-8666-666666666666",
+      "primary_key": 203,
+      "creation_time": "2026-01-05 13:00:00 +0000",
+      "modify_time": "2026-01-05 13:04:00 +0000",
+      "cloudkit_creator_id": null,
+      "cloudkit_modifier_id": null,
+      "cloudkit_last_modified_device": null,
+      "is_pinned": false,
+      "is_password_protected": false,
+      "title": "Whiteboard Sketch",
+      "plaintext": "Whiteboard Sketch\n\n",
+      "html": "<div>\n<h1><a id=\"note_203\">Note 203</a></h1>\n<div>\n<b>Account:</b> Sample Notes</div>\n<div>\n<b>Folder:</b> <span><a href=\"#folder_10\">Tech</a></span>\n</div>\n<div>\n<b>Title:</b> Whiteboard Sketch</div>\n<div>\n<b>Created:</b> 2026-01-05 13:00:00 +0000</div>\n<div>\n<b>Modified:</b> 2026-01-05 13:04:00 +0000</div>\n<div class=\"note-content\">\n<h1>Whiteboard Sketch<br>\n</h1>\n<br><a href=\"../files/Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png\"><img src=\"../files/Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png\" data-apple-notes-zidentifier=\"88888888-8888-4888-8888-888888888888\" width=\"640\"></a>\n</div>",
+      "embedded_objects": [
+        {
+          "primary_key": 402,
+          "parent_primary_key": null,
+          "note_id": 203,
+          "uuid": "88888888-8888-4888-8888-888888888888",
+          "type": "com.apple.drawing.2",
+          "conforms_to": "drawing",
+          "filename": "FallbackImage.png",
+          "filepath": "Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png",
+          "backup_location": "Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png",
+          "is_password_protected": false,
+          "html": "<a href=\"../files/Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png\"><img src=\"../files/Accounts/11111111-1111-4111-8111-111111111111/FallbackImages/88888888-8888-4888-8888-888888888888/AAAAAAAAAAAAAAAAAAAAAA==/FallbackImage.png\" data-apple-notes-zidentifier=\"88888888-8888-4888-8888-888888888888\" width=\"640\"></a>"
+        }
+      ],
+      "hashtags": [],
+      "mentions": []
+    },
+    "204": {
+      "account_key": 1,
+      "account": "Sample Notes",
+      "folder_key": 11,
+      "folder": "Archive",
+      "note_id": 204,
+      "uuid": "77777777-7777-4777-8777-777777777777",
+      "primary_key": 204,
+      "creation_time": "2025-12-20 10:00:00 +0000",
+      "modify_time": "2026-01-03 16:30:00 +0000",
+      "cloudkit_creator_id": null,
+      "cloudkit_modifier_id": null,
+      "cloudkit_last_modified_device": null,
+      "is_pinned": false,
+      "is_password_protected": false,
+      "title": "🚀 Launch Notes",
+      "plaintext": "🚀 Launch Notes\n\nWe need better #planning this week before the launch.\n\n#launch #productivity",
+      "html": "<div>\n<h1><a id=\"note_204\">Note 204</a></h1>\n<div>\n<b>Account:</b> Sample Notes</div>\n<div>\n<b>Folder:</b> <span><a href=\"#folder_11\">Archive</a></span>\n</div>\n<div>\n<b>Title:</b> 🚀 Launch Notes</div>\n<div>\n<b>Created:</b> 2025-12-20 10:00:00 +0000</div>\n<div>\n<b>Modified:</b> 2026-01-03 16:30:00 +0000</div>\n<div class=\"note-content\">\n<h1>🚀 Launch Notes<br>\n</h1>\n<br>We need better #planning this week before the launch.<br>\n<br>#launch #productivity</div>",
+      "embedded_objects": [
+        {
+          "primary_key": 403,
+          "parent_primary_key": null,
+          "note_id": 204,
+          "uuid": "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa",
+          "type": "com.apple.notes.inlinetextattachment.hashtag",
+          "conforms_to": "com.apple.notes.inlinetextattachment.hashtag",
+          "is_password_protected": false,
+          "html": "#planning"
+        },
+        {
+          "primary_key": 404,
+          "parent_primary_key": null,
+          "note_id": 204,
+          "uuid": "bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb",
+          "type": "com.apple.notes.inlinetextattachment.hashtag",
+          "conforms_to": "com.apple.notes.inlinetextattachment.hashtag",
+          "is_password_protected": false,
+          "html": "#launch"
+        },
+        {
+          "primary_key": 405,
+          "parent_primary_key": null,
+          "note_id": 204,
+          "uuid": "cccccccc-3333-4ccc-8ccc-cccccccccccc",
+          "type": "com.apple.notes.inlinetextattachment.hashtag",
+          "conforms_to": "com.apple.notes.inlinetextattachment.hashtag",
+          "is_password_protected": false,
+          "html": "#productivity"
+        }
+      ],
+      "hashtags": ["#planning", "#launch", "#productivity"],
+      "mentions": []
+    }
+  }
+}
