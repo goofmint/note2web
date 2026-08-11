@@ -171,7 +171,9 @@ describe('exportAppleNotes', () => {
     expect(salesTable?.folder).toBe('Tech');
     expect(salesTable?.bodyHtml).toContain('id="note_44444444-4444-4444-8444-444444444444"');
     expect(salesTable?.bodyHtml).toContain('<table>');
-    // title / emoji / tags はメタデータ抽出層(T-10)の担当。Exporter は空値のまま。
+    // title / emoji はメタデータ抽出層(T-10)の担当。Exporter は空値のまま。
+    // tags は JSON hashtags をそのまま詰める(design.md §5.3「差分」節)。
+    // このノートの JSON hashtags は空配列のため、tags も空のまま。
     expect(salesTable?.title).toBe('');
     expect(salesTable?.emoji).toBeNull();
     expect(salesTable?.tags).toEqual([]);
@@ -195,6 +197,8 @@ describe('exportAppleNotes', () => {
     const launch = byUuid.get('77777777-7777-4777-8777-777777777777');
     expect(launch?.folder).toBe('Archive');
     expect(launch?.bodyHtml).toContain('id="note_77777777-7777-4777-8777-777777777777"');
+    // JSON hashtags(design.md §5.3「差分」節)をそのまま tags に詰める。
+    expect(launch?.tags).toEqual(['#planning', '#launch', '#productivity']);
 
     const opsLog = byUuid.get('eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee');
     expect(opsLog?.folder).toBe('Dev/Ops: Log');

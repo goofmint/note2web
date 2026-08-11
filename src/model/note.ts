@@ -3,9 +3,10 @@
  *
  * Exporter(`src/exporter/apple-notes.ts`、design.md §5.2)は parser の JSON / 個別 HTML
  * から読み取れる「骨格」フィールド(`uuid` / `folder` / `createdAt` / `updatedAt` /
- * `bodyHtml` / `attachments`)のみを埋めて返す。`title` / `emoji` / `tags` は
- * メタデータ抽出層(`src/transform/metadata.ts`。T-10)の担当であり、Exporter は
- * 空値(`''` / `null` / `[]`)で初期化するだけにとどめる。
+ * `bodyHtml` / `attachments`)に加え、`tags`(JSON `hashtags` フィールドをそのまま。
+ * design.md §5.3「差分」節)も埋めて返す。`title` / `emoji` のみメタデータ抽出層
+ * (`src/transform/metadata.ts`。T-10)の担当であり、Exporter は空値(`''` / `null`)で
+ * 初期化するだけにとどめる。
  */
 
 /** Apple Notes の1ノートを表すモデル(design.md §5.3)。 */
@@ -18,7 +19,11 @@ export interface Note {
   title: string;
   /** 1行目の先頭 grapheme(絵文字の場合のみ)(FR-05)。メタデータ抽出層(T-10)が埋める。 */
   emoji: string | null;
-  /** ノート内ハッシュタグ(FR-07)。メタデータ抽出層(T-10)が埋める。 */
+  /**
+   * ノート内ハッシュタグ(FR-07)。Exporter(T-09)が JSON `hashtags` フィールドを
+   * そのまま(順序を保った重複排除のみ行い)埋める(design.md §5.3「差分」節)。
+   * `#` を含む値をそのまま保持する(FR-07「そのまま」の文言どおり)。
+   */
   tags: string[];
   /** 作成日時(FR-08)。JSON の `creation_time` を解決したもの。 */
   createdAt: Date;

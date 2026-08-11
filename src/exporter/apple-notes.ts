@@ -1,9 +1,15 @@
 /**
  * Exporter(design.md §5.2)。`apple_cloud_notes_parser` をサブプロセスとして実行し、
  * 一時ディレクトリに出力させたうえで、JSON / 個別 HTML / files から `Note` モデルの
- * 骨格(skeleton)一覧を組み立てる。`title` / `emoji` / `tags` の実値抽出は
+ * 骨格(skeleton)一覧を組み立てる。`title` / `emoji` の実値抽出は
  * メタデータ抽出層(`src/transform/metadata.ts`、T-10)の担当であり、ここでは
  * 空値で初期化するだけにとどめる(design.md §5.3 冒頭のコンポーネント分割どおり)。
+ *
+ * `tags` のみ例外で、ここ(Exporter)が JSON ノートオブジェクトの `hashtags`
+ * フィールド(parser が抽出済み)をそのまま(順序を保った重複排除のみ行い)詰める
+ * (design.md §5.3「差分」節。本文 HTML の正規表現走査ではなく JSON `hashtags` を
+ * 唯一の情報源とする、という更新後の設計に合わせたもの)。メタデータ抽出層は
+ * この `tags` を再加工せず、正規化(重複排除)のみ行う。
  *
  * 毎回フルエクスポートする(design.md §5.2)。差分判定は変換後のコンテンツハッシュで
  * 行うため、エクスポート自体の増分化は行わない。一時ディレクトリの削除は呼び出し側の
@@ -24,6 +30,7 @@ import {
   type SubprocessClassification,
 } from '../subprocess.js';
 import type { Attachment, Note } from '../model/note.js';
+import { dedupeTags } from '../transform/metadata.js';
 
 /** design.md §7 のサンプル値をそのまま既定値として用いる(`exporter` ブロック省略時)。 */
 export const DEFAULT_PARSER_PATH = '~/tools/apple_cloud_notes_parser';
@@ -532,10 +539,11 @@ async function runExport(params: {
     notes.push({
       uuid: noteJson.uuid,
       folder: noteJson.folder,
-      // title / emoji / tags はメタデータ抽出層(T-10)の担当(design.md §5.3)。
+      // title / emoji はメタデータ抽出層(T-10)の担当(design.md §5.3)。
       title: '',
       emoji: null,
-      tags: [],
+      // tags は JSON hashtags をそのまま情報源とする(design.md §5.3「差分」節)。
+      tags: dedupeTags(noteJson.hashtags),
       createdAt: parseAppleTimestamp(noteJson.creation_time),
       updatedAt: parseAppleTimestamp(noteJson.modify_time),
       bodyHtml,
