@@ -18,10 +18,21 @@
  * 初回のまま固定、等。design.md §5.7 のサービス別表)は各 Publisher の Renderer
  * (T-17 以降)が担い、ここでは §8 の例に沿った最小限の共通規約にとどめる
  * (CodeRabbit review, PR #47)。
+ *
+ * **`prev`(T-19 / issue #24 で追加)**: Jekyll のファイル名固定(design.md §4「初回配信時の
+ * ファイル名を状態 JSON に記録し、以後は作成日が変わっても記録済みファイル名を使い続ける」)
+ * には、レンダリング時点で前回の `NoteState`(特に `artifactPath`)が要る。既存の
+ * `Publisher.publish(article, prev)`(`src/publishers/types.ts`、design.md §5.7)が既に
+ * `prev` を受け取る設計と一致させるため、`RenderNoteInput` にも `prev` を追加する
+ * (`src/sync.ts` の `processNote` が `state.getNote` を `renderNote` 呼び出しの前へ
+ * 移動して渡す。CodeRabbit issue plan、issue #24 コメント Phase 1)。`renderGenericArticle`
+ * および `renderZennArticle`/`renderHugoArticle` はこのフィールドを使わない
+ * ——ファイル名がノートの内容のみから決まり、状態を跨いで固定する必要が無いため。
  */
 
 import type { Config } from '../config.js';
 import type { Note } from '../model/note.js';
+import type { NoteState } from '../state/store.js';
 import {
   computeContentHash,
   renderArtifact,
@@ -38,6 +49,14 @@ export interface RenderNoteInput {
   markdown: string;
   /** 検証済み設定(タイムゾーン等、サービス別 Renderer が参照する)。 */
   config: Config;
+  /**
+   * このノートの前回配信時の状態(`StateStore.getNote(note.uuid)`)。まだ配信されて
+   * いなければ `null`。Jekyll のファイル名固定(`renderJekyllArticle`、T-19)のように
+   * 前回の `artifactPath` を再利用するサービス別 Renderer が使う(上記モジュール冒頭
+   * JSDoc 参照)。汎用 Renderer(`renderGenericArticle`)や Zenn/Hugo の Renderer は
+   * 使わない。
+   */
+  prev: NoteState | null;
 }
 
 /** sync フローに注入する Renderer の関数シグネチャ。 */

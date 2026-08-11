@@ -295,9 +295,15 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
     return 'failed';
   }
 
+  // design.md §6 手順6d の content_hash 比較、および Jekyll のファイル名固定
+  // (design.md §4、`renderJekyllArticle`、T-19 / issue #24)の両方が前回の `NoteState` を
+  // 要るため、`renderNote` 呼び出しより前に取得する(CodeRabbit issue plan、issue #24
+  // コメント Phase 1 Task 2 と同じ結論)。
+  const prev = state.getNote(note.uuid) ?? null;
+
   let article: RenderedArticle;
   try {
-    article = renderNote({ note, markdown, config });
+    article = renderNote({ note, markdown, config, prev });
   } catch (error) {
     logger.noteFailed({
       service,
@@ -309,7 +315,6 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
   }
 
   // design.md §6 手順6d: StateStore の content_hash と一致すれば skip。
-  const prev = state.getNote(note.uuid) ?? null;
   if (prev !== null && prev.contentHash === article.contentHash) {
     logger.noteSkipped({ service, noteUuid: note.uuid, title: note.title });
     return 'skipped';
