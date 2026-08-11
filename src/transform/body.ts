@@ -29,7 +29,11 @@
  * - ハッシュタグのみで構成される行(`metadata.ts` の `isHashtagOnlyLine`。文中の
  *   インラインなハッシュタグは残す)は本文から除去する(design.md §5.3)
  * - 上記いずれにも当たらない要素で、かつ Markdown で表現できない要素(`SUPPORTED_TAG_NAMES`
- *   に無いタグ)は、生 HTML を埋め込まずテキスト化し、注入されたロガーに `warn` する
+ *   に無いタグ)は、生 HTML を埋め込まずテキスト化し、注入されたロガーに `warn` する。
+ *   ただし `<script>`/`<style>`(`DROPPED_TAG_NAMES`)はテキスト化せず要素ごと削除し
+ *   (中身はコード/CSS であり本文に混入させてはいけないため)、`<section>` 等の
+ *   HTML5 セクショニング要素(`UNSUPPORTED_BLOCK_TAG_NAMES`)はテキスト化した内容を
+ *   合成 `<p>` で包んで段落境界を保つ
  * - `<br>` で区切られたプレーンテキストの各連(`html.ts` の「行」の `kind: 'inline'`)は、
  *   それぞれ独立した段落として出力する(単一段落内の強制改行にはしない)
  */
@@ -169,15 +173,64 @@ const SUPPORTED_TAG_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * `nodes` を深さ優先で走査し、`SUPPORTED_TAG_NAMES` に無いタグの要素をその場でテキスト
- * ノード(`hast-util-to-text` による配下テキストの抽出結果)に置き換える(生 HTML を
+ * 中身がコード/CSS であり、テキストとして本文に混入させてはいけないタグ。
+ * `SUPPORTED_TAG_NAMES` には無い(=「変換で表現できない要素」の一種)が、他の未対応要素と
+ * 違って `toText` によるテキスト化は行わず、要素ごと本文から取り除く(design.md §5.4の
+ * 「テキスト化」は本来「その要素が持つ意味のあるテキストを残す」ことが目的であり、
+ * `<script>`/`<style>` の中身はユーザー可読なテキストではなく実行コード/スタイル定義
+ * そのものであるため、これを Markdown 本文に漏らすのは「テキスト化」の趣旨に反する)。
+ * 警告ログ自体は他の未対応要素と同様に1回出す(要素が丸ごと失われたことをオペレータが
+ * 追跡できるように)。
+ */
+const DROPPED_TAG_NAMES: ReadonlySet<string> = new Set(['script', 'style']);
+
+/**
+ * `SUPPORTED_TAG_NAMES` に無い(=未対応)タグのうち、HTML5 のセクショニング/
+ * グルーピング要素のように既定でブロックレベル表示となるものの一覧。
+ *
+ * これらをテキスト化する際は、単なるテキストノードに置き換えるのではなく合成 `<p>` で
+ * 包む(`html.ts` の `BLOCK_TAG_NAMES` に `'p'` が含まれるため、行分割で独立した1行=
+ * 独立した段落として扱われる)。そうしないと、例えば `<section>A</section>
+ * <section>B</section>` のような隣接するブロック要素が、テキスト化後は単なる隣接テキスト
+ * ノード("A" と "B")になり、`<br>` も挟まないため行分割で1つの行("AB")に混ざって
+ * 段落境界が失われてしまう。`<video>`/`<audio>` 等(インライン的に扱ってよい未対応要素)は
+ * この一覧に含めず、従来どおり地の文に溶け込ませる。
+ */
+const UNSUPPORTED_BLOCK_TAG_NAMES: ReadonlySet<string> = new Set([
+  'address',
+  'article',
+  'aside',
+  'details',
+  'dialog',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'header',
+  'hgroup',
+  'main',
+  'nav',
+  'section',
+  'summary',
+]);
+
+/**
+ * `nodes` を深さ優先で走査し、`SUPPORTED_TAG_NAMES` に無いタグの要素を置き換える(生 HTML を
  * 埋め込まない。design.md §5.4)。置き換えた要素ごとに `onUnsupported` を1回呼ぶ
  * (`html.ts`/`metadata.ts` に倣い、`nodes` そのものを破壊的に書き換える)。
  *
- * サポート対象タグの子要素へは再帰して未対応要素を探す。未対応タグはテキスト化した
- * 時点でその配下ごと1つのテキストノードにまとまるため、配下をさらに再帰しない
+ * - `DROPPED_TAG_NAMES`(`script`/`style`)は要素ごと取り除く(コード/CSS をテキストとして
+ *   残さない)。
+ * - `UNSUPPORTED_BLOCK_TAG_NAMES` はテキスト化のうえ合成 `<p>` で包み、段落境界を保つ。
+ * - それ以外の未対応タグは、その場でテキストノード(`hast-util-to-text` による配下
+ *   テキストの抽出結果)に置き換える(地の文に溶け込ませる)。
+ *
+ * サポート対象タグの子要素へは再帰して未対応要素を探す。未対応タグはテキスト化(または
+ * 削除)した時点でその配下ごと1つのノードにまとまるため、配下をさらに再帰しない
  * (配下にも未対応要素があれば、そのテキストは結果に含まれるが、個別の警告は
- * 外側の未対応要素1件のみ出す)。
+ * 外側の未対応要素1件のみ出す。ただし `DROPPED_TAG_NAMES` の場合は配下ごと消えるため、
+ * 配下のテキストも結果に一切残らない)。
  */
 function textualizeUnsupportedElements(
   nodes: Array<RootContent | ElementContent>,
@@ -192,8 +245,26 @@ function textualizeUnsupportedElements(
       textualizeUnsupportedElements(node.children, onUnsupported);
       continue;
     }
+
     onUnsupported(node.tagName);
-    nodes[index] = { type: 'text', value: toText(node, { whitespace: 'normal' }) };
+
+    if (DROPPED_TAG_NAMES.has(node.tagName)) {
+      nodes.splice(index, 1);
+      index -= 1;
+      continue;
+    }
+
+    const text = toText(node, { whitespace: 'normal' });
+    if (UNSUPPORTED_BLOCK_TAG_NAMES.has(node.tagName)) {
+      nodes[index] = {
+        type: 'element',
+        tagName: 'p',
+        properties: {},
+        children: text === '' ? [] : [{ type: 'text', value: text }],
+      };
+    } else {
+      nodes[index] = { type: 'text', value: text };
+    }
   }
 }
 
@@ -309,10 +380,14 @@ function readAlt(element: Element): string {
 function checklistAwareLiHandler(): Handle {
   const defaultLi = requireDefaultHandler('li');
   return (state, element, parent) => {
-    const checked = hasClassName(element, 'checked')
-      ? true
-      : hasClassName(element, 'unchecked')
-        ? false
+    // `unchecked` を先に判定する(防御的措置): `'unchecked'` は文字列として `'checked'` を
+    // 部分文字列に含むため、万一 `hasClassName` の実装が将来 substring 判定に変わっても
+    // (現状は `className` 配列の完全一致判定だが)判定順序をこの向きにしておけば
+    // 誤判定しない。
+    const checked = hasClassName(element, 'unchecked')
+      ? false
+      : hasClassName(element, 'checked')
+        ? true
         : undefined;
     const result = defaultLi(state, element, parent);
     if (
@@ -382,11 +457,15 @@ function assetAwareAHandler(): Handle {
     const directIdentifier = readZIdentifier(element);
     if (directIdentifier !== undefined) {
       const linkText = toText(element, { whitespace: 'normal' }).trim();
+      // リンクテキストが空(アイコンのみ等でテキストを持たない添付)だと `[](…)` になり、
+      // 参照が目視できなくなる。その場合は識別子自体をラベルとして使い、
+      // どのアセットへの参照かが Markdown 上でも読み取れるようにする。
+      const label = linkText === '' ? directIdentifier : linkText;
       const link: Link = {
         type: 'link',
         url: makeAssetPlaceholder(directIdentifier),
         title: null,
-        children: linkText === '' ? [] : [{ type: 'text', value: linkText }],
+        children: [{ type: 'text', value: label }],
       };
       return link;
     }
@@ -394,6 +473,34 @@ function assetAwareAHandler(): Handle {
     return defaultA(state, element, parent);
   };
 }
+
+// ---------------------------------------------------------------------------
+// unified プロセッサ(状態を持たないため、呼び出しごとに再構築せずモジュールスコープの
+// 定数として使い回す。`.freeze()` してプラグイン構成を確定させる)。
+// ---------------------------------------------------------------------------
+
+/** `bodyHtml` を hast にパースするだけのプロセッサ。`html.ts` の各関数と同じ用途。 */
+const parseProcessor = unified().use(rehypeParse).freeze();
+
+/**
+ * 組み直した hast(`scopedRoot`)を Markdown 文字列に変換するプロセッサ
+ * (`rehype-remark`(チェックリスト・アセットプレースホルダのカスタムハンドラ付き)→
+ * `remark-gfm` → `remark-stringify`)。ハンドラ自体はステートレスなので、
+ * `transformBody` の呼び出しごとに作り直す必要が無い。
+ */
+const markdownProcessor = unified()
+  .use(rehypeRemark, {
+    handlers: {
+      li: checklistAwareLiHandler(),
+      img: assetAwareImgHandler(),
+      a: assetAwareAHandler(),
+    },
+  })
+  .use(remarkGfm)
+  // `bullet: '-'`: design.md §5.4 / FR-12 の要求する `- [x]` / `- [ ]` 表記に合わせる
+  // (remark-stringify の既定は `*`)。それ以外は既定のまま。
+  .use(remarkStringify, { bullet: '-' })
+  .freeze();
 
 // ---------------------------------------------------------------------------
 // エントリ関数。
@@ -423,7 +530,7 @@ function assetAwareAHandler(): Handle {
 export function transformBody(options: TransformBodyOptions): TransformBodyResult {
   const { bodyHtml, logger, noteUuid, title } = options;
 
-  const tree = unified().use(rehypeParse).parse(bodyHtml) as Root;
+  const tree = parseProcessor.parse(bodyHtml) as Root;
   const containerChildren = resolveContainerChildren(tree);
 
   textualizeUnsupportedElements(containerChildren, (tagName) => {
@@ -473,21 +580,8 @@ export function transformBody(options: TransformBodyOptions): TransformBodyResul
 
   const scopedRoot: Root = { type: 'root', children: blocks };
 
-  const processor = unified()
-    .use(rehypeRemark, {
-      handlers: {
-        li: checklistAwareLiHandler(),
-        img: assetAwareImgHandler(),
-        a: assetAwareAHandler(),
-      },
-    })
-    .use(remarkGfm)
-    // `bullet: '-'`: design.md §5.4 / FR-12 の要求する `- [x]` / `- [ ]` 表記に合わせる
-    // (remark-stringify の既定は `*`)。それ以外は既定のまま。
-    .use(remarkStringify, { bullet: '-' });
-
-  const mdast = processor.runSync(scopedRoot);
-  const raw = String(processor.stringify(mdast));
+  const mdast = markdownProcessor.runSync(scopedRoot);
+  const raw = String(markdownProcessor.stringify(mdast));
   const trimmed = raw.trim();
   const markdown = trimmed === '' ? '' : `${trimmed}\n`;
 

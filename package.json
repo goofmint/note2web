@@ -33,6 +33,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "hast-util-to-mdast": "^10.1.2",
     "hast-util-to-text": "^4.0.2",
     "rehype-parse": "^9.0.1",
     "rehype-remark": "^10.0.1",

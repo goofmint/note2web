@@ -115,6 +115,28 @@ describe('transformBody', () => {
     expect(markdown).toBe('[report.pdf](note2web-asset://attach-1111-4111-8111-111111111111)\n');
   });
 
+  it('falls back to the identifier as the link label when a non-image attachment reference has no text', () => {
+    const bodyHtml = noteHtml(
+      '<h1>Attachment Demo<br>\n</h1>\n<br><a href="../files/report.pdf" data-apple-notes-zidentifier="attach-2222-4222-8222-222222222222"></a>',
+    );
+    const { markdown } = transformBody({ bodyHtml });
+
+    expect(markdown).toBe(
+      '[attach-2222-4222-8222-222222222222](note2web-asset://attach-2222-4222-8222-222222222222)\n',
+    );
+  });
+
+  it('propagates the <img alt> attribute onto the asset placeholder image', () => {
+    const bodyHtml = noteHtml(
+      '<h1>Alt Demo<br>\n</h1>\n<br><img src="../files/sketch.png" alt="a hand-drawn sketch" data-apple-notes-zidentifier="99999999-9999-4999-8999-999999999999">',
+    );
+    const { markdown } = transformBody({ bodyHtml });
+
+    expect(markdown).toBe(
+      '![a hand-drawn sketch](note2web-asset://99999999-9999-4999-8999-999999999999)\n',
+    );
+  });
+
   // (d) タイトル行の除去(FR-04 との関係。タイトルは frontmatter へ)。
   it('removes the title line (first line) from the body', () => {
     const bodyHtml = readFixture(
@@ -195,9 +217,36 @@ describe('transformBody', () => {
       expect(messages.some((message) => message.includes('audio'))).toBe(true);
     });
 
-    it('does not call logger.warn when no logger is injected (matches subprocess.ts pattern)', () => {
+    it('does not throw when transformBody is called without a logger (matches subprocess.ts pattern)', () => {
       const bodyHtml = noteHtml('<h1>No Logger<br>\n</h1>\n<br><video src="clip.mov">clip</video>');
       expect(() => transformBody({ bodyHtml })).not.toThrow();
+    });
+
+    it('removes <script>/<style> content entirely (does not textualize it) but still warns once each', () => {
+      const warn = vi.fn();
+      const bodyHtml = noteHtml(
+        '<h1>Script And Style<br>\n</h1>\n<br>Before <script>alert("x")</script><style>.a{color:red}</style> after.',
+      );
+
+      const { markdown } = transformBody({ bodyHtml, logger: { warn } });
+
+      expect(markdown).toBe('Before after.\n');
+      expect(markdown).not.toContain('alert');
+      expect(markdown).not.toContain('color:red');
+      expect(warn).toHaveBeenCalledTimes(2);
+      const messages = warn.mock.calls.map((call) => (call[0] as { message: string }).message);
+      expect(messages.some((message) => message.includes('script'))).toBe(true);
+      expect(messages.some((message) => message.includes('style'))).toBe(true);
+    });
+
+    it('wraps unsupported block-level elements (e.g. <section>) in separate paragraphs instead of merging their text', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Sections<br>\n</h1>\n<br><section>A</section><section>B</section>',
+      );
+
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('A\n\nB\n');
     });
   });
 
