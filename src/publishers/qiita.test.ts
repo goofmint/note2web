@@ -144,6 +144,34 @@ describe('renderQiitaArticle tags', () => {
     expect(article.artifact).toContain('tags: ["typescript","qiita"]');
   });
 
+  it('drops tags that become empty after stripping the leading "#" and logs a warning', () => {
+    const note = buildNote({
+      uuid: 'note-under-test',
+      title: 'Empty Tag Test',
+      tags: ['#', '#typescript'],
+    });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderQiitaArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('tags: ["typescript"]');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain('empty');
+  });
+
+  it('throws QiitaNoTagsRemainingError when all tags become empty after stripping "#"', () => {
+    const note = buildNote({ tags: ['#'] });
+    const { logger } = createFakeLogger();
+    expect(() =>
+      renderQiitaArticle({ note, markdown: 'body', config: CONFIG, prev: null, logger }),
+    ).toThrow(QiitaNoTagsRemainingError);
+  });
+
   it('drops tags containing a half-width space and logs a warning with service/noteUuid/title', () => {
     const note = buildNote({
       uuid: 'note-under-test',

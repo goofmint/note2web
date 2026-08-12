@@ -123,7 +123,8 @@ interface ResolveQiitaTagsParams {
 
 /**
  * design.md §5.7 のタグ制約を順に適用する:
- * (1) 先頭の `#` を除去 → (2) 半角スペースを含むタグを除外して警告
+ * (1) 先頭の `#` を除去(除去後に空になったタグは除外して警告)
+ * → (2) 半角スペースを含むタグを除外して警告
  * → (3) 除外後6個以上なら先頭5個に切り詰めて警告 → (4) 除外後0個なら
  * `QiitaNoTagsRemainingError`。警告は `service`/`noteUuid`/`title` を伴う `logger.warn`
  * イベントとして発行する(`src/logger.ts` `WarnPayload`)。
@@ -132,8 +133,23 @@ function resolveQiitaTags(params: ResolveQiitaTagsParams): string[] {
   const { noteUuid, title, tags, logger } = params;
   const stripped = tags.map(stripLeadingHash);
 
-  const spaced = stripped.filter((tag) => tag.includes(' '));
-  let remaining = stripped.filter((tag) => !tag.includes(' '));
+  // `#` 除去後に空文字列となるタグ(元が `#` のみ等)は Qiita のタグとして成立しないため、
+  // スペース含みタグと同様に除外して警告する。
+  const empty = stripped.filter((tag) => tag.length === 0);
+  if (empty.length > 0) {
+    logger?.warn({
+      service: 'qiita',
+      noteUuid,
+      title,
+      message:
+        `dropped ${String(empty.length)} tag(s) that became empty after stripping the ` +
+        'leading "#" (design.md §5.7)',
+    });
+  }
+  const nonEmpty = stripped.filter((tag) => tag.length > 0);
+
+  const spaced = nonEmpty.filter((tag) => tag.includes(' '));
+  let remaining = nonEmpty.filter((tag) => !tag.includes(' '));
   if (spaced.length > 0) {
     logger?.warn({
       service: 'qiita',
