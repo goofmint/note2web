@@ -58,7 +58,7 @@
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../src/config.js';
@@ -634,8 +634,12 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       for (const uuid of ALL_UUIDS) {
         expect(events2).toContain(`note_skipped:${uuid}`);
       }
-      // 変更ノート無し → finalize() は差分ゼロでブランチを破棄するだけ。
-      expect(git2.calls.some((c) => c.command === 'git' && c.args[0] === 'add')).toBe(false);
+      // 変更ノート無し → finalize() は差分ゼロでブランチを破棄するだけ。公開に関わる
+      // git 書き込み(add/commit/push)と gh は一切呼ばれない(checkout / branch -D は
+      // 後始末として許容)。
+      for (const writeOp of ['add', 'commit', 'push']) {
+        expect(git2.calls.some((c) => c.command === 'git' && c.args[0] === writeOp)).toBe(false);
+      }
       expect(git2.calls.some((c) => c.command === 'gh')).toBe(false);
       expect(uploader2.putObjectCalls).toHaveLength(0);
       expect(readFileSync(statePath, 'utf8')).toBe(stateBytesAfterRun1);
@@ -752,6 +756,10 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       expect(result2).toMatchObject({ exitCode: SUCCESS, published: 0, skipped: 5, failed: 0 });
       for (const uuid of ALL_UUIDS) {
         expect(events2).toContain(`note_skipped:${uuid}`);
+      }
+      // 公開に関わる git 書き込み(add/commit/push)は再実行では発生しない。
+      for (const writeOp of ['add', 'commit', 'push']) {
+        expect(git2.calls.some((c) => c.command === 'git' && c.args[0] === writeOp)).toBe(false);
       }
       expect(git2.calls.some((c) => c.command === 'gh')).toBe(false);
       expect(uploader2.putObjectCalls).toHaveLength(0);
@@ -1285,7 +1293,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
         }
         if (options.args[0] === 'create') {
           const filePath = options.args[1] ?? '';
-          const key = filePath.split('/').pop()?.replace(/\.md$/, '');
+          const key = basename(filePath, '.md');
           return {
             status: 'success',
             exitCode: 0,
