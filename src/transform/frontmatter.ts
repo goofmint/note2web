@@ -237,5 +237,11 @@ export const HUGO_FRONTMATTER_KEY_ORDER = [
 /** Jekyll の frontmatter キー順(design.md §5.7)。`date` は作成日。 */
 export const JEKYLL_FRONTMATTER_KEY_ORDER = ['title', 'date', 'categories', 'tags'] as const;
 
-/** Qiita の frontmatter キー順(design.md §5.7)。`id` は初回 `null`、以後 qiita-cli が書き戻す値。 */
-export const QIITA_FRONTMATTER_KEY_ORDER = ['title', 'tags', 'private', 'id'] as const;
+/**
+ * Qiita の frontmatter キー順(design.md §5.7)。`id` は初回 `null`、以後 qiita-cli が書き戻す値。
+ * `slide` は当初の想定(`title`/`tags`/`private`/`id` の4項目)には無かったが、T-21(§13-3)の
+ * 調査で qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js`
+ * `checkSlide`)が `slide` を真偽値として必須にしていると判明したため追加した
+ * (`src/publishers/qiita.ts` 冒頭 JSDoc 参照)。
+ */
+export const QIITA_FRONTMATTER_KEY_ORDER = ['title', 'tags', 'private', 'slide', 'id'] as const;
