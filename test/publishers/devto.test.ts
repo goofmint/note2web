@@ -272,7 +272,8 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
   it('adopts the id from exactly 1 title match and PUTs it (no POST)', async () => {
     const { client, calls } = makeMockHttpClient((call) => {
       if (call.method === 'GET') {
-        return jsonResponse(200, [{ id: 7, title: 'Hello World' }]);
+        const page = new URL(call.url).searchParams.get('page');
+        return jsonResponse(200, page === '1' ? [{ id: 7, title: 'Hello World' }] : []);
       }
       return jsonResponse(200, { id: 7, url: 'https://dev.to/me/hello-world' });
     });
@@ -314,10 +315,16 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
   it('throws DevtoAmbiguousTitleMatchError on 2+ title matches, warns, and sends no write request', async () => {
     const { client, calls } = makeMockHttpClient((call) => {
       if (call.method === 'GET') {
-        return jsonResponse(200, [
-          { id: 1, title: 'Dup' },
-          { id: 2, title: 'Dup' },
-        ]);
+        const page = new URL(call.url).searchParams.get('page');
+        return jsonResponse(
+          200,
+          page === '1'
+            ? [
+                { id: 1, title: 'Dup' },
+                { id: 2, title: 'Dup' },
+              ]
+            : [],
+        );
       }
       throw new Error('test setup: no write request should have been sent');
     });
@@ -341,7 +348,8 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
   it('ignores titles that only partially match (exact match required)', async () => {
     const { client, calls } = makeMockHttpClient((call) => {
       if (call.method === 'GET') {
-        return jsonResponse(200, [{ id: 1, title: 'Hello World Extended' }]);
+        const page = new URL(call.url).searchParams.get('page');
+        return jsonResponse(200, page === '1' ? [{ id: 1, title: 'Hello World Extended' }] : []);
       }
       return jsonResponse(201, { id: 2, url: 'https://dev.to/me/x' });
     });
@@ -370,6 +378,7 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
         const page = url.searchParams.get('page');
         if (page === '1') return jsonResponse(200, page1Items);
         if (page === '2') return jsonResponse(200, page2Items);
+        if (page === '3') return jsonResponse(200, []);
         throw new Error(`test setup: unexpected page "${String(page)}"`);
       }
       return jsonResponse(200, { id: 9999, url: 'https://dev.to/me/target-title' });
@@ -383,8 +392,63 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
     const result = await publisher.publish(buildArticle({ title: 'Target Title' }), null);
 
     const getCalls = calls.filter((call) => call.method === 'GET');
-    expect(getCalls).toHaveLength(2);
+    // 空ページ(3ページ目)を確認して初めて打ち切るため、GET は3回になる。
+    expect(getCalls).toHaveLength(3);
     expect(result).toMatchObject({ result: 'updated', remoteId: '9999' });
+  });
+
+  it('keeps paginating when the server clamps per_page (first page smaller than requested)', async () => {
+    // サーバが per_page をクランプし、1ページ目が DEVTO_LIST_PAGE_SIZE 未満でも
+    // 「空ページが返るまで」走査を続け、2ページ目の一致を見つけられること。
+    const { client, calls } = makeMockHttpClient((call) => {
+      if (call.method === 'GET') {
+        const page = new URL(call.url).searchParams.get('page');
+        if (page === '1') return jsonResponse(200, [{ id: 1, title: 'Other Article' }]);
+        if (page === '2') return jsonResponse(200, [{ id: 42, title: 'Target Title' }]);
+        return jsonResponse(200, []);
+      }
+      return jsonResponse(200, { id: 42, url: 'https://dev.to/me/target-title' });
+    });
+    const publisher = createDevtoPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { DEVTO_API_KEY: 'token' },
+    });
+
+    const result = await publisher.publish(buildArticle({ title: 'Target Title' }), null);
+
+    expect(calls.filter((call) => call.method === 'GET').length).toBeGreaterThanOrEqual(3);
+    expect(result).toMatchObject({ result: 'updated', remoteId: '42' });
+  });
+
+  it('fetches the article list only once per run and reuses the cache for later notes', async () => {
+    // 同一実行内(同一 Publisher インスタンス)では記事一覧の取得は1回だけで、
+    // POST 成功後はキャッシュ追記により後続ノートの照合が「1件一致 → PUT」になる。
+    const { client, calls } = makeMockHttpClient((call) => {
+      if (call.method === 'GET') return jsonResponse(200, []);
+      if (call.method === 'POST') return jsonResponse(201, { id: 100, url: 'https://dev.to/me/a' });
+      return jsonResponse(200, { id: 100, url: 'https://dev.to/me/a' });
+    });
+    const publisher = createDevtoPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { DEVTO_API_KEY: 'token' },
+    });
+
+    const first = await publisher.publish(
+      buildArticle({ noteUuid: 'u1', title: 'Same Title' }),
+      null,
+    );
+    const second = await publisher.publish(
+      buildArticle({ noteUuid: 'u2', title: 'Same Title' }),
+      null,
+    );
+
+    expect(calls.filter((call) => call.method === 'GET')).toHaveLength(1);
+    expect(first.result).toBe('created');
+    // 1件目の作成がキャッシュへ反映され、同名の2件目は重複 POST ではなく更新になる。
+    expect(second).toMatchObject({ result: 'updated', remoteId: '100' });
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
   });
 });
 

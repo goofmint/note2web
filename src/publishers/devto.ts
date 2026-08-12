@@ -177,6 +177,21 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
+ * errno 系エラーのうち、接続レイヤの一時的失敗としてリトライしてよいコードの許可リスト。
+ * `code` プロパティを持つだけの例外(アプリケーション例外や `SyntaxError` 等)を誤って
+ * リトライ対象にしないため、既知の接続系コードに限定する。
+ */
+const RETRYABLE_ERRNO_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+]);
+
+/**
  * 接続系エラー(タイムアウト・DNS 失敗・接続拒否等)かどうかを判定する。HTTP ステータスに
  * よる失敗はここに含めない(`assertOk` が別途、リトライしないエラーとして投げる)。
  * モジュール冒頭 JSDoc「接続系エラーの判定」参照。
@@ -188,7 +203,9 @@ function isRetryableConnectionError(error: unknown): boolean {
   if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
     return true;
   }
-  return isErrnoException(error);
+  return (
+    isErrnoException(error) && error.code !== undefined && RETRYABLE_ERRNO_CODES.has(error.code)
+  );
 }
 
 /** エラーからログ/例外メッセージ用の文字列を取り出す(`src/sync.ts` の `errorMessage` と同じ形)。 */
@@ -484,33 +501,30 @@ function finalizeWriteResult(
 export const DEVTO_LIST_PAGE_SIZE = 1000;
 
 /**
- * `GET /api/articles/me` を `page`/`per_page` でページングし尽くし、タイトルが完全一致する
- * 記事をすべて集める(design.md §5.7「自分の記事一覧 API からタイトル一致で検索」)。
- * 返ってきた件数が `DEVTO_LIST_PAGE_SIZE` 未満になった時点を最終ページとみなす。
+ * `GET /api/articles/me` を `page`/`per_page` でページングし尽くし、自分の記事一覧を全件
+ * 取得する(design.md §5.7「自分の記事一覧 API からタイトル一致で検索」の下ごしらえ)。
+ * 終了条件は「空ページが返った時点」とする。「件数が `per_page` 未満になったら最終ページ」
+ * という判定は、サーバが `per_page` をクランプして要求より少ない件数を返す場合に
+ * 途中で打ち切ってしまう(→ 照合漏れから重複 POST につながる)ため使わない。
  */
-async function findArticlesByTitle(
+async function fetchAllArticles(
   httpClient: DevtoHttpClient,
   headers: Record<string, string>,
-  title: string,
 ): Promise<DevtoListedArticle[]> {
-  const matches: DevtoListedArticle[] = [];
+  const items: DevtoListedArticle[] = [];
   let page = 1;
   for (;;) {
     const url = `${DEVTO_API_BASE_URL}/api/articles/me?page=${String(page)}&per_page=${String(DEVTO_LIST_PAGE_SIZE)}`;
     const response = await httpClient({ method: 'GET', url, headers });
     assertOk(response, 'GET /api/articles/me (title-match recovery)');
     const pageItems = parseArticleListResponse(response.body);
-    for (const item of pageItems) {
-      if (item.title === title) {
-        matches.push(item);
-      }
-    }
-    if (pageItems.length < DEVTO_LIST_PAGE_SIZE) {
+    if (pageItems.length === 0) {
       break;
     }
+    items.push(...pageItems);
     page += 1;
   }
-  return matches;
+  return items;
 }
 
 /**
@@ -549,6 +563,11 @@ export class DevtoAmbiguousTitleMatchError extends Error {
 export function createDevtoPublisher(options: CreateDevtoPublisherOptions): Publisher {
   const { config, httpClient = defaultDevtoHttpClient, logger, env = process.env } = options;
   const devtoConfig = requireDevtoConfig(config);
+
+  // 同一実行内での記事一覧のキャッシュ。remoteId 欠落ノートが N 件ある実行(初回同期等)で
+  // ノートごとに全ページを取得し直すのを避け、リクエスト数を「全ページ1回分」に抑える。
+  // 新規作成(POST)成功時はキャッシュへ追記し、同一実行内の後続ノートとの照合にも使う。
+  let articleListCache: DevtoListedArticle[] | null = null;
 
   async function publish(article: RenderedArticle, prev: NoteState | null): Promise<PublishResult> {
     const apiKey = env[devtoConfig.api_key_env];
@@ -605,7 +624,10 @@ export function createDevtoPublisher(options: CreateDevtoPublisherOptions): Publ
 
     // design.md §5.7「ちょうど1件一致した場合のみその ID を remoteId に採用し、更新として
     // 配信する。0件なら記事は未作成と判断して新規作成する。複数一致の場合は…failed」。
-    const matches = await findArticlesByTitle(httpClient, headers, article.title);
+    if (articleListCache === null) {
+      articleListCache = await fetchAllArticles(httpClient, headers);
+    }
+    const matches = articleListCache.filter((item) => item.title === article.title);
 
     if (matches.length === 1) {
       const match = matches[0];
@@ -648,7 +670,18 @@ export function createDevtoPublisher(options: CreateDevtoPublisherOptions): Publ
       noteUuid: article.noteUuid,
       retryOnConnectionError: false,
     });
-    return finalizeWriteResult(response, 'created', article.noteUuid, 'POST /api/articles');
+    const created = finalizeWriteResult(
+      response,
+      'created',
+      article.noteUuid,
+      'POST /api/articles',
+    );
+    // 作成成功をキャッシュに反映し、同一実行内の後続ノートの照合で「既に作成済み」と
+    // 判定できるようにする(重複作成防止)。
+    if (created.remoteId !== undefined && created.remoteId !== null) {
+      articleListCache.push({ id: created.remoteId, title: article.title });
+    }
+    return created;
   }
 
   return { publish };
