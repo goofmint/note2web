@@ -27,19 +27,19 @@ const VALID_CONFIG_PATH = fileURLToPath(new URL('./fixtures/configs/zenn.yaml', 
 const VALID_CONFIG_ENV_VARS = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
 
 /**
- * T-21(issue #26)時点でも Publisher 未実装のサービス(devto。`src/publishers/factory.ts`
+ * T-22(issue #27)時点でも Publisher 未実装のサービス(note.com。`src/publishers/factory.ts`
  * 参照)向けの schema 検証済み fixture。「Publisher 未登録」を決定的に検証するテスト
  * (`createPublisher` が `runSync` より前に呼ばれ、host 環境の ruby/gh 有無に左右されない)は
  * これを使う——zenn は T-16 で `GitRepoPublisher` が、qiita は T-21 で `createQiitaPublisher`
- * が配線されたため、もはやこのエラーにはならない(T-16・T-21 対応で変更)。
+ * が、devto は T-22 で `createDevtoPublisher` が配線されたため、もはやこのエラーには
+ * ならない(T-16・T-21・T-22 対応で変更。devto.yaml → note.yaml への切り替えは T-22)。
  */
 const UNIMPLEMENTED_SERVICE_CONFIG_PATH = fileURLToPath(
-  new URL('./fixtures/configs/devto.yaml', import.meta.url),
+  new URL('./fixtures/configs/note.yaml', import.meta.url),
 );
 const UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS = [
-  'DEVTO_S3_ACCESS_KEY_ID',
-  'DEVTO_S3_SECRET_ACCESS_KEY',
-  'DEVTO_API_KEY',
+  'NOTE_S3_ACCESS_KEY_ID',
+  'NOTE_S3_SECRET_ACCESS_KEY',
 ];
 
 describe('exit codes', () => {
@@ -110,11 +110,12 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toContain(missingPath);
   });
 
-  it('exits 2 for sync when --config points to a schema-valid file for a still-unimplemented service (devto, T-22+)', async () => {
+  it('exits 2 for sync when --config points to a schema-valid file for a still-unimplemented service (note.com, T-23+)', async () => {
     // T-16 で zenn/hugo/jekyll(Git モード)の Publisher(GitRepoPublisher)が、T-21 で
-    // qiita の Publisher(`createQiitaPublisher`)が実装された(`src/publishers/factory.ts`)。
-    // devto/note/hatena は T-22 以降まで存在しないため、設定検証を通過した有効な設定であっても、
-    // ロック取得・エクスポート等を試みる前に exit 2 で打ち切られる。
+    // qiita の Publisher(`createQiitaPublisher`)が、T-22 で devto の Publisher
+    // (`createDevtoPublisher`)が実装された(`src/publishers/factory.ts`)。note/hatena は
+    // T-23 以降まで存在しないため、設定検証を通過した有効な設定であっても、ロック取得・
+    // エクスポート等を試みる前に exit 2 で打ち切られる。
     for (const name of UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS) {
       process.env[name] = 'dummy-value';
     }
