@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -199,6 +199,36 @@ describe('isMainEntry', () => {
 
   it('returns false for a different module path', () => {
     expect(isMainEntry(pathToFileURL('/opt/app/dist/cli.js').href, '/opt/app/dist/other.js')).toBe(
+      false,
+    );
+  });
+
+  it('matches when argv[1] is a symlink to the real module path (npm/npx bin resolution)', () => {
+    // npm/npx invoke the CLI via a `node_modules/.bin/<name>` symlink. Node's ESM loader
+    // resolves `import.meta.url` to the symlink's realpath, but `process.argv[1]` keeps the
+    // symlink path as given — a naive comparison never matches, so `main()` silently never
+    // runs (discovered via `npm pack` -> `npm install <tarball>` -> running the installed
+    // bin symlink, which exited 0 with no output). Reproduce that shape here.
+    const dir = mkdtempSync(join(tmpdir(), 'note2web-cli-symlink-'));
+    try {
+      const realFile = join(dir, 'cli.js');
+      writeFileSync(realFile, '// stub\n');
+      const binDir = join(dir, 'bin');
+      mkdirSync(binDir);
+      const symlinkPath = join(binDir, 'note2web');
+      symlinkSync(realFile, symlinkPath);
+
+      // import.meta.url, as Node's loader would compute it: the symlink's realpath.
+      const importMetaUrl = pathToFileURL(realFile).href;
+      // process.argv[1], as npm/npx would set it: the symlink path, unresolved.
+      expect(isMainEntry(importMetaUrl, symlinkPath)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns false when argv[1] does not exist and does not match directly', () => {
+    expect(isMainEntry(pathToFileURL('/opt/app/dist/cli.js').href, '/opt/does/not/exist.js')).toBe(
       false,
     );
   });
