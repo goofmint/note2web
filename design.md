@@ -187,7 +187,8 @@ interface Publisher {
 
 #### QiitaPublisher
 
-- 設定で指定した qiita-cli ワークスペース(`itemsRootDir`。qiita-cli 実行時に `--root <workspace>` で指定するか、`QIITA_CLI_ITEMS_ROOT` 環境変数で指定。§13-3)の `public/<uuid>.md`(`<itemsRootDir>/public/<basename>.md`。`dist/lib/file-system-repo.js` `getRootPath` / `getFilePath`)に書き、`npx qiita publish <uuid> --root <workspace>` を実行(FR-25)
+- 設定で指定した qiita-cli ワークスペース(`itemsRootDir`。qiita-cli 実行時に `--root <workspace>` で指定するか、`QIITA_CLI_ITEMS_ROOT` 環境変数で指定。§13-3)の `public/<uuid>.md`(`<itemsRootDir>/public/<basename>.md`。`dist/lib/file-system-repo.js` `getRootPath` / `getFilePath`)に書き、`npx --no-install qiita publish <uuid> --root <workspace>` を実行(FR-25)
+- **CLI のパッケージ解決(セキュリティ制約)**: `@qiita/qiita-cli` は T-21 で note2web の `dependencies` に**固定バージョンで追加**し(lockfile にも固定)、実行は **`npx --no-install qiita`**(またはローカルの `node_modules/.bin/qiita`)に限定する。素の `npx qiita` はローカル未導入時に npm レジストリの **`qiita` という別パッケージ**(公式 CLI ではない)を取得しに行き、そのプロセスにトークン入りの環境変数が渡ってしまうため**禁止**。未導入の場合は `checkDependencies`(doctor / sync の前提チェック)で exit 2 とし、あわせて qiita-cli の要求する Node.js engine(>= 20)を満たすことも事前検証する
 - frontmatter: `title` / `tags` / `private: false` / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)/ **`slide: false`**(§13-3 で判明した差分。下記参照)
   - **差分(調査により判明)**: qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js` `checkSlide`)は `slide` が **真偽値であること**を要求しており(`typeof slide === "boolean"`)、フィールド自体が無い(`undefined`)場合は型エラーとして `publish` が失敗する。当初の想定(`title` / `tags` / `private` / `id` の4項目)には無かったフィールドのため、QiitaPublisher が書き出す frontmatter には `slide: false` を必須項目として追加する
 - タグ制約(1〜5個必須、スペース不可)への対処:
@@ -258,7 +259,7 @@ sync:
 |---|---|
 | 共通 | `ruby` + `apple_cloud_notes_parser`、R2 / S3 の認証環境変数 |
 | zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
-| qiita | Node.js、`@qiita/qiita-cli`、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
+| qiita | Node.js(qiita-cli の要求 engine >= 20)、`@qiita/qiita-cli`(note2web の `dependencies` に固定バージョンで追加し、`npx --no-install` で解決。§5.7。**現時点では未導入・依存チェック未実装 = T-21 で実装する契約**)、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
 | devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |
 | note | `noet` と認証設定 |
 | hatena | `HATENA_API_KEY` のみ(API 直接。CLI 不要) |
@@ -435,4 +436,4 @@ note2web/
 6. note.com が本文中の**外部画像 URL(R2 / S3)をどう扱うか**
 7. ~~parser の JSON スキーマの詳細(フォルダ階層・作成日時のフィールド名)~~ → **確認済み**。トップレベルは `{version, file_path, backup_type, html, accounts, cloudkit_participants, folders, notes}`。`folders` は **ルートフォルダのみ**を key(`z_pk` の文字列)に持ち、子フォルダは各フォルダオブジェクトの `child_folders`(同じ形の入れ子オブジェクト)の中に再帰的に格納される(`parent_folder_id` で親を指す。トップレベルの `folders` には子フォルダは並ばない)。`notes` はネストせず、`note_id` をキーにしたフラットな辞書で、各ノートは `folder_key` / `folder`(フォルダの `z_pk` / 名前)で所属フォルダを参照する。ノートのフィールドは `account_key, account, folder_key, folder, note_id, uuid, primary_key, creation_time, modify_time, cloudkit_creator_id, cloudkit_modifier_id, cloudkit_last_modified_device, is_pinned, is_password_protected, title, plaintext, html, note_proto, embedded_objects, hashtags, mentions`。作成日時 / 更新日時のフィールド名は `creation_time` / `modify_time`(`title` や `uuid`のような単純な名前ではない点に注意)で、値は `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列(`Time#to_s` 相当。実行して確認)。ソース: `JSON.md` と `lib/AppleNoteStore.rb#prepare_json`、`lib/AppleNote.rb#prepare_json`、`lib/AppleNotesFolder.rb#prepare_json`、`lib/AppleNotesAccount.rb#prepare_json`。具体例は `test/fixtures/parser-output/json/all_notes_1.json`。→ §5.3 の Note モデルのフィールド対応・§5.2 のパス解決規約はこのスキーマに基づいて記述した(差分は §5.3 内に明記)
 
-いずれも該当 Publisher / Transformer 内部に閉じており、確認結果によってアーキテクチャは変わらない(1・2・3・7 は確認完了。4〜6 は引き続き実装時の確認課題として残る)。
+確認結果によってアーキテクチャは変わらない(1・2・3・7 は確認完了。4〜6 は引き続き実装時の確認課題として残る)。ただし 3(Qiita)は当初想定と異なり Publisher 内部だけには閉じない: `qiita.token_env`(設定)→ 依存チェック(`@qiita/qiita-cli` の固定バージョン解決と Node engine の事前検証)→ 子プロセス環境(`QIITA_TOKEN` 固定名での受け渡し)→ CLI のパッケージ解決(`npx --no-install` 限定)にまたがる契約であり、§5.7 / §9 に明記した(実装は T-21)。
