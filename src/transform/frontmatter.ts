@@ -245,3 +245,11 @@ export const JEKYLL_FRONTMATTER_KEY_ORDER = ['title', 'date', 'categories', 'tag
  * (`src/publishers/qiita.ts` 冒頭 JSDoc 参照)。
  */
 export const QIITA_FRONTMATTER_KEY_ORDER = ['title', 'tags', 'private', 'slide', 'id'] as const;
+
+/**
+ * note.com(`noet`)の frontmatter キー順(design.md §5.7 NotePublisher 節、§13-4、T-25)。
+ * `noet` の `parse_markdown_file` が実際に読むキーは `title`/`tags`/`header_image` の3つ
+ * のみ(§13-4)で、本タスク(T-25)の範囲では見出し画像(`header_image`)を扱わないため
+ * `title`/`tags` の2キーのみとする(`src/publishers/note.ts` 冒頭 JSDoc「frontmatter」参照)。
+ */
+export const NOTE_FRONTMATTER_KEY_ORDER = ['title', 'tags'] as const;
