@@ -9,12 +9,17 @@
  * `createQiitaPublisher`/`renderQiitaArticle`、dev.to は T-22(issue #27)で
  * `src/publishers/devto.ts` の `createDevtoPublisher`/`renderDevtoArticle`、はてなは
  * T-23(issue #28)で `src/publishers/hatena.ts` の `createHatenaPublisher`/
- * `renderHatenaArticle` が揃ったため、それぞれここで配線する(`resolveRenderer` で
- * service 別に選択、下記)。note.com(T-24〜T-25)はまだ存在しないため、引き続き
- * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
- * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
- * 駆動する E2E テストは `test/sync.test.ts`)、実サービスへの接続だけが後続タスク待ちで
- * あることが分かるようにするための境界。
+ * `renderHatenaArticle`、note.com は T-25(issue #30)で `src/publishers/note.ts` の
+ * `createNotePublisher`/`renderNoteArticle` が揃ったため、それぞれここで配線する
+ * (`resolveRenderer` で service 別に選択、下記)。これで design.md §7 `SERVICES` の
+ * 7サービス全てに実装が揃った。`PublisherNotImplementedError` に到達するのは、
+ * (a) zod 検証を経ない `Config` で `config.service` に未知の値が入った場合、または
+ * (b) 実装は存在するがサービス固有の設定ブロック(`config.note` 等)が欠けている場合
+ * (通常は zod の service 別必須ブロック検証が弾くため、検証を迂回した場合のみ)——
+ * クラス自体は `createPublisher` の網羅性チェック(default 分岐)用の防御として残す
+ * (`src/dependencies.ts` `checkDependencies` の `exhaustiveCheck: never` と同じ役割。
+ * `config.service` に将来サービスが追加されコンパイルが壊れる前に、実行時にも
+ * 意味のあるエラーで検出できるようにする)。
  */
 
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
@@ -26,13 +31,14 @@ import { createHatenaPublisher, renderHatenaArticle } from './hatena.js';
 import { renderHugoArticle } from './hugo.js';
 import { renderJekyllArticle } from './jekyll.js';
 import { isGitModeService } from './mode.js';
+import { createNotePublisher, renderNoteArticle } from './note.js';
 import { createQiitaPublisher, renderQiitaArticle } from './qiita.js';
 import { renderGenericArticle, type NoteRenderer } from './render.js';
 import type { Publisher } from './types.js';
 import { renderZennArticle } from './zenn.js';
 
 /**
- * `createPublisher` がまだ実装の無いサービスを要求されたことを表す。
+ * `createPublisher` が(型上到達不能なはずの)未知のサービスを要求されたことを表す。
  * `src/lock.ts` の `LockError` 等と同じ `exitCode` プロパティ規約に従い、
  * `cli.ts` が「何も配信せず exit 2」として扱えるようにする。
  */
@@ -42,11 +48,11 @@ export class PublisherNotImplementedError extends Error {
 
   constructor(service: string) {
     super(
-      `no Publisher implementation is registered yet for service "${service}"; ` +
-        'real Publisher implementations land in T-16 (git repo modes: zenn/hugo/jekyll), ' +
-        'T-21 (qiita), T-22 (devto), T-23 (hatena), and T-24〜T-25 (note) per tasks.md. T-14 ' +
-        'wires the sync flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
-        'test/sync.test.ts, per design.md §5.7.',
+      `internal error: no Publisher was selected for service "${service}"; ` +
+        'design.md §7 SERVICES lists 7 services and src/publishers/factory.ts wires all of them ' +
+        '(T-16/T-21/T-22/T-23/T-25) — this indicates the service-specific config block ' +
+        '(e.g. config.note) is missing, config.service bypassed the zod schema ' +
+        '(src/config.ts), or a new service was added without updating createPublisher.',
     );
     this.name = 'PublisherNotImplementedError';
     this.service = service;
@@ -66,9 +72,12 @@ export interface CreatePublisherOptions {
 /**
  * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
  * `createGitRepoPublisher`(T-16)を、qiita は `createQiitaPublisher`(T-21)を、devto は
- * `createDevtoPublisher`(T-22)を、hatena は `createHatenaPublisher`(T-23)を返す
- * (いずれも `options.logger` を渡す)。それ以外のサービス(note)は後続タスク
- * (T-24〜T-25)待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
+ * `createDevtoPublisher`(T-22)を、hatena は `createHatenaPublisher`(T-23)を、note は
+ * `createNotePublisher`(T-25)を返す(いずれも `options.logger` を渡す)。
+ * `config.service` は `ServiceName`(design.md §7 SERVICES の7値)の型で保証されており、
+ * 上記のいずれにも一致しない実行時の値は起こり得ないはずだが、`config.<service>` ブロック
+ * (`config.qiita`/`config.devto`/…)が `superRefine` の検証をすり抜けて `undefined` のまま
+ * 渡された場合の防御として `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
  */
 export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
   if (isGitModeService(config.service) && config.git !== undefined) {
@@ -82,6 +91,9 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
   }
   if (config.service === 'hatena' && config.hatena !== undefined) {
     return createHatenaPublisher({ config, logger: options.logger });
+  }
+  if (config.service === 'note' && config.note !== undefined) {
+    return createNotePublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
 }
@@ -115,8 +127,12 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  *   frontmatter ファイルは書かないが、`artifact` に AtomPub `<entry>` XML そのものを
  *   持たせ、それを冪等判定のハッシュにも POST/PUT のリクエストボディにもそのまま使う
  *   (design.md §5.7 HatenaPublisher 行)。
- * - それ以外(note): 後続タスク(T-24〜T-25)でサービス別 Renderer が揃うまでの暫定として
- *   `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す——`runSync` 自身の
+ * - `note`: `renderNoteArticle`(`src/publishers/note.ts`、T-25)——`noet` が実際に読む
+ *   `title`/`tags` の2キーのみの最小限 frontmatter を書き、本文に Markdown 画像参照が
+ *   含まれる場合は `NoteImagesUnsupportedError` を投げる(design.md §5.7 NotePublisher 行、
+ *   §13-6 の画像非対応方針)。
+ * - それ以外: 型上到達不能(`ServiceName` は上記7値で尽きる)。`renderGenericArticle`
+ *   (`src/publishers/render.ts`、T-14)を防御的なフォールバックとして返す——`runSync` 自身の
  *   既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と渡さない場合
  *   (test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
  */
@@ -138,6 +154,9 @@ export function resolveRenderer(service: ServiceName): NoteRenderer {
   }
   if (service === 'hatena') {
     return renderHatenaArticle;
+  }
+  if (service === 'note') {
+    return renderNoteArticle;
   }
   return renderGenericArticle;
 }

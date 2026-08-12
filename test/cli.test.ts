@@ -26,23 +26,6 @@ vi.mock('../src/doctor.js', async (importOriginal) => {
 const VALID_CONFIG_PATH = fileURLToPath(new URL('./fixtures/configs/zenn.yaml', import.meta.url));
 const VALID_CONFIG_ENV_VARS = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
 
-/**
- * T-23(issue #28)時点でも Publisher 未実装のサービス(note.com。`src/publishers/factory.ts`
- * 参照)向けの schema 検証済み fixture。「Publisher 未登録」を決定的に検証するテスト
- * (`createPublisher` が `runSync` より前に呼ばれ、host 環境の ruby/gh 有無に左右されない)は
- * これを使う——zenn は T-16 で `GitRepoPublisher` が、qiita は T-21 で `createQiitaPublisher`
- * が、devto は T-22 で `createDevtoPublisher` が、hatena は T-23 で `createHatenaPublisher`
- * が配線されたため、もはやこのエラーにはならない(T-16・T-21・T-22・T-23 対応で変更。
- * devto.yaml → note.yaml への切り替えは T-22)。
- */
-const UNIMPLEMENTED_SERVICE_CONFIG_PATH = fileURLToPath(
-  new URL('./fixtures/configs/note.yaml', import.meta.url),
-);
-const UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS = [
-  'NOTE_S3_ACCESS_KEY_ID',
-  'NOTE_S3_SECRET_ACCESS_KEY',
-];
-
 describe('exit codes', () => {
   it('keeps the documented numeric contract (design.md §5.1)', () => {
     expect(SUCCESS).toBe(0);
@@ -63,14 +46,14 @@ describe('runCli', () => {
     configPath = join(dir, 'config.yaml');
     writeFileSync(configPath, 'placeholder: true\n');
 
-    for (const name of [...VALID_CONFIG_ENV_VARS, ...UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS]) {
+    for (const name of VALID_CONFIG_ENV_VARS) {
       originalEnv[name] = process.env[name];
     }
   });
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
-    for (const name of [...VALID_CONFIG_ENV_VARS, ...UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS]) {
+    for (const name of VALID_CONFIG_ENV_VARS) {
       if (originalEnv[name] === undefined) {
         delete process.env[name];
       } else {
@@ -109,24 +92,6 @@ describe('runCli', () => {
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
     expect(result.stderr.join('\n')).toContain(missingPath);
-  });
-
-  it('exits 2 for sync when --config points to a schema-valid file for a still-unimplemented service (note.com, T-24+)', async () => {
-    // T-16 で zenn/hugo/jekyll(Git モード)の Publisher(GitRepoPublisher)が、T-21 で
-    // qiita の Publisher(`createQiitaPublisher`)が、T-22 で devto の Publisher
-    // (`createDevtoPublisher`)が、T-23 で hatena の Publisher(`createHatenaPublisher`)が
-    // 実装された(`src/publishers/factory.ts`)。note.com は T-24 以降まで存在しないため、
-    // 設定検証を通過した有効な設定であっても、ロック取得・エクスポート等を試みる前に
-    // exit 2 で打ち切られる。
-    for (const name of UNIMPLEMENTED_SERVICE_CONFIG_ENV_VARS) {
-      process.env[name] = 'dummy-value';
-    }
-
-    const result = await runCli(['sync', '--config', UNIMPLEMENTED_SERVICE_CONFIG_PATH]);
-
-    expect(result.exitCode).toBe(PRECONDITION_FAILURE);
-    expect(result.stdout).toHaveLength(0);
-    expect(result.stderr.join('\n')).toMatch(/no Publisher implementation is registered yet/);
   });
 
   it('exits 0 with the success summary when runDoctorChecks resolves (T-15)', async () => {
