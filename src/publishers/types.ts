@@ -110,6 +110,26 @@ export interface RenderedArticle {
   contentHash: string;
   /** Git モードでの配信先ファイルパス(design.md §8 `NoteState.artifactPath` と同じ)。 */
   artifactPath?: string;
+  /**
+   * frontmatter を含まない、変換済み Markdown 本文そのもの(T-22 / issue #27 拡張)。
+   * **API モードのサービス(dev.to 等)専用**——Publisher が API リクエストボディの
+   * `body_markdown` 相当のフィールドへ直接渡すために使う。`artifact` は frontmatter +
+   * 本文を連結した「ファイルに書き出す形」(design.md §5.6)であり、frontmatter という
+   * 概念を持たない API 呼び出しにはそのままでは使えないため、本文だけを別途保持する。
+   * Git モードの Renderer(Zenn/Hugo/Jekyll)・Qiita は設定しない(`undefined` のまま)
+   * ——`artifact`(ファイルへ書き込む内容)がそのまま使えるため不要。
+   */
+  bodyMarkdown?: string;
+  /**
+   * サービス側 API へ送るタグの未加工リスト(`Note#tags` をそのまま。T-22 / issue #27 拡張)。
+   * **API モードのサービス(dev.to 等)専用**。個数上限(dev.to は最大4個)への切り詰めや
+   * カンマ区切り文字列への変換は、ここではなく `Publisher.publish()` 側(配信時点)の責務
+   * とする——複数サービスが同じ `RenderedArticle` の形を再利用する将来を見据え、
+   * サービス固有の切り詰め規約を Renderer に埋め込まない(`src/publishers/devto.ts` 冒頭
+   * JSDoc 参照)。Git モードの Renderer・Qiita は設定しない——frontmatter の `topics`/
+   * `tags` キーへ Renderer 自身が直接書き込むため、この専用フィールドは使わない。
+   */
+  tags?: string[];
 }
 
 /** `Publisher.publish` の戻り値(design.md §5.7)。 */

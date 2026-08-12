@@ -6,9 +6,10 @@
  * `renderZennArticle`、Hugo は T-18(issue #23)で `src/publishers/hugo.ts` の
  * `renderHugoArticle`、Jekyll は T-19(issue #24)で `src/publishers/jekyll.ts` の
  * `renderJekyllArticle`、Qiita は T-21(issue #26)で `src/publishers/qiita.ts` の
- * `createQiitaPublisher`/`renderQiitaArticle` が揃ったため、それぞれここで配線する
- * (`resolveRenderer` で service 別に選択、下記)。
- * dev.to/note.com/はてな(T-22〜T-25)はまだ存在しないため、引き続き
+ * `createQiitaPublisher`/`renderQiitaArticle`、dev.to は T-22(issue #27)で
+ * `src/publishers/devto.ts` の `createDevtoPublisher`/`renderDevtoArticle` が揃ったため、
+ * それぞれここで配線する(`resolveRenderer` で service 別に選択、下記)。
+ * note.com/はてな(T-23〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
  * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
  * 駆動する E2E テストは `test/sync.test.ts`)、実サービスへの接続だけが後続タスク待ちで
@@ -18,6 +19,7 @@
 import { PRECONDITION_FAILURE } from '../exit-codes.js';
 import type { Config, ServiceName } from '../config.js';
 import type { Logger } from '../logger.js';
+import { createDevtoPublisher, renderDevtoArticle } from './devto.js';
 import { createGitRepoPublisher } from './git-repo.js';
 import { renderHugoArticle } from './hugo.js';
 import { renderJekyllArticle } from './jekyll.js';
@@ -40,8 +42,8 @@ export class PublisherNotImplementedError extends Error {
     super(
       `no Publisher implementation is registered yet for service "${service}"; ` +
         'real Publisher implementations land in T-16 (git repo modes: zenn/hugo/jekyll), ' +
-        'T-21 (qiita), and T-22〜T-25 (devto/note/hatena) per tasks.md. T-14 wires the sync ' +
-        'flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
+        'T-21 (qiita), T-22 (devto), and T-23〜T-25 (note/hatena) per tasks.md. T-14 wires the ' +
+        'sync flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
         'test/sync.test.ts, per design.md §5.7.',
     );
     this.name = 'PublisherNotImplementedError';
@@ -61,9 +63,10 @@ export interface CreatePublisherOptions {
 
 /**
  * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
- * `createGitRepoPublisher`(T-16)を、qiita は `createQiitaPublisher`(T-21)を返す
- * (いずれも `options.logger` を渡す)。それ以外のサービスは後続タスク(T-22〜T-25)待ちのため
- * `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
+ * `createGitRepoPublisher`(T-16)を、qiita は `createQiitaPublisher`(T-21)を、devto は
+ * `createDevtoPublisher`(T-22)を返す(いずれも `options.logger` を渡す)。それ以外の
+ * サービスは後続タスク(T-23〜T-25)待ちのため `PublisherNotImplementedError` を投げる
+ * (上記 JSDoc 参照)。
  */
 export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
   if (isGitModeService(config.service) && config.git !== undefined) {
@@ -71,6 +74,9 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
   }
   if (config.service === 'qiita' && config.qiita !== undefined) {
     return createQiitaPublisher({ config, logger: options.logger });
+  }
+  if (config.service === 'devto' && config.devto !== undefined) {
+    return createDevtoPublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
 }
@@ -96,8 +102,12 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  * - `qiita`: `renderQiitaArticle`(`src/publishers/qiita.ts`、T-21)——`title`/`tags`/
  *   `private`/`slide`/`id` の Qiita 固有規約(design.md §5.7 Qiita 行)とタグ制約
  *   (1〜5個・スペース不可)を扱う。
- * - それ以外(devto/note/hatena): 後続タスク(T-22〜T-25)でサービス別 Renderer が
- *   揃うまでの暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す
+ * - `devto`: `renderDevtoArticle`(`src/publishers/devto.ts`、T-22)——API モードのため
+ *   frontmatter ファイルは書かないが、`title`/`tags` を含めたハッシュで冪等判定を成立させ、
+ *   `bodyMarkdown`/`tags` を `RenderedArticle` の専用フィールドへ渡す(design.md §5.7
+ *   DevtoPublisher 行)。
+ * - それ以外(note/hatena): 後続タスク(T-23〜T-25)でサービス別 Renderer が揃うまでの
+ *   暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す
  *   ——`runSync` 自身の既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と
  *   渡さない場合(test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
  */
@@ -113,6 +123,9 @@ export function resolveRenderer(service: ServiceName): NoteRenderer {
   }
   if (service === 'qiita') {
     return renderQiitaArticle;
+  }
+  if (service === 'devto') {
+    return renderDevtoArticle;
   }
   return renderGenericArticle;
 }
