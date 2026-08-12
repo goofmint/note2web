@@ -228,14 +228,26 @@ hatena:
 mkdir -p ~/Library/Logs/note2web
 ```
 
-秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。また、`npx` のパスは環境により異なる(Homebrew の Node では `/opt/homebrew/bin/npx` 等)ため、ラッパースクリプト内で解決し、`note2web` は**バージョンを固定**して起動します。
+秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。また、`npx` のパスは環境により異なり(Homebrew の Node では `/opt/homebrew/bin/npx`、nvm では `~/.nvm/versions/node/<ver>/bin/npx` 等)、cron / launchd の `PATH` は最小構成のため、ラッパースクリプト内で PATH を補ってから解決します。`note2web` は**バージョンを固定**して起動します。
+
+まず配置先ディレクトリを作成します:
+
+```bash
+mkdir -p ~/.config/note2web ~/bin
+```
+
+次の内容を `~/.config/note2web/env` として保存します:
 
 ```bash
 # ~/.config/note2web/env(chmod 600 で保護)
 GH_TOKEN=xxxx
 R2_ACCESS_KEY_ID=xxxx
 R2_SECRET_ACCESS_KEY=xxxx
+# npx の絶対パスを明示したい場合は指定(未指定なら下記ラッパーが PATH から解決)
+# NOTE2WEB_NPX=/opt/homebrew/bin/npx
 ```
+
+次の内容を `~/bin/note2web-sync.sh` として保存します:
 
 ```bash
 #!/bin/sh
@@ -245,15 +257,25 @@ set -eu
 set -a
 . "$HOME/.config/note2web/env"
 set +a
-NPX="$(command -v npx)"
+# cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+NPX="${NOTE2WEB_NPX:-$(command -v npx || true)}"
+if [ -z "$NPX" ] || [ ! -x "$NPX" ]; then
+  echo "note2web-sync.sh: npx not found (set NOTE2WEB_NPX in ~/.config/note2web/env)" >&2
+  exit 2
+fi
 # バージョンは固定する(例: 0.1.0)。更新時はこの数字を意図的に上げる
 exec "$NPX" --yes note2web@0.1.0 sync --config "$1"
 ```
+
+保存後、権限を絞ります:
 
 ```bash
 chmod 600 ~/.config/note2web/env
 chmod 700 ~/bin/note2web-sync.sh
 ```
+
+登録前に一度、手元のシェルから `~/bin/note2web-sync.sh <config.yaml>` を実行し、cron / launchd と同じ経路で動作することを確認してください。
 
 ### cron の例
 
