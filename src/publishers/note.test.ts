@@ -158,9 +158,15 @@ describe('renderNoteArticle image detection (design.md §13-6, option (b))', () 
     }
   });
 
-  it('does not write an artifact/contentHash when it throws (fails before rendering)', () => {
+  it('throws before rendering, so no RenderedArticle is ever produced for an image note', () => {
     const note = buildNote();
     const markdown = '![img](https://assets.example.com/x.png)\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow();
+    let rendered: unknown;
+    try {
+      rendered = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    } catch {
+      // 例外経路: 成果物は生成されない。
+    }
+    expect(rendered).toBeUndefined();
   });
 });

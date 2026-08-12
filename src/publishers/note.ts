@@ -251,15 +251,17 @@ function firstNonEmptyLine(text: string): string | undefined {
 function assertNoetSuccess(
   result: RunSubprocessResult,
   description: string,
-  noteUuid: string,
+  context: { noteUuid: string } | { operation: string },
 ): void {
   if (result.status === 'success') {
     return;
   }
   const detail =
     firstNonEmptyLine(result.stderr) ?? firstNonEmptyLine(result.stdout) ?? 'unknown error';
+  const subject =
+    'noteUuid' in context ? `for note "${context.noteUuid}"` : `during ${context.operation}`;
   throw new Error(
-    `"noet ${description}" failed for note "${noteUuid}" ` +
+    `"noet ${description}" failed ${subject} ` +
       `(exitCode=${String(result.exitCode)}, signal=${String(result.signal)}): ${detail}`,
   );
 }
@@ -329,7 +331,9 @@ function parseNoteList(stdout: string): { rows: NoteListRow[]; confirmedEmptyAcc
       // 解析不能な行が1つでもあれば全体を信頼しない(モジュール冒頭 JSDoc「3.」参照)。
       return { rows: [], confirmedEmptyAccount: false };
     }
-    rows.push({ title, key, status: status.trim() });
+    // title も trim する: noet list が列を空白で整形して出力する場合に、前後の空白で
+    // タイトル完全一致が外れて既存記事を見落とす(=重複作成につながる)のを防ぐ。
+    rows.push({ title: title.trim(), key, status: status.trim() });
   }
   return { rows, confirmedEmptyAccount: false };
 }
@@ -406,7 +410,9 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
       cwd: workspaceRoot,
       timeoutMs: DEFAULT_TIMEOUTS.default,
     });
-    assertNoetSuccess(result, 'list', '(recovery-path listing, design.md §5.7)');
+    assertNoetSuccess(result, 'list', {
+      operation: 'recovery-path listing (design.md §5.7)',
+    });
     const parsed = parseNoteList(result.stdout);
     listRows = parsed.rows;
     listAbsenceTrusted = parsed.confirmedEmptyAccount;
@@ -447,14 +453,14 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
         cwd: workspaceRoot,
         timeoutMs: DEFAULT_TIMEOUTS.default,
       });
-      assertNoetSuccess(result, `update ${remoteId}`, article.noteUuid);
+      assertNoetSuccess(result, `update ${remoteId}`, { noteUuid: article.noteUuid });
       const extracted = extractNoteUrl(result.stdout);
       return { result: 'updated', remoteId, url: extracted?.url ?? prev.url };
     }
 
     await ensureListFetched();
     const rows = listRows ?? [];
-    const matches = rows.filter((row) => row.title === article.title);
+    const matches = rows.filter((row) => row.title === article.title.trim());
 
     if (matches.length >= 2) {
       logger?.warn({
@@ -480,7 +486,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
         cwd: workspaceRoot,
         timeoutMs: DEFAULT_TIMEOUTS.default,
       });
-      assertNoetSuccess(result, `update ${match.key}`, article.noteUuid);
+      assertNoetSuccess(result, `update ${match.key}`, { noteUuid: article.noteUuid });
       const extracted = extractNoteUrl(result.stdout);
       return { result: 'updated', remoteId: match.key, url: extracted?.url ?? prev?.url };
     }
@@ -506,7 +512,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
       cwd: workspaceRoot,
       timeoutMs: DEFAULT_TIMEOUTS.default,
     });
-    assertNoetSuccess(result, 'create', article.noteUuid);
+    assertNoetSuccess(result, 'create', { noteUuid: article.noteUuid });
     const extracted = extractNoteUrl(result.stdout);
     if (extracted === undefined) {
       // モジュール冒頭 JSDoc「記事 ID(key)の取得」参照: id 不明のまま「成功」を記録すると

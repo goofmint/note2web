@@ -12,9 +12,11 @@
  * `renderHatenaArticle`、note.com は T-25(issue #30)で `src/publishers/note.ts` の
  * `createNotePublisher`/`renderNoteArticle` が揃ったため、それぞれここで配線する
  * (`resolveRenderer` で service 別に選択、下記)。これで design.md §7 `SERVICES` の
- * 7サービス全てに実装が揃い、`PublisherNotImplementedError` に到達する経路は
- * (`config.service` の型が `ServiceName` である限り)無くなった——クラス自体は
- * `createPublisher` の網羅性チェック(default 分岐)用の防御として残す
+ * 7サービス全てに実装が揃った。`PublisherNotImplementedError` に到達するのは、
+ * (a) zod 検証を経ない `Config` で `config.service` に未知の値が入った場合、または
+ * (b) 実装は存在するがサービス固有の設定ブロック(`config.note` 等)が欠けている場合
+ * (通常は zod の service 別必須ブロック検証が弾くため、検証を迂回した場合のみ)——
+ * クラス自体は `createPublisher` の網羅性チェック(default 分岐)用の防御として残す
  * (`src/dependencies.ts` `checkDependencies` の `exhaustiveCheck: never` と同じ役割。
  * `config.service` に将来サービスが追加されコンパイルが壊れる前に、実行時にも
  * 意味のあるエラーで検出できるようにする)。
@@ -46,10 +48,11 @@ export class PublisherNotImplementedError extends Error {
 
   constructor(service: string) {
     super(
-      `internal error: no Publisher implementation is registered for service "${service}"; ` +
+      `internal error: no Publisher was selected for service "${service}"; ` +
         'design.md §7 SERVICES lists 7 services and src/publishers/factory.ts wires all of them ' +
-        '(T-16/T-21/T-22/T-23/T-25) — this indicates config.service bypassed the zod schema ' +
-        '(src/config.ts) or a new service was added without updating createPublisher.',
+        '(T-16/T-21/T-22/T-23/T-25) — this indicates the service-specific config block ' +
+        '(e.g. config.note) is missing, config.service bypassed the zod schema ' +
+        '(src/config.ts), or a new service was added without updating createPublisher.',
     );
     this.name = 'PublisherNotImplementedError';
     this.service = service;

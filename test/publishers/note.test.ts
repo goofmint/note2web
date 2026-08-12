@@ -217,6 +217,28 @@ describe('createNotePublisher', () => {
       });
     });
 
+    it('falls back to prev.url when prev exists with remoteId null and the update output has no URL', async () => {
+      // remoteId が null の既存状態(過去に失敗した等)からの回復パス。update 出力に URL が
+      // 無い場合、PublishResult.url は prev.url へフォールバックする。
+      const { runner } = makeMockRunner((call) => {
+        if (call.args[0] === 'list') return success(listLine('Hello World', 'matched-key'));
+        if (call.args[0] === 'update') return success('updated without url output');
+        return undefined;
+      });
+      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+
+      const result = await publisher.publish(
+        buildArticle({ title: 'Hello World' }),
+        buildPrevState({ remoteId: null, url: 'https://note.com/user/n/prev-url-key' }),
+      );
+
+      expect(result).toMatchObject({
+        result: 'updated',
+        remoteId: 'matched-key',
+        url: 'https://note.com/user/n/prev-url-key',
+      });
+    });
+
     it('adopts the key and updates on exactly 1 title match', async () => {
       const { runner, calls } = makeMockRunner((call) => {
         if (call.args[0] === 'list') return success(listLine('Hello World', 'matched-key'));
