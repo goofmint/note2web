@@ -1,12 +1,37 @@
 {
   "name": "note2web",
   "version": "0.1.0",
-  "description": "Publish Apple Notes to blog services",
+  "description": "Publish Apple Notes to Zenn, Hugo, Jekyll, Qiita, dev.to, note.com, and Hatena Blog via a cron/launchd-driven CLI",
+  "keywords": [
+    "apple-notes",
+    "cli",
+    "zenn",
+    "hugo",
+    "jekyll",
+    "qiita",
+    "devto",
+    "hatena-blog",
+    "note-com",
+    "blog",
+    "publishing",
+    "static-site"
+  ],
+  "homepage": "https://github.com/goofmint/note2web#readme",
+  "bugs": "https://github.com/goofmint/note2web/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goofmint/note2web.git"
+  },
   "license": "MIT",
   "type": "module",
   "bin": {
     "note2web": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts"
+  ],
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
@@ -16,7 +41,8 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "test": "vitest run",
-    "build": "tsc"
+    "build": "tsc",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

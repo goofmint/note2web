@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createS3UploaderClient } from './assets/uploader.js';
@@ -170,9 +171,31 @@ async function main(): Promise<void> {
  * 実行中のモジュールがエントリポイントかを判定する。
  * 手組みの `file://` 連結はパスに空白・`#`・`%` を含むと `import.meta.url` と
  * 一致しなくなるため、`pathToFileURL` で正規化して比較する。
+ *
+ * **シンボリックリンク経由の実行に対応する**: `npm`/`npx` は CLI を
+ * `node_modules/.bin/note2web` のようなシンボリックリンク経由で起動する。Node の
+ * ESM ローダーは `import.meta.url` をシンボリックリンクの実体パス(realpath)へ解決するが、
+ * `process.argv[1]` は起動時に渡された(シンボリックリンクのままの)パスを保持するため、
+ * 素朴な比較では一致せず `main()` が一切呼ばれずに exit code 0 で無言終了する
+ * (npm パッケージングの検証で発見。`npm pack` → `npm install <tarball>` →
+ * `node_modules/.bin/note2web` 実行で再現した)。`argv1` を `realpathSync` してから
+ * 比較することで、シンボリックリンク経由でも直接パス指定でも判定できるようにする。
+ * `realpathSync` が失敗した場合(理論上、起動中の自スクリプトなので通常起きない)は
+ * 元の(非解決)パスでの比較にフォールバックする。
  */
 export function isMainEntry(importMetaUrl: string, argv1: string | undefined): boolean {
-  return argv1 !== undefined && importMetaUrl === pathToFileURL(argv1).href;
+  if (argv1 === undefined) {
+    return false;
+  }
+  if (importMetaUrl === pathToFileURL(argv1).href) {
+    return true;
+  }
+  try {
+    const resolvedArgv1 = realpathSync(argv1);
+    return importMetaUrl === pathToFileURL(resolvedArgv1).href;
+  } catch {
+    return false;
+  }
 }
 
 const isMainModule = isMainEntry(import.meta.url, process.argv[1]);
