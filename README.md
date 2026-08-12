@@ -14,7 +14,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
 1つの設定ファイル(YAML)が1つの配信先サービスに対応します。複数サービスへ配信する場合は、サービスごとに設定ファイルを用意し、cron / launchd にその数だけエントリを登録してください。配信は Apple Notes → サービスの片方向のみで、サービス側で編集してもApple Notes には反映されません。
 
-詳細な設計・要件は [`requirements.md`](./requirements.md) / [`design.md`](./design.md) を参照してください。
+詳細な設計・要件は [`requirements.md`](https://github.com/goofmint/note2web/blob/main/requirements.md) / [`design.md`](https://github.com/goofmint/note2web/blob/main/design.md) を参照してください。
 
 ## 目次
 
@@ -168,7 +168,7 @@ hatena:
 
 ### Zenn / Hugo / Jekyll(Git 共通)
 
-- 出力先 Git リポジトリをあらかじめ clone し、`gh auth login` 済みであること
+- 出力先 Git リポジトリをあらかじめ clone してあること。認証は環境変数 `GH_TOKEN` で行います(`gh` は `GH_TOKEN` が設定されていれば対話ログイン不要。`sync` / `doctor` の冒頭で `gh auth status` と対象リポジトリへの権限が確認されます)
 - 認証は `GH_TOKEN` 環境変数(`gh` の認証。対話ログインには依存しません)
 - 実行のたびに `base_branch` から作業ブランチ `note2web/sync-<UTC時刻>` を作成し、変更のあったノートをコミット、`gh pr create` で PR を作成します
 - **差分が無ければブランチを破棄し、空コミット・空 PR は作りません**
@@ -220,17 +220,52 @@ hatena:
 
 1つの設定ファイル = 1つの配信先サービスなので、複数サービスへ配信する場合は設定ファイルの数だけエントリを登録してください。
 
+### 準備: ログディレクトリと実行スクリプト
+
+まずログの出力先ディレクトリを作成します(cron / launchd 共通):
+
+```bash
+mkdir -p ~/Library/Logs/note2web
+```
+
+秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。また、`npx` のパスは環境により異なる(Homebrew の Node では `/opt/homebrew/bin/npx` 等)ため、ラッパースクリプト内で解決し、`note2web` は**バージョンを固定**して起動します。
+
+```bash
+# ~/.config/note2web/env(chmod 600 で保護)
+GH_TOKEN=xxxx
+R2_ACCESS_KEY_ID=xxxx
+R2_SECRET_ACCESS_KEY=xxxx
+```
+
+```bash
+#!/bin/sh
+# ~/bin/note2web-sync.sh(chmod 700 で保護)
+# 使い方: note2web-sync.sh <config.yaml>
+set -eu
+set -a
+. "$HOME/.config/note2web/env"
+set +a
+NPX="$(command -v npx)"
+# バージョンは固定する(例: 0.1.0)。更新時はこの数字を意図的に上げる
+exec "$NPX" --yes note2web@0.1.0 sync --config "$1"
+```
+
+```bash
+chmod 600 ~/.config/note2web/env
+chmod 700 ~/bin/note2web-sync.sh
+```
+
 ### cron の例
 
 ```cron
 # 30分おきに Zenn へ配信
-*/30 * * * * GH_TOKEN=xxxx R2_ACCESS_KEY_ID=xxxx R2_SECRET_ACCESS_KEY=xxxx /usr/bin/npx --yes note2web sync --config /Users/you/.config/note2web/zenn.yaml >> /Users/you/Library/Logs/note2web/zenn-cron.log 2>&1
+*/30 * * * * /Users/you/bin/note2web-sync.sh /Users/you/.config/note2web/zenn.yaml >> /Users/you/Library/Logs/note2web/zenn-cron.log 2>&1
 
-# 1時間おきに Qiita へ配信
-0 * * * * QIITA_TOKEN=xxxx QIITA_S3_ACCESS_KEY_ID=xxxx QIITA_S3_SECRET_ACCESS_KEY=xxxx /usr/bin/npx --yes note2web sync --config /Users/you/.config/note2web/qiita.yaml >> /Users/you/Library/Logs/note2web/qiita-cron.log 2>&1
+# 1時間おきに Qiita へ配信(env ファイル・設定を分ける場合はラッパーを複製)
+0 * * * * /Users/you/bin/note2web-sync.sh /Users/you/.config/note2web/qiita.yaml >> /Users/you/Library/Logs/note2web/qiita-cron.log 2>&1
 ```
 
-秘匿情報を crontab に直書きしたくない場合は、`env` ファイルを用意して `. /path/to/env &&` を先頭に挟む、または launchd の `EnvironmentVariables` を使ってください。cron から起動するシェル/`node` バイナリにも「フルディスクアクセス」権限が必要な点に注意してください。
+crontab・launchd の plist はいずれも平文で読まれ得るため、トークン類は上記の `chmod 600` した env ファイルにのみ置いてください(より堅牢にするなら macOS キーチェーン + `security find-generic-password` での取得も選択肢です)。cron から起動するシェル/`node` バイナリにも「フルディスクアクセス」権限が必要な点に注意してください。
 
 ### launchd の例(`~/Library/LaunchAgents/com.example.note2web.zenn.plist`)
 
@@ -243,22 +278,9 @@ hatena:
   <string>com.example.note2web.zenn</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/npx</string>
-    <string>--yes</string>
-    <string>note2web</string>
-    <string>sync</string>
-    <string>--config</string>
+    <string>/Users/you/bin/note2web-sync.sh</string>
     <string>/Users/you/.config/note2web/zenn.yaml</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>GH_TOKEN</key>
-    <string>xxxx</string>
-    <key>R2_ACCESS_KEY_ID</key>
-    <string>xxxx</string>
-    <key>R2_SECRET_ACCESS_KEY</key>
-    <string>xxxx</string>
-  </dict>
   <key>StartInterval</key>
   <integer>1800</integer>
   <key>StandardOutPath</key>
@@ -269,7 +291,7 @@ hatena:
 </plist>
 ```
 
-サービスごとに `Label` / `--config` / `EnvironmentVariables` / ログパスを変えたファイルを用意し、`launchctl load ~/Library/LaunchAgents/com.example.note2web.<service>.plist` で登録します。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
+サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl load ~/Library/LaunchAgents/com.example.note2web.<service>.plist` で登録します(トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます)。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
 
 ## ログ
 
@@ -302,11 +324,11 @@ hatena:
 - **Apple Notes の UUID の安定性**: アカウント間の移動や DB 復元をまたいで UUID が安定するかは保証されません。変わった場合、旧記事はサービス側に残り、新 UUID で新規記事として配信されます
 - **孤児記事の扱い**: 配信後にノートが削除・移動されても、サービス側の記事はそのまま残ります(孤児エントリの検出・削除は行いません。設計上の非対応)
 
-これらの詳細な調査過程・根拠は [`design.md`](./design.md) の §12(テスト方針)・§13(実装時に確認が必要な残課題)を参照してください。
+これらの詳細な調査過程・根拠は [`design.md`](https://github.com/goofmint/note2web/blob/main/design.md) の §12(テスト方針)・§13(実装時に確認が必要な残課題)を参照してください。
 
 ## 開発
 
-このリポジトリの設計方針・データ設計・処理フローは [`design.md`](./design.md)、機能要件・非機能要件は [`requirements.md`](./requirements.md) にまとめられています。実装に変更を加える場合は、まずこれらを参照してください。
+このリポジトリの設計方針・データ設計・処理フローは [`design.md`](https://github.com/goofmint/note2web/blob/main/design.md)、機能要件・非機能要件は [`requirements.md`](https://github.com/goofmint/note2web/blob/main/requirements.md) にまとめられています。実装に変更を加える場合は、まずこれらを参照してください。
 
 ```sh
 npm install
