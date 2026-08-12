@@ -5,8 +5,10 @@
  * 3サービスはここで配線する。Zenn は T-17(issue #22)で `src/publishers/zenn.ts` の
  * `renderZennArticle`、Hugo は T-18(issue #23)で `src/publishers/hugo.ts` の
  * `renderHugoArticle`、Jekyll は T-19(issue #24)で `src/publishers/jekyll.ts` の
- * `renderJekyllArticle` が揃ったため、`resolveRenderer` で service 別に選択する(下記)。
- * Qiita/dev.to/note.com/はてな(T-21〜T-25)はまだ存在しないため、引き続き
+ * `renderJekyllArticle`、Qiita は T-21(issue #26)で `src/publishers/qiita.ts` の
+ * `createQiitaPublisher`/`renderQiitaArticle` が揃ったため、それぞれここで配線する
+ * (`resolveRenderer` で service 別に選択、下記)。
+ * dev.to/note.com/はてな(T-22〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
  * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
  * 駆動する E2E テストは `test/sync.test.ts`)、実サービスへの接続だけが後続タスク待ちで
@@ -20,6 +22,7 @@ import { createGitRepoPublisher } from './git-repo.js';
 import { renderHugoArticle } from './hugo.js';
 import { renderJekyllArticle } from './jekyll.js';
 import { isGitModeService } from './mode.js';
+import { createQiitaPublisher, renderQiitaArticle } from './qiita.js';
 import { renderGenericArticle, type NoteRenderer } from './render.js';
 import type { Publisher } from './types.js';
 import { renderZennArticle } from './zenn.js';
@@ -36,9 +39,10 @@ export class PublisherNotImplementedError extends Error {
   constructor(service: string) {
     super(
       `no Publisher implementation is registered yet for service "${service}"; ` +
-        'real Publisher implementations land in T-16 (git repo modes: zenn/hugo/jekyll) and ' +
-        'T-21〜T-25 (qiita/devto/note/hatena) per tasks.md. T-14 wires the sync flow itself ' +
-        '(src/sync.ts) and is exercised with a mock Publisher in test/sync.test.ts, per design.md §5.7.',
+        'real Publisher implementations land in T-16 (git repo modes: zenn/hugo/jekyll), ' +
+        'T-21 (qiita), and T-22〜T-25 (devto/note/hatena) per tasks.md. T-14 wires the sync ' +
+        'flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
+        'test/sync.test.ts, per design.md §5.7.',
     );
     this.name = 'PublisherNotImplementedError';
     this.service = service;
@@ -57,12 +61,16 @@ export interface CreatePublisherOptions {
 
 /**
  * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
- * `createGitRepoPublisher`(T-16)を返す(`options.logger` を渡す)。それ以外のサービスは
- * 後続タスク(T-21〜T-25)待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
+ * `createGitRepoPublisher`(T-16)を、qiita は `createQiitaPublisher`(T-21)を返す
+ * (いずれも `options.logger` を渡す)。それ以外のサービスは後続タスク(T-22〜T-25)待ちのため
+ * `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
  */
 export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
   if (isGitModeService(config.service) && config.git !== undefined) {
     return createGitRepoPublisher({ config, logger: options.logger });
+  }
+  if (config.service === 'qiita' && config.qiita !== undefined) {
+    return createQiitaPublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
 }
@@ -85,7 +93,10 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  * - `jekyll`: `renderJekyllArticle`(`src/publishers/jekyll.ts`、T-19)——
  *   `_posts/YYYY-MM-DD-<uuid>.md` のファイル名固定規約(design.md §4)と `title`/`date`/
  *   `categories`/`tags` の Jekyll 固有規約(design.md §5.7 Jekyll 行)を扱う。
- * - それ以外(qiita/devto/note/hatena): 後続タスク(T-21〜T-25)でサービス別 Renderer が
+ * - `qiita`: `renderQiitaArticle`(`src/publishers/qiita.ts`、T-21)——`title`/`tags`/
+ *   `private`/`slide`/`id` の Qiita 固有規約(design.md §5.7 Qiita 行)とタグ制約
+ *   (1〜5個・スペース不可)を扱う。
+ * - それ以外(devto/note/hatena): 後続タスク(T-22〜T-25)でサービス別 Renderer が
  *   揃うまでの暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す
  *   ——`runSync` 自身の既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と
  *   渡さない場合(test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
@@ -99,6 +110,9 @@ export function resolveRenderer(service: ServiceName): NoteRenderer {
   }
   if (service === 'jekyll') {
     return renderJekyllArticle;
+  }
+  if (service === 'qiita') {
+    return renderQiitaArticle;
   }
   return renderGenericArticle;
 }

@@ -28,9 +28,21 @@
  * 移動して渡す。CodeRabbit issue plan、issue #24 コメント Phase 1)。`renderGenericArticle`
  * および `renderZennArticle`/`renderHugoArticle` はこのフィールドを使わない
  * ——ファイル名がノートの内容のみから決まり、状態を跨いで固定する必要が無いため。
+ *
+ * **`logger`(T-21 / issue #26 で追加)**: Qiita のタグ制約(design.md §5.7「半角スペースを
+ * 含むタグは除外し警告ログ」「除外後6個以上なら先頭5個に切り詰めて警告ログ」)は
+ * レンダリング段(`renderQiitaArticle`、`src/publishers/qiita.ts`)で検出する
+ * ——`processNote` は `renderNote` 呼び出しを独立した try/catch で囲んでおり、失敗
+ * (`QiitaNoTagsRemainingError`)はここで投げれば当該ノートのみを隔離できる一方、警告
+ * (`logger.warn`)はノートを失敗させずにログへ残す必要があるため、`Logger` そのものが
+ * 要る。`src/sync.ts` の `processNote` は既に `logger` を保持しているため、これをそのまま
+ * `renderNote` 呼び出しへ渡す。任意フィールドにするのは、既存の Renderer
+ * (`renderGenericArticle`/`renderZennArticle`/`renderHugoArticle`/`renderJekyllArticle`)や
+ * 既存テストが `logger` 無しで `RenderNoteInput` を組み立てているコードを壊さないため。
  */
 
 import type { Config } from '../config.js';
+import type { Logger } from '../logger.js';
 import type { Note } from '../model/note.js';
 import type { NoteState } from '../state/store.js';
 import {
@@ -57,6 +69,13 @@ export interface RenderNoteInput {
    * 使わない。
    */
   prev: NoteState | null;
+  /**
+   * ログ出力先(任意。T-21 / issue #26 で追加、上記モジュール冒頭 JSDoc「logger」節参照)。
+   * `renderQiitaArticle`(`src/publishers/qiita.ts`)がタグ切り詰め等の警告に使う。
+   * `src/sync.ts` の `processNote` は常に渡すが、既存 Renderer・既存テストとの互換性のため
+   * 型としては任意のままにする。
+   */
+  logger?: Logger;
 }
 
 /** sync フローに注入する Renderer の関数シグネチャ。 */

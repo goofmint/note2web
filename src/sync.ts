@@ -303,7 +303,7 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
 
   let article: RenderedArticle;
   try {
-    article = renderNote({ note, markdown, config, prev });
+    article = renderNote({ note, markdown, config, prev, logger });
   } catch (error) {
     logger.noteFailed({
       service,
