@@ -590,6 +590,41 @@ describe('publish() retry policy (design.md §5.7 "応答不明時の重複防�
     expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1);
   });
 
+  it('does not retry POST on an HTTP-status failure (400): exactly 1 request, throws', async () => {
+    const { client, calls } = makeMockHttpClient((call) => {
+      if (call.method === 'GET') return xmlResponse(200, feedXml([]));
+      if (call.method === 'POST') return { status: 400, headers: {}, body: '<error>bad</error>' };
+      throw new Error('test setup: unexpected call');
+    });
+    const publisher = createHatenaPublisher({
+      config: buildConfig(),
+      client,
+      env: { HATENA_API_KEY: 'token' },
+    });
+
+    await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/HTTP 400/);
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+  });
+
+  it('aborts title-match recovery with an error when rel="next" pagination is circular', async () => {
+    // rel="next" が自分自身を指し続ける異常応答で無限ループせず、照合漏れによる
+    // 重複 POST を避けるためエラーで安全側に倒すこと。
+    const { client, calls } = makeMockHttpClient((call) => {
+      if (call.method === 'GET') {
+        return xmlResponse(200, feedXml([{ id: '1', title: 'Other Entry' }], call.url));
+      }
+      throw new Error('test setup: no write request should have been sent');
+    });
+    const publisher = createHatenaPublisher({
+      config: buildConfig(),
+      client,
+      env: { HATENA_API_KEY: 'token' },
+    });
+
+    await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/circular/);
+    expect(calls.filter((call) => call.method !== 'GET')).toHaveLength(0);
+  });
+
   it('treats an errno-style connection error (e.g. ECONNRESET) on PUT as retryable', async () => {
     const { client, calls } = makeMockHttpClient((call) => {
       if (call.method !== 'PUT') {

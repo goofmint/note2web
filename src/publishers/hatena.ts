@@ -505,14 +505,36 @@ function assertOk(response: HatenaHttpResponse, description: string): void {
  * `rel="next"` リンクが無くなった時点(dev.to の「空ページが返るまで」に相当する、
  * はてな AtomPub 版の終了判定)。
  */
+/**
+ * `fetchAllEntries` のページ数上限。はてなの1ページは約10件のため、上限 1000 ページ ≒
+ * 10,000 記事まで走査できる。サーバ応答の異常(`rel="next"` の循環・自己参照)による
+ * 無限ループを防ぐための安全弁で、通常運用で到達することはない。
+ */
+const HATENA_MAX_LIST_PAGES = 1000;
+
 async function fetchAllEntries(
   client: HatenaHttpClient,
   headers: Record<string, string>,
   collectionUri: string,
 ): Promise<HatenaListedEntry[]> {
   const items: HatenaListedEntry[] = [];
+  const visited = new Set<string>();
   let url: string | undefined = collectionUri;
   while (url !== undefined) {
+    // サーバ応答の異常(rel="next" の循環)や過大なコレクションで無限ループしないよう、
+    // 訪問済み URL とページ数上限で打ち切る。打ち切りは照合漏れ(重複 POST の危険)に
+    // つながるため、静かに続行せずエラーにして安全側へ倒す。
+    if (visited.has(url)) {
+      throw new Error(
+        `HatenaPublisher: circular rel="next" pagination detected at ${url} (title-match recovery aborted)`,
+      );
+    }
+    if (visited.size >= HATENA_MAX_LIST_PAGES) {
+      throw new Error(
+        `HatenaPublisher: collection listing exceeded ${String(HATENA_MAX_LIST_PAGES)} pages (title-match recovery aborted)`,
+      );
+    }
+    visited.add(url);
     const response = await client({ method: 'GET', url, headers });
     assertOk(response, 'GET .../atom/entry (title-match recovery)');
     items.push(...extractEntries(response.body, 'GET .../atom/entry (title-match recovery)'));
