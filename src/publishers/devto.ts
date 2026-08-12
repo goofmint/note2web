@@ -569,7 +569,22 @@ export function createDevtoPublisher(options: CreateDevtoPublisherOptions): Publ
   // 新規作成(POST)成功時はキャッシュへ追記し、同一実行内の後続ノートとの照合にも使う。
   let articleListCache: DevtoListedArticle[] | null = null;
 
-  async function publish(article: RenderedArticle, prev: NoteState | null): Promise<PublishResult> {
+  // publish() の直列化チェーン。呼び出し側(src/sync.ts の processNote)はノートを逐次処理
+  // するが、Publisher の API 契約としても並行呼び出しで一覧キャッシュの未初期化を同時に
+  // 観測して同名記事を二重 POST する競合が起きないよう、全 publish を構造的に直列化する。
+  let publishChain: Promise<unknown> = Promise.resolve();
+
+  function publish(article: RenderedArticle, prev: NoteState | null): Promise<PublishResult> {
+    const run = publishChain.then(() => publishOnce(article, prev));
+    // 失敗しても後続の publish を巻き込まない(チェーンには失敗を握りつぶした Promise を残す)。
+    publishChain = run.catch(() => undefined);
+    return run;
+  }
+
+  async function publishOnce(
+    article: RenderedArticle,
+    prev: NoteState | null,
+  ): Promise<PublishResult> {
     const apiKey = env[devtoConfig.api_key_env];
     if (apiKey === undefined || apiKey === '') {
       throw new Error(

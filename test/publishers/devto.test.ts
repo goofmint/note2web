@@ -450,6 +450,30 @@ describe('publish() title-match recovery (design.md §5.7 "応答不明時の重
     expect(second).toMatchObject({ result: 'updated', remoteId: '100' });
     expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
   });
+
+  it('serializes concurrent publishes: two same-title notes via Promise.all cause exactly 1 POST', async () => {
+    // 並行呼び出しでも publish は内部で直列化されるため、両者が未初期化キャッシュを
+    // 同時に観測して二重 POST する競合は起きない(2件目はキャッシュ一致で PUT になる)。
+    const { client, calls } = makeMockHttpClient((call) => {
+      if (call.method === 'GET') return jsonResponse(200, []);
+      if (call.method === 'POST') return jsonResponse(201, { id: 200, url: 'https://dev.to/me/b' });
+      return jsonResponse(200, { id: 200, url: 'https://dev.to/me/b' });
+    });
+    const publisher = createDevtoPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { DEVTO_API_KEY: 'token' },
+    });
+
+    const [first, second] = await Promise.all([
+      publisher.publish(buildArticle({ noteUuid: 'c1', title: 'Concurrent Title' }), null),
+      publisher.publish(buildArticle({ noteUuid: 'c2', title: 'Concurrent Title' }), null),
+    ]);
+
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(first.result).toBe('created');
+    expect(second).toMatchObject({ result: 'updated', remoteId: '200' });
+  });
 });
 
 describe('publish() retry policy (design.md §5.7 "応答不明時の重複防止")', () => {
