@@ -60,7 +60,7 @@ note2web sync --config ~/.config/note2web/zenn.yaml
 | はてなブログ AtomPub の Markdown 入稿 | `content type="text/x-markdown"` で入稿可能(複数の実装事例で確認。公式仕様書はネットワーク制約で未参照のため実装時に実機確認)。**ブログの編集モードが Markdown であることを利用条件とする** |
 | はてなブログの認証方式 | **Basic 認証(はてな ID + API キー)を採用**。HTTPS 経由のため十分であり、実装が最も単純 |
 | dev.to の方式 | **Forem API v1 を直接叩く方式を採用**。`@sinedied/devto-cli` は「GitHub リポジトリに画像をホストする」ワークフロー前提で、本ツールの R2 / S3 方式と競合するため |
-| Qiita の認証 | `qiita-cli` は `qiita login` による対話登録が基本。無人実行のため、環境変数 `QIITA_TOKEN` から認証情報ファイルを生成する方式とする(生成先・形式は実装時確認、§13) |
+| Qiita の認証 | **確認済み(§13-3 解消)**。`qiita-cli` は `qiita login` による対話登録が基本だが、実装(`Credential.load`)は認証情報ファイルを読む**前に** `process.env.QIITA_TOKEN` の有無を確認し、設定されていればファイルを一切読まずにそれをアクセストークンとして使う。したがって note2web は**認証情報ファイルを生成する必要が無く**、`npx qiita publish` 実行時に子プロセスの環境変数 `QIITA_TOKEN` をセットするだけで無人実行できる(設計変更。詳細は §13-3)。note2web 側でトークンの取得元となる環境変数名は `qiita.token_env` で設定する(FR-30。既定のサンプルは `QIITA_TOKEN`)。QiitaPublisher は `token_env` が指す環境変数から値を読み、**子プロセスには常に `QIITA_TOKEN` という名前で**渡す(qiita-cli 側が参照する名前は `QIITA_TOKEN` 固定のため) |
 | note.com | `noet`(kako-jun/noet)は Markdown ファイル + Hugo 風ワークスペースで記事を管理し、レート制御を内蔵。画像アップロード未対応(要件どおり) |
 | Jekyll のファイル名規約 | `_posts/YYYY-MM-DD-<uuid>.md`。日付はノートの**作成日**を使う。初回配信時のファイル名を状態 JSON に記録し、以後は作成日が変わっても**記録済みファイル名を使い続ける**(URL の安定性を優先) |
 | ハッシュアルゴリズム | SHA-256 |
@@ -187,13 +187,15 @@ interface Publisher {
 
 #### QiitaPublisher
 
-- 設定で指定した qiita-cli ワークスペースに `public/<uuid>.md` を書き、`npx qiita publish <uuid>` を実行(FR-25)
-- frontmatter: `title` / `tags` / `private: false` / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)
+- 設定で指定した qiita-cli ワークスペース(`itemsRootDir`。qiita-cli 実行時に `--root <workspace>` で指定するか、`QIITA_CLI_ITEMS_ROOT` 環境変数で指定。§13-3)の `public/<uuid>.md`(`<itemsRootDir>/public/<basename>.md`。`dist/lib/file-system-repo.js` `getRootPath` / `getFilePath`)に書き、`npx --no-install qiita publish <uuid> --root <workspace>` を実行(FR-25)
+- **CLI のパッケージ解決(セキュリティ制約)**: `@qiita/qiita-cli` は T-21 で note2web の `dependencies` に**固定バージョンで追加**し(lockfile にも固定)、実行は **`npx --no-install qiita`**(またはローカルの `node_modules/.bin/qiita`)に限定する。素の `npx qiita` はローカル未導入時に npm レジストリの **`qiita` という別パッケージ**(公式 CLI ではない)を取得しに行き、そのプロセスにトークン入りの環境変数が渡ってしまうため**禁止**。未導入の場合は `checkDependencies`(doctor / sync の前提チェック)で exit 2 とし、あわせて qiita-cli の要求する Node.js engine(>= 20)を満たすことも事前検証する
+- frontmatter: `title` / `tags` / `private: false` / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)/ **`slide: false`**(§13-3 で判明した差分。下記参照)
+  - **差分(調査により判明)**: qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js` `checkSlide`)は `slide` が **真偽値であること**を要求しており(`typeof slide === "boolean"`)、フィールド自体が無い(`undefined`)場合は型エラーとして `publish` が失敗する。当初の想定(`title` / `tags` / `private` / `id` の4項目)には無かったフィールドのため、QiitaPublisher が書き出す frontmatter には `slide: false` を必須項目として追加する
 - タグ制約(1〜5個必須、スペース不可)への対処:
   - 半角スペースを含むタグは**除外**し警告ログ(分割送信による 403 を防ぐ)
   - 除外後 6個以上なら先頭5個に切り詰めて警告ログ
   - 除外後 0個ならそのノートは**失敗扱い**(エラーログ。タグを付けて再実行してもらう)
-- 認証: `QIITA_TOKEN` 環境変数(FR-30)
+- 認証: 設定 `qiita.token_env` が指す環境変数からトークンを読む(FR-30。サンプル設定では `QIITA_TOKEN`)。**確認済み(§13-3)**: `qiita-cli` は `qiita login` の認証情報ファイルより先に `QIITA_TOKEN` 環境変数を見るため、QiitaPublisher は `token_env` の値を子プロセス環境変数 **`QIITA_TOKEN`(qiita-cli 側の参照名は固定)** にセットして `npx qiita publish` を呼ぶだけでよく、認証情報ファイルの生成・`qiita login` の代替実装は不要
 
 #### DevtoPublisher
 
@@ -257,7 +259,7 @@ sync:
 |---|---|
 | 共通 | `ruby` + `apple_cloud_notes_parser`、R2 / S3 の認証環境変数 |
 | zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
-| qiita | Node.js、`@qiita/qiita-cli`、`QIITA_TOKEN` |
+| qiita | Node.js(qiita-cli の要求 engine >= 20)、`@qiita/qiita-cli`(note2web の `dependencies` に固定バージョンで追加し、`npx --no-install` で解決。§5.7。**現時点では未導入・依存チェック未実装 = T-21 で実装する契約**)、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
 | devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |
 | note | `noet` と認証設定 |
 | hatena | `HATENA_API_KEY` のみ(API 直接。CLI 不要) |
@@ -409,18 +411,29 @@ note2web/
 - **golden test**: 正規化直列化の固定(§5.6)。同一入力ノートに対して期待する直列化文字列とハッシュ値をリポジトリに固定し、serializer・依存更新でハッシュが変わったら検知する。ケースには YAML の境界値(`null` / 真偽値 / 数値 / 日時に見える文字列、`:` `#` `"` `\` 改行を含む文字列)を必ず含める
 - **結合**: `test/fixtures/parser-output/`(**表・チェックリスト・描画参照・絵文字タイトル+ハッシュタグ+ネストフォルダを含む複数ノート**の fixture)でエクスポート以降を通しで検証。JSON の UUID と個別 HTML(`--individual-files --uuid`)の対応が一意に解決できることをここで検証する。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
   - この fixture は実機の `NoteStore.sqlite` からではなく、parser 実装をパーサ同梱の実エクスポート blob に対して実行した結果 + ソースコード読解によって構成した(T-08, §13)。由来・確認方法・各ノートがどこまで実行検証済みかは `test/fixtures/parser-output/README.md` に明記する
-- **実機確認**(CI 不能なもの): qiita-cli の無人認証、noet の公開フロー、はてな AtomPub の Markdown 入稿。§13 の項目と対応。parser のチェックリスト / 描画出力は §13-1 / §13-2 のとおりパーサ実装の実行 + ソース読解で確認済みのため、本項目からは除外した(macOS 実機での `NoteStore.sqlite` に対するエンドツーエンド実行は依然未実施)
+- **実機確認**(CI 不能なもの): noet の公開フロー、はてな AtomPub の Markdown 入稿、**qiita-cli の実トークンでの認証・記事公開**。§13 の項目と対応
+  - qiita-cli は確認範囲を分けて扱う: **無人実行経路**(認証情報ファイル不要・`QIITA_TOKEN` 環境変数のみで対話なしに HTTP 要求まで進むこと)は §13-3 のとおりパッケージ実装の読解 + ローカル実行で確認済み。一方、**実トークンでの認証成功・記事公開成功**は未確認であり、実機確認の対象として残る。また、この確認は `node dist/main.js` の直接実行によるもので、実運用コマンド `npx qiita publish` のパッケージ解決(`qiita` → `@qiita/qiita-cli`)は未確認。QiitaPublisher 本体と `@qiita/qiita-cli` の導入は T-21 時点でも未実装・未導入である(§13-3 は調査のための一時インストールで確認した)
 
 ## 13. 実装時に確認が必要な残課題
 
 **確認方法についての注記(1・2・7 に共通)**: 本タスクの実行環境には macOS も実機の Apple Notes データベースも無いため、「実機確認」は `apple_cloud_notes_parser`(commit `4754a2b62686570cca46690d101079e80cf6ae66`, 2026-07-25)の**実装をパーサ同梱の実エクスポート blob(`spec/data/exported_blobs/*.bin`)に対して実行**し、加えて `lib/` のソースコードと同梱 `JSON.md` を読解する、という方法で代替した。macOS 実機で `NoteStore.sqlite` に対してパーサをエンドツーエンドで実行する確認は行っていない。詳細な根拠・引用元は `test/fixtures/parser-output/README.md` を参照
 
+**確認方法についての注記(3 = §13-3 に固有)**: 本タスクの実行環境は egress プロキシにより `qiita.com` へ到達できず、実トークンも無いため、実際の記事投稿(実 publish)による確認はできない。代わりに次の2点で確認した: (a) `@qiita/qiita-cli`(**v1.10.0**。`npm install @qiita/qiita-cli` でレジストリから取得した実パッケージ)の `dist/` 配下の実装をソースコード読解した、(b) そのパッケージをローカルで実際に実行し(`node dist/main.js publish <basename> --root <workspace>`)、ダミーの `QIITA_TOKEN` を与えて対話プロンプトが一切発生しないこと・処理が `qiita.com` への HTTP リクエスト(egress プロキシのホスト許可リストで拒否され `QiitaForbiddenError: Host not in allowlist` として失敗)まで進むことを確認した。**パッケージ実装の読解とローカル実行による確認であり、実トークンでの実 publish は未実施**
+
 1. ~~parser の HTML 出力における**チェックリストの表現**~~ → **確認済み**。`<ul class="checklist" data-apple-notes-indent-amount="N">` の下に `<li class="checked">` または `<li class="unchecked">` が並ぶ。ネストは `li` 要素の中に入れ子の `ul class="checklist" data-apple-notes-indent-amount="N+1"` を置く形(`lib/ProtoPatches.rb:383-385,464-467`)。実データ blob (`list_indents_gzipped.bin`) を `AppleNote#generate_html` で実行して確認。→ BodyTransformer(§5.4)は `li.checked` → `- [x]`、`li.unchecked` → `- [ ]`、ネストしたインデント量に応じて Markdown 側のリストもネストする変換ルールとする
 2. ~~parser が抽出する**描画ファイルの形式**~~ → **確認済み**。描画(`ZTYPEUTI` が `com.apple.drawing.2` / `com.apple.drawing` / `com.apple.paper`)は常に**ラスター画像(png/jpg/jpeg のいずれか。Apple が生成する「フォールバック画像」)**として `files/Accounts/<アカウント ZIDENTIFIER>/FallbackImages/<描画オブジェクトの UUID>/…/FallbackImage.<拡張子>` に抽出される(`lib/AppleNotesEmbeddedDrawing.rb`)。ベクター(手書きストローク)そのものは出力されないため、「画像でない場合のフォールバック」という論点自体が発生しない(常に画像)。本文には `generate_html_with_images`(`lib/AppleNotesEmbeddedObject.rb:694-721`)により `<a href="…"><img src="…" data-apple-notes-zidentifier="…" width="…"></a>` が挿入される。この経路はソースコード読解で確認(exported_blobs に手書きの実データが含まれないため実行検証は未実施)。→ AssetUploader(§5.5)・BodyTransformer(§5.4)の「手書き描画はそのまま画像としてアップロードする」という設計は変更不要
-3. `qiita-cli` を **`QIITA_TOKEN` 環境変数だけで無人実行**する方法(認証情報ファイルの生成先・形式)
+3. ~~`qiita-cli` を **`QIITA_TOKEN` 環境変数だけで無人実行**する方法(認証情報ファイルの生成先・形式)~~ → **確認済み(T-20)**。結論: **認証情報ファイルの生成は不要**。`qiita-cli`(**v1.10.0**)の `Credential.load()`(`node_modules/@qiita/qiita-cli/dist/lib/config.js:156-181`)は次の優先順で認証情報を決定する:
+   1. **`QIITA_TOKEN` 環境変数が設定されていれば、認証情報ファイルを読まずにそれをそのままアクセストークンとして使う**(`config.js:161-172`。`credentialData = { default: "environment variable", credentials: [{ accessToken: process.env.QIITA_TOKEN, name: "environment variable" }] }` をメモリ上に生成するだけで、ファイル I/O は発生しない)
+   2. `QIITA_TOKEN` が無い場合のみ、`<credentialDir>/credentials.json` を読む(無ければ `ENOENT` で失敗。後述)
+   - `credentialDir` の既定値は `~/.config/qiita-cli`(`XDG_CONFIG_HOME` があればそちらを優先、`--credential <dir>` オプションでも上書き可。`config.js:90-100`)。`qiita login` が対話的に取得したトークンを書き込む先も同じ `<credentialDir>/credentials.json` で、形式は次のとおり(`config.js:136-148` のコメント、および `setCredential`/`config.js:199-224` の実装で確認): `{"default": "<プロファイル名>", "credentials": [{"accessToken": "<トークン>", "name": "<プロファイル名>"}]}`(ファイルパーミッション `0o600`)
+   - **対話プロンプトが起きるのは `qiita login` コマンドだけ**であることをソース上でも確認した: CLI 全体で `readline` / `.question(` を使っているのは `dist/commands/login.js` のみ(`grep -rl "readline\|\.question(" dist` の結果は `login.js` 1件のみ)。`publish` コマンド(`dist/commands/publish.js`)はまず `syncArticlesFromQiita`(`dist/lib/sync-articles-from-qiita.js`)で `qiitaApi.authenticatedUserItems()` を呼び、続けて対象記事の frontmatter バリデーションを行い、`postItem` / `patchItem` で投稿する、という一直線の処理で、どの段階にも stdin 待ちは無い
+   - **ローカル実行での実証**(実トークン無し。egress プロキシで `qiita.com` には到達できない環境のため、ネットワーク到達直前までの確認): ワークスペース `public/<basename>.md` を用意し、`QIITA_TOKEN=dummy-token node dist/main.js publish <basename> --root <workspace>` を実行したところ、**対話プロンプトは一切発生せず**、`syncArticlesFromQiita` が `qiita.com` への HTTP リクエストを試みて `QiitaForbiddenError: Host not in allowlist: qiita.com`(= プロキシのホスト許可リストで拒否。認証情報自体は無条件に受理されている)で終了コード1で失敗した。対して `QIITA_TOKEN` を外し、かつ `credentials.json` が存在しない状態(`HOME` を空ディレクトリに向けた)で同じコマンドを実行すると、こちらも対話プロンプトなしに `ENOENT: no such file or directory, open '.../.config/qiita-cli/credentials.json'` で終了コード1で失敗した。**この2パターンから、`publish` は `QIITA_TOKEN` の有無に関わらず常に非対話であり、`QIITA_TOKEN` を設定するだけで(ファイル生成なしに)認証が成立することが確認できた**
+   - **公式資料による裏付け**: `qiita init` が生成する GitHub Actions ワークフロー雛形(`dist/commands/init.js`)は `increments/qiita-cli/actions/publish@v1` に `qiita-token: ${{ secrets.QIITA_TOKEN }}` を渡す構成になっており、パッケージ先頭コメントも `# Please set 'QIITA_TOKEN' secret to your repository` と明記している。`QIITA_TOKEN` 環境変数による無人実行は qiita-cli 自身が CI 向けに公式にサポートしている経路であるとわかる
+   - **§4・§5.7 との差分**: §4「Qiita の認証」および §5.7 QiitaPublisher は、当初「環境変数 `QIITA_TOKEN` から認証情報ファイルを生成する」という想定だったが、実際にはファイル生成は不要で **`QIITA_TOKEN` を子プロセスの環境変数にセットして `npx qiita publish` を呼ぶだけでよい**(§4・§5.7 を本調査で更新済み)
+   - **副次的な差分**: frontmatter の型チェック(`dist/lib/check-frontmatter-type.js` `checkSlide`)は `slide` フィールドが真偽値であることを要求しており、無い(`undefined`)と `publish` が失敗する。§5.7 QiitaPublisher の frontmatter に `slide: false` を追加した(詳細は §5.7 内の差分注記)
 4. `noet` の公開コマンド体系・記事 ID の取得方法・認証方法
 5. はてなブログ AtomPub の `text/x-markdown` 入稿の実機確認(一次資料未参照。複数の実装事例では動作)
 6. note.com が本文中の**外部画像 URL(R2 / S3)をどう扱うか**
 7. ~~parser の JSON スキーマの詳細(フォルダ階層・作成日時のフィールド名)~~ → **確認済み**。トップレベルは `{version, file_path, backup_type, html, accounts, cloudkit_participants, folders, notes}`。`folders` は **ルートフォルダのみ**を key(`z_pk` の文字列)に持ち、子フォルダは各フォルダオブジェクトの `child_folders`(同じ形の入れ子オブジェクト)の中に再帰的に格納される(`parent_folder_id` で親を指す。トップレベルの `folders` には子フォルダは並ばない)。`notes` はネストせず、`note_id` をキーにしたフラットな辞書で、各ノートは `folder_key` / `folder`(フォルダの `z_pk` / 名前)で所属フォルダを参照する。ノートのフィールドは `account_key, account, folder_key, folder, note_id, uuid, primary_key, creation_time, modify_time, cloudkit_creator_id, cloudkit_modifier_id, cloudkit_last_modified_device, is_pinned, is_password_protected, title, plaintext, html, note_proto, embedded_objects, hashtags, mentions`。作成日時 / 更新日時のフィールド名は `creation_time` / `modify_time`(`title` や `uuid`のような単純な名前ではない点に注意)で、値は `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列(`Time#to_s` 相当。実行して確認)。ソース: `JSON.md` と `lib/AppleNoteStore.rb#prepare_json`、`lib/AppleNote.rb#prepare_json`、`lib/AppleNotesFolder.rb#prepare_json`、`lib/AppleNotesAccount.rb#prepare_json`。具体例は `test/fixtures/parser-output/json/all_notes_1.json`。→ §5.3 の Note モデルのフィールド対応・§5.2 のパス解決規約はこのスキーマに基づいて記述した(差分は §5.3 内に明記)
 
-いずれも該当 Publisher / Transformer 内部に閉じており、確認結果によってアーキテクチャは変わらない(1・2・7 は確認完了。3〜6 は引き続き実装時の確認課題として残る)。
+確認結果によってアーキテクチャは変わらない(1・2・3・7 は確認完了。4〜6 は引き続き実装時の確認課題として残る)。ただし 3(Qiita)は当初想定と異なり Publisher 内部だけには閉じない: `qiita.token_env`(設定)→ 依存チェック(`@qiita/qiita-cli` の固定バージョン解決と Node engine の事前検証)→ 子プロセス環境(`QIITA_TOKEN` 固定名での受け渡し)→ CLI のパッケージ解決(`npx --no-install` 限定)にまたがる契約であり、§5.7 / §9 に明記した(実装は T-21)。
