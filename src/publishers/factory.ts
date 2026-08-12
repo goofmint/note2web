@@ -7,9 +7,10 @@
  * `renderHugoArticle`、Jekyll は T-19(issue #24)で `src/publishers/jekyll.ts` の
  * `renderJekyllArticle`、Qiita は T-21(issue #26)で `src/publishers/qiita.ts` の
  * `createQiitaPublisher`/`renderQiitaArticle`、dev.to は T-22(issue #27)で
- * `src/publishers/devto.ts` の `createDevtoPublisher`/`renderDevtoArticle` が揃ったため、
- * それぞれここで配線する(`resolveRenderer` で service 別に選択、下記)。
- * note.com/はてな(T-23〜T-25)はまだ存在しないため、引き続き
+ * `src/publishers/devto.ts` の `createDevtoPublisher`/`renderDevtoArticle`、はてなは
+ * T-23(issue #28)で `src/publishers/hatena.ts` の `createHatenaPublisher`/
+ * `renderHatenaArticle` が揃ったため、それぞれここで配線する(`resolveRenderer` で
+ * service 別に選択、下記)。note.com(T-24〜T-25)はまだ存在しないため、引き続き
  * `PublisherNotImplementedError` を投げて「まだ配信できない」ことを明示する
  * ——`src/sync.ts` 自体は Publisher を注入で受け取る形で完成しており(モック Publisher で
  * 駆動する E2E テストは `test/sync.test.ts`)、実サービスへの接続だけが後続タスク待ちで
@@ -21,6 +22,7 @@ import type { Config, ServiceName } from '../config.js';
 import type { Logger } from '../logger.js';
 import { createDevtoPublisher, renderDevtoArticle } from './devto.js';
 import { createGitRepoPublisher } from './git-repo.js';
+import { createHatenaPublisher, renderHatenaArticle } from './hatena.js';
 import { renderHugoArticle } from './hugo.js';
 import { renderJekyllArticle } from './jekyll.js';
 import { isGitModeService } from './mode.js';
@@ -42,8 +44,8 @@ export class PublisherNotImplementedError extends Error {
     super(
       `no Publisher implementation is registered yet for service "${service}"; ` +
         'real Publisher implementations land in T-16 (git repo modes: zenn/hugo/jekyll), ' +
-        'T-21 (qiita), T-22 (devto), and T-23〜T-25 (note/hatena) per tasks.md. T-14 wires the ' +
-        'sync flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
+        'T-21 (qiita), T-22 (devto), T-23 (hatena), and T-24〜T-25 (note) per tasks.md. T-14 ' +
+        'wires the sync flow itself (src/sync.ts) and is exercised with a mock Publisher in ' +
         'test/sync.test.ts, per design.md §5.7.',
     );
     this.name = 'PublisherNotImplementedError';
@@ -64,9 +66,9 @@ export interface CreatePublisherOptions {
 /**
  * `config.service` に対応する Publisher を生成する。Git モード(zenn/hugo/jekyll)は
  * `createGitRepoPublisher`(T-16)を、qiita は `createQiitaPublisher`(T-21)を、devto は
- * `createDevtoPublisher`(T-22)を返す(いずれも `options.logger` を渡す)。それ以外の
- * サービスは後続タスク(T-23〜T-25)待ちのため `PublisherNotImplementedError` を投げる
- * (上記 JSDoc 参照)。
+ * `createDevtoPublisher`(T-22)を、hatena は `createHatenaPublisher`(T-23)を返す
+ * (いずれも `options.logger` を渡す)。それ以外のサービス(note)は後続タスク
+ * (T-24〜T-25)待ちのため `PublisherNotImplementedError` を投げる(上記 JSDoc 参照)。
  */
 export function createPublisher(config: Config, options: CreatePublisherOptions = {}): Publisher {
   if (isGitModeService(config.service) && config.git !== undefined) {
@@ -77,6 +79,9 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
   }
   if (config.service === 'devto' && config.devto !== undefined) {
     return createDevtoPublisher({ config, logger: options.logger });
+  }
+  if (config.service === 'hatena' && config.hatena !== undefined) {
+    return createHatenaPublisher({ config, logger: options.logger });
   }
   throw new PublisherNotImplementedError(config.service);
 }
@@ -106,10 +111,14 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  *   frontmatter ファイルは書かないが、`title`/`tags` を含めたハッシュで冪等判定を成立させ、
  *   `bodyMarkdown`/`tags` を `RenderedArticle` の専用フィールドへ渡す(design.md §5.7
  *   DevtoPublisher 行)。
- * - それ以外(note/hatena): 後続タスク(T-23〜T-25)でサービス別 Renderer が揃うまでの
- *   暫定として `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す
- *   ——`runSync` 自身の既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と
- *   渡さない場合(test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
+ * - `hatena`: `renderHatenaArticle`(`src/publishers/hatena.ts`、T-23)——API モードのため
+ *   frontmatter ファイルは書かないが、`artifact` に AtomPub `<entry>` XML そのものを
+ *   持たせ、それを冪等判定のハッシュにも POST/PUT のリクエストボディにもそのまま使う
+ *   (design.md §5.7 HatenaPublisher 行)。
+ * - それ以外(note): 後続タスク(T-24〜T-25)でサービス別 Renderer が揃うまでの暫定として
+ *   `renderGenericArticle`(`src/publishers/render.ts`、T-14)を返す——`runSync` 自身の
+ *   既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と渡さない場合
+ *   (test/sync.test.ts 等の既存テスト)とで挙動が変わらない。
  */
 export function resolveRenderer(service: ServiceName): NoteRenderer {
   if (service === 'zenn') {
@@ -126,6 +135,9 @@ export function resolveRenderer(service: ServiceName): NoteRenderer {
   }
   if (service === 'devto') {
     return renderDevtoArticle;
+  }
+  if (service === 'hatena') {
+    return renderHatenaArticle;
   }
   return renderGenericArticle;
 }
