@@ -7,6 +7,7 @@ import { createS3UploaderClient } from './assets/uploader.js';
 import { ConfigValidationError, loadConfig } from './config.js';
 import { DoctorError, runDoctorChecks } from './doctor.js';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
+import { InitError, runInit } from './init.js';
 import { createLogger } from './logger.js';
 import {
   createPublisher,
@@ -16,8 +17,8 @@ import {
 import { resolveStatePath } from './state/derive.js';
 import { runSync } from './sync.js';
 
-/** 許可されたサブコマンド(design.md §5.1)。 */
-const SUBCOMMANDS = ['sync', 'doctor'] as const;
+/** 許可されたサブコマンド(design.md §5.1。`init` は T-29・issue #61 で追加)。 */
+const SUBCOMMANDS = ['sync', 'doctor', 'init'] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 function isSubcommand(value: string | undefined): value is Subcommand {
@@ -25,13 +26,16 @@ function isSubcommand(value: string | undefined): value is Subcommand {
 }
 
 const USAGE = [
-  'Usage: note2web <sync|doctor> --config <path>',
+  'Usage: note2web <sync|doctor|init> --config <path>',
   '',
   '  sync    Export, transform, and publish notes',
   '  doctor  Check dependencies, environment, and configuration only',
+  '  init    Interactively generate a configuration file and launchd files',
   '',
   'Options:',
-  '  --config <path>  Path to the configuration YAML file (required)',
+  '  --config <path>  Path to the configuration YAML file',
+  '                    (required for sync/doctor; optional for init, which',
+  '                    picks a default path from the selected service)',
 ].join('\n');
 
 /** `runCli` の結果。プロセスを直接終了させず、呼び出し側(main / テスト)が扱えるようにする。 */
@@ -71,6 +75,29 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     const message = error instanceof Error ? error.message : String(error);
     stderr.push(`note2web: failed to parse arguments: ${message}`);
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+  }
+
+  if (subcommand === 'init') {
+    // T-29(issue #61)。`init` は他の2サブコマンドと異なり `--config` が任意
+    // (サービス選択後に既定パス `~/.config/note2web/<service>.yaml` を決める)であり、
+    // 生成対象のファイルがまだ存在しない・スキーマを満たしていないのが通常のため
+    // `loadConfig` は意図的に呼ばない。対話プロンプト自体の出力は既定の `promptFn`
+    // (実 stdin/stdout の readline)を経由し、ここでバッファする `stdout`/`stderr` には
+    // 載らない——最終的な成功サマリのみが `stdout` へ積まれる。
+    try {
+      const result = await runInit({ configPath });
+      stdout.push(...result.summary);
+      return { exitCode: SUCCESS, stdout, stderr };
+    } catch (error) {
+      if (error instanceof InitError) {
+        // doctor と同じ整形規約(`note2web: <subcommand>: <message>`)。
+        for (const problem of error.problems) {
+          stderr.push(`note2web: init: ${problem.message}`);
+        }
+        return { exitCode: error.exitCode, stdout, stderr };
+      }
+      throw error;
+    }
   }
 
   if (configPath === undefined) {

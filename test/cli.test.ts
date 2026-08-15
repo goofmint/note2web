@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isMainEntry, runCli } from '../src/cli.js';
 import { DoctorError, runDoctorChecks } from '../src/doctor.js';
 import { PARTIAL_FAILURE, PRECONDITION_FAILURE, SUCCESS } from '../src/exit-codes.js';
+import { InitError, runInit } from '../src/init.js';
 
 /**
  * `doctor` の実チェック(host の ruby/git/gh 等の実在有無)は `src/doctor.test.ts` が
@@ -19,6 +20,22 @@ vi.mock('../src/doctor.js', async (importOriginal) => {
   return {
     ...actual,
     runDoctorChecks: vi.fn(),
+  };
+});
+
+/**
+ * `init` の対話収集・生成ロジック自体(プロンプトの流れ・生成物の中身)は
+ * `src/init.test.ts` の責務。ここ(CLI 統合テスト)では `runInit` 自体をモックし、
+ * `runCli` が「`--config` を省略可能なまま渡す配線 / 成功サマリを stdout へ積む配線 /
+ * `InitError.problems` を `note2web: init:` プレフィックス付きで stderr へ展開する配線」を
+ * 正しく行っているかだけを検証する(doctor と同じ理由: 実際の対話入力・ファイル書き込みに
+ * 依存すると CI 環境間でテスト結果がぶれるため)。
+ */
+vi.mock('../src/init.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/init.js')>();
+  return {
+    ...actual,
+    runInit: vi.fn(),
   };
 });
 
@@ -61,6 +78,7 @@ describe('runCli', () => {
       }
     }
     vi.mocked(runDoctorChecks).mockReset();
+    vi.mocked(runInit).mockReset();
   });
 
   it('exits 2 with usage on stderr when no subcommand is given', async () => {
@@ -170,6 +188,69 @@ describe('runCli', () => {
 
     expect(result.exitCode).toBe(PRECONDITION_FAILURE);
     expect(result.stderr.join('\n')).toContain('R2_SECRET_ACCESS_KEY');
+  });
+
+  describe('init (T-29, issue #61)', () => {
+    it('accepts "init" as a known subcommand (does not fall through to the usage error)', async () => {
+      vi.mocked(runInit).mockResolvedValueOnce({ summary: [] });
+
+      const result = await runCli(['init']);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr.join('\n')).not.toMatch(/usage/i);
+    });
+
+    it('runs without --config and pushes the returned summary lines to stdout on success', async () => {
+      vi.mocked(runInit).mockResolvedValueOnce({
+        summary: ['Wrote configuration to /home/tester/.config/note2web/zenn.yaml', 'done'],
+      });
+
+      const result = await runCli(['init']);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr).toHaveLength(0);
+      expect(result.stdout).toEqual([
+        'Wrote configuration to /home/tester/.config/note2web/zenn.yaml',
+        'done',
+      ]);
+      expect(runInit).toHaveBeenCalledExactlyOnceWith({ configPath: undefined });
+    });
+
+    it('passes a nonexistent --config path straight through to runInit without loadConfig-shaped errors', async () => {
+      const missingPath = join(dir, 'does-not-exist.yaml');
+      vi.mocked(runInit).mockResolvedValueOnce({ summary: ['ok'] });
+
+      const result = await runCli(['init', '--config', missingPath]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stdout).toEqual(['ok']);
+      expect(result.stderr).toHaveLength(0);
+      expect(runInit).toHaveBeenCalledExactlyOnceWith({ configPath: missingPath });
+    });
+
+    it('exits 2 and lists every problem on stderr with the "note2web: init:" prefix when runInit rejects with InitError', async () => {
+      vi.mocked(runInit).mockRejectedValueOnce(
+        new InitError([
+          { message: 'internal error: generated config failed schema validation: bad thing' },
+          { message: 'another problem' },
+        ]),
+      );
+
+      const result = await runCli(['init']);
+
+      expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+      expect(result.stdout).toHaveLength(0);
+      expect(result.stderr).toEqual([
+        'note2web: init: internal error: generated config failed schema validation: bad thing',
+        'note2web: init: another problem',
+      ]);
+    });
+
+    it('propagates unexpected (non-InitError) errors instead of swallowing them', async () => {
+      vi.mocked(runInit).mockRejectedValueOnce(new Error('boom'));
+
+      await expect(runCli(['init'])).rejects.toThrow('boom');
+    });
   });
 });
 
