@@ -97,6 +97,8 @@ export interface RunInitOptions {
   commandExistsFn?: (command: string) => Promise<boolean>;
   /** `@qiita/qiita-cli` がローカル解決できるかどうかの注入点(テスト用)。 */
   qiitaCliResolvableFn?: () => boolean;
+  /** note2web 自身のバージョン文字列を読む注入点(テスト用)。既定は `readPackageVersion`。 */
+  readPackageVersionFn?: () => string | undefined;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /** ホームディレクトリ(`~` 展開・既定パス算出の基準)。既定は `os.homedir()`。テストで実ホームを触らないための注入点。 */
@@ -164,14 +166,17 @@ async function askUrl(
   }
 }
 
-/** y/N の2択。空入力は `defaultValue` を採用する。 */
+/** `askYesNo` / `askChoice` が無効な入力を受け取り続けたときに諦めるまでの最大再試行回数。 */
+const MAX_PROMPT_RETRIES = 10;
+
+/** y/N の2択。空入力は `defaultValue` を採用する。無効な入力が続く場合は `InitError` を投げる。 */
 async function askYesNo(
   promptFn: InitPromptFn,
   question: string,
   defaultValue: boolean,
 ): Promise<boolean> {
   const suffix = defaultValue ? 'Y/n' : 'y/N';
-  for (;;) {
+  for (let attempt = 0; attempt < MAX_PROMPT_RETRIES; attempt++) {
     const answer = (await promptFn(`${question} [${suffix}]: `)).trim().toLowerCase();
     if (answer === '') {
       return defaultValue;
@@ -183,9 +188,10 @@ async function askYesNo(
       return false;
     }
   }
+  throw new InitError([{ message: `too many invalid answers to "${question}" (expected y/n)` }]);
 }
 
-/** 選択肢一覧から1つを選ばせる(番号入力・名前入力のどちらも許可)。 */
+/** 選択肢一覧から1つを選ばせる(番号入力・名前入力のどちらも許可)。無効な入力が続く場合は `InitError` を投げる。 */
 async function askChoice<T extends string>(
   promptFn: InitPromptFn,
   question: string,
@@ -193,9 +199,9 @@ async function askChoice<T extends string>(
   defaultValue: T | undefined,
 ): Promise<T> {
   const listing = choices.map((choice, index) => `  ${String(index + 1)}) ${choice}`).join('\n');
-  const defaultAnswer =
-    defaultValue !== undefined ? String(choices.indexOf(defaultValue) + 1) : undefined;
-  for (;;) {
+  const defaultIndex = defaultValue !== undefined ? choices.indexOf(defaultValue) : -1;
+  const defaultAnswer = defaultIndex >= 0 ? String(defaultIndex + 1) : undefined;
+  for (let attempt = 0; attempt < MAX_PROMPT_RETRIES; attempt++) {
     const answer = await ask(
       promptFn,
       `${question}\n${listing}\nEnter number or name`,
@@ -213,6 +219,11 @@ async function askChoice<T extends string>(
       return byName;
     }
   }
+  throw new InitError([
+    {
+      message: `too many invalid answers to "${question}" (expected one of: ${choices.join(', ')})`,
+    },
+  ]);
 }
 
 /** カンマ区切りの入力を、空要素を除いた配列へ変換する(`source.folders` 用)。 */
@@ -223,11 +234,45 @@ function parseCommaSeparated(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-/** readline を使った既定の `promptFn` を1つ作る。プロセスの実 stdin/stdout に対して対話する。 */
+/**
+ * readline を使った既定の `promptFn` を1つ作る。プロセスの実 stdin/stdout に対して対話する。
+ * stdin が EOF(パイプの終端など)に達して readline が閉じた場合、`rl.question` は
+ * reject するかそのまま解決しないため、`close` イベントを見て待機中の質問を
+ * `InitError` で reject し直し、`runInit` が無限に待ち続けないようにする。
+ */
 function createDefaultPromptFn(): { promptFn: InitPromptFn; close: () => void } {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let closed = false;
+  const eofError = (): InitError =>
+    new InitError([{ message: 'stdin closed (EOF) before init finished prompting' }]);
+  // readline/promises の `question` は、待機中にインターフェースが閉じても reject せず
+  // 保留のままになりうる。`close` イベントで reject する Promise と race させることで、
+  // EOF 到達時に待機中の質問も即座に `InitError` で失敗させる。
+  const closedDuringPrompt = new Promise<never>((_, reject) => {
+    rl.once('close', () => {
+      closed = true;
+      reject(eofError());
+    });
+  });
+  // race に参加しないタイミング(正常終了時の close())での unhandled rejection を防ぐ。
+  closedDuringPrompt.catch(() => {
+    // 意図的に無視。
+  });
   return {
-    promptFn: async (question) => (await rl.question(question)).trim(),
+    promptFn: async (question) => {
+      if (closed) {
+        throw eofError();
+      }
+      try {
+        const answer = await Promise.race([rl.question(question), closedDuringPrompt]);
+        return answer.trim();
+      } catch (error) {
+        if (closed) {
+          throw eofError();
+        }
+        throw error;
+      }
+    },
     close: () => {
       rl.close();
     },
@@ -282,15 +327,19 @@ function defaultQiitaCliResolvable(): boolean {
   }
 }
 
-/** note2web 自身の `package.json` から現在のバージョン文字列を読む(ラッパースクリプトの `npx --yes note2web@<version>` に埋め込む)。 */
-function readPackageVersion(): string {
+/**
+ * note2web 自身の `package.json` から現在のバージョン文字列を読む(ラッパースクリプトの
+ * `npx --yes note2web@<version>` に埋め込む)。読み取れない場合は `undefined` を返し、
+ * 呼び出し側でバージョン指定なし(unpinned)のラッパーへフォールバックする。
+ */
+function readPackageVersion(): string | undefined {
   try {
     const require = createRequire(import.meta.url);
     // `src/init.ts`(ビルド後は `dist/init.js`)から見て1つ上がプロジェクトルート。
     const pkg = require('../package.json') as { version?: unknown };
-    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+    return typeof pkg.version === 'string' ? pkg.version : undefined;
   } catch {
-    return '0.0.0';
+    return undefined;
   }
 }
 
@@ -390,11 +439,18 @@ async function collectAssets(
   promptFn: InitPromptFn,
   defaults: Record<string, unknown> | undefined,
 ): Promise<Config['assets']> {
+  const assetProviders = ['r2', 's3'] as const;
+  const existingProvider = stringField(defaults, 'provider');
+  const defaultProvider =
+    existingProvider !== undefined &&
+    (assetProviders as readonly string[]).includes(existingProvider)
+      ? (existingProvider as 'r2' | 's3')
+      : 'r2';
   const provider = await askChoice(
     promptFn,
     'Asset storage provider (image/attachment uploads)',
-    ['r2', 's3'] as const,
-    (stringField(defaults, 'provider') as 'r2' | 's3' | undefined) ?? 'r2',
+    assetProviders,
+    defaultProvider,
   );
   const bucket = await askRequired(promptFn, 'Bucket name', stringField(defaults, 'bucket'));
   const endpoint = await askUrl(
@@ -668,7 +724,9 @@ async function ensureEnvFile(
 
   const existingContent = await readFileFn(envPath);
   const existingNames = new Set(
-    [...existingContent.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)=/gm)].map((match) => match[1]),
+    [...existingContent.matchAll(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm)].map(
+      (match) => match[1],
+    ),
   );
   const missingNames = requiredNames.filter((name) => !existingNames.has(name));
   if (missingNames.length > 0) {
@@ -681,8 +739,13 @@ async function ensureEnvFile(
   return { created: false, addedNames: missingNames };
 }
 
-/** README「cron / launchd での定期実行」節と同一の形の起動ラッパースクリプト。 */
-function buildWrapperScript(version: string): string {
+/**
+ * README「cron / launchd での定期実行」節と同一の形の起動ラッパースクリプト。
+ * `version` が取得できなかった場合(`readPackageVersion` が `undefined` を返した場合)は
+ * `@<version>` のピン留めを省略し、`npx --yes note2web`(unpinned)を使う。
+ */
+function buildWrapperScript(version: string | undefined): string {
+  const pinnedPackage = version !== undefined ? `note2web@${version}` : 'note2web';
   return (
     '#!/bin/sh\n' +
     '# ~/bin/note2web-sync.sh(chmod 700 で保護)\n' +
@@ -698,7 +761,7 @@ function buildWrapperScript(version: string): string {
     '  echo "note2web-sync.sh: npx not found (set NOTE2WEB_NPX in ~/.config/note2web/env)" >&2\n' +
     '  exit 2\n' +
     'fi\n' +
-    `exec "$NPX" --yes note2web@${version} sync --config "$1"\n`
+    `exec "$NPX" --yes ${pinnedPackage} sync --config "$1"\n`
   );
 }
 
@@ -708,7 +771,7 @@ function buildWrapperScript(version: string): string {
  */
 async function ensureWrapperScript(
   wrapperPath: string,
-  version: string,
+  version: string | undefined,
   promptFn: InitPromptFn,
   options: {
     fileExistsFn: (path: string) => Promise<boolean>;
@@ -737,7 +800,21 @@ async function ensureWrapperScript(
   return { written: true };
 }
 
-/** README「launchd の例」節と同一の形の plist(CORRECTION A: `EnvironmentVariables` は決して含めない)。 */
+/** XML の特殊文字をエスケープする(plist に埋め込むパス等が `&`/`<`/`>`/`"`/`'` を含み得るため)。 */
+function escapeXml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+/**
+ * README「launchd の例」節と同一の形の plist(CORRECTION A: `EnvironmentVariables` は決して含めない)。
+ * ホームディレクトリや設定パスに `&` 等の XML 特殊文字が含まれていても壊れた plist を
+ * 生成しないよう、すべての埋め込み値を `escapeXml` で通す。
+ */
 function buildPlist(options: {
   label: string;
   wrapperPath: string;
@@ -753,18 +830,18 @@ function buildPlist(options: {
     '<plist version="1.0">\n' +
     '<dict>\n' +
     '  <key>Label</key>\n' +
-    `  <string>${label}</string>\n` +
+    `  <string>${escapeXml(label)}</string>\n` +
     '  <key>ProgramArguments</key>\n' +
     '  <array>\n' +
-    `    <string>${wrapperPath}</string>\n` +
-    `    <string>${configPath}</string>\n` +
+    `    <string>${escapeXml(wrapperPath)}</string>\n` +
+    `    <string>${escapeXml(configPath)}</string>\n` +
     '  </array>\n' +
     '  <key>StartInterval</key>\n' +
     `  <integer>${String(startInterval)}</integer>\n` +
     '  <key>StandardOutPath</key>\n' +
-    `  <string>${stdoutLogPath}</string>\n` +
+    `  <string>${escapeXml(stdoutLogPath)}</string>\n` +
     '  <key>StandardErrorPath</key>\n' +
-    `  <string>${stderrLogPath}</string>\n` +
+    `  <string>${escapeXml(stderrLogPath)}</string>\n` +
     '</dict>\n' +
     '</plist>\n'
   );
@@ -787,6 +864,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     chmodFn = defaultChmod,
     commandExistsFn = commandExists,
     qiitaCliResolvableFn = defaultQiitaCliResolvable,
+    readPackageVersionFn = readPackageVersion,
     env = process.env,
     homeDir = homedir(),
   } = options;
@@ -946,7 +1024,14 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       }
 
       const wrapperPath = join(homeDir, 'bin', 'note2web-sync.sh');
-      const version = readPackageVersion();
+      const version = readPackageVersionFn();
+      if (version === undefined) {
+        summary.push(
+          'Warning: could not determine the note2web package version; ' +
+            'the generated wrapper script will run unpinned "npx --yes note2web" ' +
+            'instead of a version-pinned "note2web@<version>".',
+        );
+      }
       const wrapperResult = await ensureWrapperScript(wrapperPath, version, ask_, {
         fileExistsFn,
         writeFileFn,
@@ -955,7 +1040,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       });
       summary.push(
         wrapperResult.written
-          ? `Wrote wrapper script: ${wrapperPath} (chmod 700, note2web@${version})`
+          ? `Wrote wrapper script: ${wrapperPath} (chmod 700, ${version !== undefined ? `note2web@${version}` : 'note2web (unpinned)'})`
           : `Kept existing wrapper script unchanged: ${wrapperPath}`,
       );
 

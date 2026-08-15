@@ -293,6 +293,85 @@ describe('runInit', () => {
     expect(git.auto_merge).toBe(true);
   });
 
+  it('falls back to the r2 default when an existing config has an unknown assets provider', async () => {
+    const existingYaml = [
+      'service: zenn',
+      'source:',
+      '  folders: [tech]',
+      'assets:',
+      '  provider: gcs',
+      '  bucket: blog-assets',
+      '  endpoint: https://example-account.r2.cloudflarestorage.com',
+      '  public_base_url: https://assets.example.com/notes/',
+      '  access_key_id_env: R2_ACCESS_KEY_ID',
+      '  secret_access_key_env: R2_SECRET_ACCESS_KEY',
+      'git:',
+      '  repo_path: ~/src/zenn-content',
+      '  output_dir: articles',
+      '',
+    ].join('\n');
+    const targetPath = `${HOME_DIR}/.config/note2web/zenn.yaml`;
+    const fs = createFakeFs({ [targetPath]: existingYaml });
+
+    // 既存設定の provider が不正('gcs')でも askChoice の既定値としては採用されず、
+    // 空回答で r2 が選ばれる(不正値をそのまま提示すると選択不能な既定になるため)。
+    const promptFn = makePromptFn({}, '');
+
+    await runInit(
+      buildOptions({
+        configPath: targetPath,
+        promptFn,
+        fileExistsFn: fs.fileExistsFn,
+        readFileFn: fs.readFileFn,
+        writeFileFn: fs.writeFileFn,
+      }),
+    );
+
+    const parsed = parseYaml(fs.files.get(targetPath) ?? '') as Record<string, unknown>;
+    const assets = parsed.assets as Record<string, unknown>;
+    expect(assets.provider).toBe('r2');
+  });
+
+  it('offers no default (instead of an unusable one) when an existing config has an unknown service', async () => {
+    const existingYaml = ['service: bogus-service', 'source:', '  folders: [tech]', ''].join('\n');
+    const targetPath = `${HOME_DIR}/.config/note2web/zenn.yaml`;
+    const fs = createFakeFs({ [targetPath]: existingYaml });
+
+    // 既定値が提示されないため、空回答を返し続けるとサービス選択が確定できず、
+    // 再試行上限に達して InitError になる(不正な既存値が既定として採用されない証明)。
+    const promptFn = makePromptFn({}, '');
+
+    await expect(
+      runInit(
+        buildOptions({
+          configPath: targetPath,
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+        }),
+      ),
+    ).rejects.toThrow(InitError);
+  });
+
+  it('throws InitError instead of looping forever when invalid answers keep coming', async () => {
+    // すべての質問に無効な回答を返し続ける: 最初のサービス選択(askChoice)が
+    // 再試行上限に達した時点で InitError になる。
+    const promptFn = makePromptFn({}, 'not-a-valid-choice');
+    const fs = createFakeFs();
+
+    await expect(
+      runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+        }),
+      ),
+    ).rejects.toThrow(/too many invalid answers/);
+  });
+
   it('warns (but does not fail) about missing dependencies instead of throwing', async () => {
     const promptFn = makePromptFn(SERVICE_ANSWERS.zenn);
     const fs = createFakeFs();
@@ -381,23 +460,11 @@ describe('runInit', () => {
       return fs.readFileFn(path);
     };
 
-    await expect(
-      runInit(
-        buildOptions({
-          configPath,
-          promptFn,
-          fileExistsFn: fs.fileExistsFn,
-          readFileFn,
-          writeFileFn: fs.writeFileFn,
-        }),
-      ),
-    ).rejects.toThrow(InitError);
-
     try {
       await runInit(
         buildOptions({
           configPath,
-          promptFn: makePromptFn(SERVICE_ANSWERS.zenn),
+          promptFn,
           fileExistsFn: fs.fileExistsFn,
           readFileFn,
           writeFileFn: fs.writeFileFn,
@@ -539,6 +606,55 @@ describe('runInit', () => {
       );
 
       expect(fs.files.get(wrapperPath)).toContain('exec "$NPX"');
+    });
+
+    it('XML-escapes paths containing special characters in the generated plist', async () => {
+      const configPath = `${HOME_DIR}/cfg & <dir>/zenn.yaml`;
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      await runInit(
+        buildOptions({
+          configPath,
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          env: {},
+        }),
+      );
+
+      const plistContent =
+        fs.files.get(`${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`) ?? '';
+      expect(plistContent).toContain(
+        '<string>/home/tester/cfg &amp; &lt;dir&gt;/zenn.yaml</string>',
+      );
+      // エスケープ前の生の値が plist を壊す形で残っていないこと。
+      expect(plistContent).not.toContain('cfg & <dir>');
+    });
+
+    it('generates an unpinned wrapper with a warning when the package version cannot be determined', async () => {
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const result = await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          readPackageVersionFn: () => undefined,
+          env: {},
+        }),
+      );
+
+      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
+      // バージョン不明時は `note2web@0.0.0` のような偽ピンではなく、ピンなしで生成する。
+      expect(wrapperContent).toContain('exec "$NPX" --yes note2web sync --config "$1"');
+      expect(wrapperContent).not.toContain('note2web@');
+      expect(result.summary.join('\n')).toMatch(/could not determine the note2web package version/);
     });
 
     it('skips launchd file generation entirely when declined (the default)', async () => {
