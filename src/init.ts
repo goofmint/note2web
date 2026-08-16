@@ -739,7 +739,14 @@ async function ensureEnvFile(
   if (!exists) {
     const header =
       '# note2web 環境変数ファイル(chmod 600 で保護)。\n' +
-      '# 設定 YAML の *_env が指す名前で、値を直接ここに記入してください(YAML には書きません)。\n\n';
+      '# 設定 YAML の *_env が指す名前で、値を直接ここに記入してください(YAML には書きません)。\n' +
+      '#\n' +
+      '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、\n' +
+      '# launchd の最小限の PATH では apple_cloud_notes_parser の起動(bundle exec ruby)に\n' +
+      '# 失敗することがあります。必要に応じて以下のような変数をここへ追記してください:\n' +
+      '#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}\n' +
+      '#   GEM_HOME=$HOME/.gem\n' +
+      '#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile\n\n';
     const body = requiredNames.map((name) => envFileLine(name)).join('\n');
     await writeFileFn(envPath, `${header}${body}`, { mode: 0o600 });
     await chmodFn(envPath, 0o600);
@@ -797,7 +804,9 @@ function buildWrapperScript(cliEntrypoint: string | undefined): string {
     'set -a\n' +
     '. "$HOME/.config/note2web/env"\n' +
     'set +a\n' +
-    '# cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う\n' +
+    '# cron / launchd の PATH は最小構成のため、一般的な Node.js / Ruby(bundle 含む)の\n' +
+    '# bin ディレクトリを補う(rbenv/rvm/Homebrew-ruby を使う場合は env ファイル側で PATH を\n' +
+    '# さらに拡張してください。バージョンマネージャの shim をここで自動追加はしません)\n' +
     'PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' +
     'NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"\n' +
     'CLI="${NOTE2WEB_CLI:-}"\n' +

@@ -177,10 +177,16 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
       clearTimeoutTimer();
 
       if (result.status === 'failure' && logger !== undefined) {
+        // コマンドライン(command / args)は API トークン等の秘匿情報を含みうるため
+        // ログには出さない(FR-30)。一方、stdout/stderr の先頭1行(issue #67:
+        // launchd 環境での原因調査を可能にするため)は診断に有用なので含める——
+        // 各呼び出し元の argv には秘匿情報を含まない設計(FR-30 は「コマンドラインに
+        // 秘匿情報を含めない」規約であり、出力内容の秘匿性はこの規約の対象外)。
+        const outputSummary = firstNonEmptyLine(result.stderr) ?? firstNonEmptyLine(result.stdout);
         logger.warn({
-          // コマンドライン(command / args)は API トークン等の秘匿情報を含みうるため
-          // ログには出さない(FR-30)。分類と終了状態のみを記録する。
-          message: `subprocess failed (${result.classification}): exitCode=${String(result.exitCode)}, signal=${String(result.signal)}`,
+          message:
+            `subprocess failed (${result.classification}): exitCode=${String(result.exitCode)}, signal=${String(result.signal)}` +
+            (outputSummary !== undefined ? `, output: ${outputSummary}` : ''),
         });
       }
 
@@ -240,6 +246,19 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
       }
     });
   });
+}
+
+/**
+ * サブプロセスの stdout/stderr から、エラーメッセージ用に先頭の意味のある1行を取り出す。
+ * `src/publishers/git-repo.ts` / `src/publishers/note.ts` / `src/publishers/qiita.ts` に
+ * 個別に複製されていたローカル実装(挙動は同一)を、issue #67(CodeRabbit プラン)で
+ * ここへ集約した。`src/exporter/apple-notes.ts` の `ExportError` メッセージ組み立てにも使う。
+ */
+export function firstNonEmptyLine(text: string): string | undefined {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
 }
 
 /**

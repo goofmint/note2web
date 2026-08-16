@@ -168,6 +168,25 @@ describe('runSubprocess', () => {
     expect(payload.message).toContain('exit_code');
   });
 
+  it('includes a one-line stderr/stdout output summary in the failure warn log (issue #67)', async () => {
+    const warn = vi.fn();
+
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('fail-with-output.js')],
+      timeoutMs: 2000,
+      logger: { warn },
+    });
+
+    expect(result.status).toBe('failure');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [payload] = warn.mock.calls[0] as [{ message: string }];
+    // 出力の先頭意味のある1行(ここでは stderr の "hello from stderr")が含まれる。
+    // コマンドライン(command/args)自体は含めない(FR-30)。
+    expect(payload.message).toContain('output: hello from stderr');
+    expect(payload.message).not.toContain(fixture('fail-with-output.js'));
+  });
+
   it('does not call the logger on success', async () => {
     const warn = vi.fn();
 

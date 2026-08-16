@@ -32,6 +32,11 @@ const exporterSchema = z
   .object({
     parser_path: z.string().min(1).optional(),
     notes_container: z.string().min(1).optional(),
+    // apple_cloud_notes_parser の起動方法(issue #67)。既定(未指定時)は 'bundle' —
+    // `bundle exec ruby notes_cloud_ripper.rb ...` として実行する(実装は
+    // `src/exporter/apple-notes.ts` の `runExport`)。'ruby' は Bundler を経由しない
+    // 旧来の直接起動(gem 環境が PATH/GEM_HOME 等で既に解決できている場合の代替)。
+    launcher: z.enum(['bundle', 'ruby']).optional(),
   })
   .strict();
 

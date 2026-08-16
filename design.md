@@ -85,7 +85,7 @@ note2web doctor --config <path>   # 依存 CLI・環境変数・権限の事前�
 
 `apple_cloud_notes_parser` をサブプロセスで実行し、一時ディレクトリに出力させる。
 
-- 実行例: `ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o <tmpdir> --individual-files --uuid`
+- 実行例(既定): `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o <tmpdir> --individual-files --uuid`(`cwd: parser_path`)。launchd の最小限の `PATH`/`GEM_HOME` では素の `ruby` だけでは Gemfile の gem(`sqlite3`/`nokogiri` 等)が解決できず `LoadError` になりがちなため、`bundle exec` を既定の起動方法とする(issue #67)。`exporter.launcher: ruby` を指定すると `bundle exec` を挟まない `ruby notes_cloud_ripper.rb ...` へフォールバックできる
 - parser のインストール先パスと Notes コンテナパスは設定 YAML の `exporter` 項目で指定(既定値あり、§8)
 - **HTML と UUID の対応規約**: `--individual-files` でノートごとの個別 HTML を出力させ、`--uuid` でファイル名・出力内の識別子を `ZIDENTIFIER`(UUID)にする。JSON 側の UUID から個別 HTML の相対パスを一意に解決できることを本文取得の前提とし、対応する HTML が見つからないノートはそのノートのみ failed 扱いにする。オプション名・出力パス形式は parser の更新で変わり得るため、複数ノートを含む fixture の結合テストで検証する(§12)
   - **具体的な対応規則(パーサのソース `lib/AppleNoteStore.rb` `write_individual_html` / `lib/AppleNote.rb` `title_as_filename` / `lib/AppleNotesFolder.rb` `to_path` を確認して確定。§13-7 と同一の確認方法)**: 出力ディレクトリは `<出力先>/html/note_store<N>/` を起点とし、その配下に `<アカウント名>-<ルートフォルダ名>/`(ルートフォルダ)→ 子フォルダはアカウント名を繰り返さずそのまま入れ子(`<親フォルダのパス>/<子フォルダ名>/`)という階層が並ぶ。各フォルダディレクトリの直下に、そのフォルダに属するノートの個別 HTML `<UUID> - <サニタイズ済みタイトル>.html` が置かれる(`file_title` は `title.tr('[\\/*"<>?|:]\'', '_')` でサニタイズ)。この「フォルダ名を辿ってノートファイルを探す」経路は JSON 側にも `folder_key` / `folder` として同じフォルダ情報があるため、**JSON の `folders` 階層(`parent_folder_id` / `child_folders`)から対象フォルダの `<アカウント名>-...` パスを再構築し、そのディレクトリ内で `<uuid> - *.html` を UUID 前方一致で探す**、という解決手順を NoteReader の実装規約とする(タイトルのサニタイズ結果を NoteReader 側で再現する必要がないようにするため)。ただし、ディレクトリ名にはアカウント名・フォルダ名そのままではなく **parser の `clean_name`(`name.tr('/:\\', '_')`。`lib/AppleNotesAccount.rb` / `lib/AppleNotesFolder.rb`)による置換後の名前**が使われるため、パス再構築時は JSON の未変換の名前に対して同じ置換(`/`・`:`・`\` → `_`)を適用すること(記号を含むフォルダ名の例は fixture の `Dev/Ops: Log` → `Sample Notes-Dev_Ops_ Log/` を参照)
@@ -265,7 +265,7 @@ sync:
 
 | service | 必須依存(共通分を除く) |
 |---|---|
-| 共通 | `ruby` + `apple_cloud_notes_parser`、R2 / S3 の認証環境変数 |
+| 共通 | `ruby`(>= 3.0)+ `apple_cloud_notes_parser`、R2 / S3 の認証環境変数。`exporter.launcher`(既定 `bundle`)が `bundle` のときは加えて `bundle` コマンドと `bundle check` による gem 準備状況(issue #67) |
 | zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
 | qiita | Node.js(qiita-cli の要求 engine >= 20)、`@qiita/qiita-cli`(note2web の `dependencies` に固定バージョンで追加し、`npx --no-install` で解決。§5.7。**現時点では未導入・依存チェック未実装 = T-21 で実装する契約**)、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
 | devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |
@@ -290,6 +290,7 @@ source:
 exporter:
   parser_path: ~/tools/apple_cloud_notes_parser   # clone 先
   notes_container: ~/Library/Group Containers/group.com.apple.notes  # 既定値
+  launcher: bundle             # bundle | ruby（既定 bundle。bundle exec ruby で起動。issue #67）
 state_file: ./zenn.state.json  # 省略時: <設定ファイル名>.state.json
 log:
   file: ~/Library/Logs/note2web/zenn.log   # 省略可。標準出力へは常に出す

@@ -92,7 +92,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
-import { DEFAULT_TIMEOUTS, runSubprocess } from '../subprocess.js';
+import { DEFAULT_TIMEOUTS, firstNonEmptyLine, runSubprocess } from '../subprocess.js';
 import type { RunSubprocessOptions, RunSubprocessResult } from '../subprocess.js';
 import type { NoteState } from '../state/store.js';
 import type { RenderNoteInput, NoteRenderer } from './render.js';
@@ -233,14 +233,6 @@ function requireNoteConfig(config: Config): NoteConfig {
 function isPathWithinRoot(root: string, absolutePath: string): boolean {
   const rel = relative(root, absolutePath);
   return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-}
-
-/** サブプロセスの stdout/stderr から、エラーメッセージ用に先頭の意味のある1行を取り出す。 */
-function firstNonEmptyLine(text: string): string | undefined {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
 }
 
 /**

@@ -82,6 +82,14 @@ export interface RunDoctorOptions {
   env?: NodeJS.ProcessEnv;
   /** サブプロセス実行の注入点(`gh auth status` / `gh repo view` に使う)。既定は本物の `runSubprocess`。 */
   runSubprocessFn?: (options: RunSubprocessOptions) => Promise<RunSubprocessResult>;
+  /**
+   * `checkDependencies`(T-14)がそのまま使う、`ruby -v` / `bundle check` 用の
+   * サブプロセス実行の注入点(issue #67)。`gh auth status`/`gh repo view` 用の
+   * `runSubprocessFn` とは呼び出し対象が異なるため別の注入点として分ける
+   * (呼び出し回数のテストがそれぞれ独立して検証できるようにするため)。既定は
+   * 本物の `runSubprocess`。
+   */
+  dependencyRunSubprocessFn?: (options: RunSubprocessOptions) => Promise<RunSubprocessResult>;
 }
 
 /**
@@ -99,11 +107,16 @@ export async function runDoctorChecks(
     fileExistsFn,
     env = process.env,
     runSubprocessFn = runSubprocess,
+    dependencyRunSubprocessFn = runSubprocess,
   } = options;
 
   const problems: DependencyProblem[] = [];
 
-  const dependencyOptions: CheckDependenciesOptions = { commandExistsFn, env };
+  const dependencyOptions: CheckDependenciesOptions = {
+    commandExistsFn,
+    env,
+    runSubprocessFn: dependencyRunSubprocessFn,
+  };
   if (fileExistsFn !== undefined) {
     dependencyOptions.fileExistsFn = fileExistsFn;
   }

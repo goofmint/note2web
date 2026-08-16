@@ -100,7 +100,7 @@ describe('exportAppleNotes', () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it('sends the documented parser command shape and timeout to the runner', async () => {
+  it('sends the documented parser command shape (bundle exec ruby, the default launcher) and timeout to the runner', async () => {
     const { runner, calls } = makeFixtureRunner();
 
     const result = await exportAppleNotes({
@@ -118,8 +118,10 @@ describe('exportAppleNotes', () => {
     expect(calls).toHaveLength(1);
     const call = calls[0];
     expect(call).toBeDefined();
-    expect(call?.command).toBe('ruby');
+    expect(call?.command).toBe('bundle');
     expect(call?.args).toEqual([
+      'exec',
+      'ruby',
       'notes_cloud_ripper.rb',
       '-m',
       '/mnt/notes-container',
@@ -131,6 +133,37 @@ describe('exportAppleNotes', () => {
     expect(call?.cwd).toBe('/opt/apple_cloud_notes_parser');
     expect(call?.timeoutMs).toBe(DEFAULT_TIMEOUTS.parser);
     expect(result.exportDir).toBe(workDir);
+  });
+
+  it('falls back to a plain "ruby" launch when exporter.launcher is "ruby"', async () => {
+    const { runner, calls } = makeFixtureRunner();
+
+    await exportAppleNotes({
+      config: buildConfig({
+        source: { folders: ['Tech'] },
+        exporter: {
+          parser_path: '/opt/apple_cloud_notes_parser',
+          notes_container: '/mnt/notes-container',
+          launcher: 'ruby',
+        },
+      }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0];
+    expect(call?.command).toBe('ruby');
+    expect(call?.args).toEqual([
+      'notes_cloud_ripper.rb',
+      '-m',
+      '/mnt/notes-container',
+      '-o',
+      workDir,
+      '--individual-files',
+      '--uuid',
+    ]);
+    expect(call?.cwd).toBe('/opt/apple_cloud_notes_parser');
   });
 
   it('expands leading ~ and uses design.md §7 defaults when the exporter block is omitted', async () => {
@@ -301,14 +334,14 @@ describe('exportAppleNotes', () => {
     expect(logger.exportDone).toHaveBeenCalledWith({ noteCount: 3 });
   });
 
-  it('throws a typed ExportError with the subprocess failure classification', async () => {
+  it('throws a typed ExportError with the subprocess failure classification and the stderr first line (issue #67)', async () => {
     const runner: SubprocessRunner = async () => ({
       status: 'failure',
       classification: 'exit_code',
       exitCode: 1,
       signal: null,
       stdout: '',
-      stderr: 'boom',
+      stderr: 'boom\ncannot load such file -- sqlite3 (LoadError)',
     });
 
     const promise = exportAppleNotes({
@@ -319,6 +352,12 @@ describe('exportAppleNotes', () => {
 
     await expect(promise).rejects.toBeInstanceOf(ExportError);
     await expect(promise).rejects.toMatchObject({ classification: 'exit_code' });
+    // stderr の先頭意味のある1行(issue #67: launchd 環境での原因調査のため)と、
+    // parser のプロジェクト名・スクリプト名の両方がメッセージに含まれること。
+    await expect(promise).rejects.toThrow(/boom/);
+    await expect(promise).rejects.toThrow(
+      /apple_cloud_notes_parser \(notes_cloud_ripper\.rb\) failed/,
+    );
   });
 
   it('cleans up the temporary export directory when the run fails (runner failure)', async () => {

@@ -527,6 +527,13 @@ describe('runInit', () => {
       expect(result.summary.join('\n')).not.toContain('NOTE2WEB_NODE');
       expect(result.summary.join('\n')).not.toContain('NOTE2WEB_CLI');
 
+      // 新規作成した env ファイルには Ruby 環境のヒント(コメント行のみ、issue #67)を
+      // 含める。実際の変数として要求(必須/任意いずれの一覧にも)されるわけではない。
+      expect(envContent).toContain('# [Ruby 環境のヒント]');
+      expect(envContent).toContain('PATH=/opt/homebrew/opt/ruby/bin');
+      expect(envContent).toContain('GEM_HOME=');
+      expect(envContent).toContain('BUNDLE_GEMFILE=');
+
       const wrapperContent = fs.files.get(wrapperPath) ?? '';
       expect(wrapperContent).toContain('#!/bin/sh');
       expect(wrapperContent).toContain('set -a');
@@ -600,6 +607,9 @@ describe('runInit', () => {
       const envContent = fs.files.get(envPath) ?? '';
       expect(envContent).toContain('GH_TOKEN=already-set-do-not-touch');
       expect(envContent).toContain('R2_ACCESS_KEY_ID=');
+      // 既存ファイルへの追記は実在する変数名の行のみ(issue #67 の Ruby ヒントコメントは
+      // 新規作成テンプレートにのみ含め、追記対象には含めない)。
+      expect(envContent).not.toContain('# [Ruby 環境のヒント]');
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
     });
 
