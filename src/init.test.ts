@@ -29,8 +29,16 @@ function makePromptFn(
   });
 }
 
-/** インメモリのフェイクファイルシステム。`runInit` が実ホームディレクトリへ触れないようにする。 */
-function createFakeFs(initialFiles: Record<string, string> = {}): {
+/**
+ * インメモリのフェイクファイルシステム。`runInit` が実ホームディレクトリへ触れないようにする。
+ * `initialDirs` は「存在するディレクトリ」を模擬する追加のパス集合(`fileExistsFn` が
+ * `true` を返す)——rbenv 等の shim ディレクトリの有無をテストするために使う
+ * (ディレクトリはファイルとして書き込まれないため、`files` とは別に保持する)。
+ */
+function createFakeFs(
+  initialFiles: Record<string, string> = {},
+  initialDirs: readonly string[] = [],
+): {
   files: Map<string, string>;
   modes: Map<string, number>;
   fileExistsFn: (path: string) => Promise<boolean>;
@@ -40,11 +48,12 @@ function createFakeFs(initialFiles: Record<string, string> = {}): {
   chmodFn: (path: string, mode: number) => Promise<void>;
 } {
   const files = new Map(Object.entries(initialFiles));
+  const dirs = new Set(initialDirs);
   const modes = new Map<string, number>();
   return {
     files,
     modes,
-    fileExistsFn: (path) => Promise.resolve(files.has(path)),
+    fileExistsFn: (path) => Promise.resolve(files.has(path) || dirs.has(path)),
     readFileFn: (path) => {
       const content = files.get(path);
       if (content === undefined) {
@@ -68,6 +77,7 @@ function createFakeFs(initialFiles: Record<string, string> = {}): {
 }
 
 const HOME_DIR = '/home/tester';
+const FAKE_NODE_EXEC_PATH = '/fake/node/bin/node';
 
 /** `runInit` に渡す既定オプション。個々のテストが必要な項目だけ上書きする。 */
 function buildOptions(
@@ -83,6 +93,7 @@ function buildOptions(
     commandExistsFn: () => Promise.resolve(true),
     qiitaCliResolvableFn: () => true,
     resolveCliEntrypointFn: () => '/fake/install/dist/cli.js',
+    nodeExecPathFn: () => FAKE_NODE_EXEC_PATH,
     env: {},
     homeDir: HOME_DIR,
     ...overrides,
@@ -488,7 +499,7 @@ describe('runInit', () => {
       'Generate the launchd': 'y',
     };
 
-    it('creates the env file template (chmod 600), wrapper script (chmod 700), and plist with no secrets', async () => {
+    it('creates the env file template (chmod 600) and a plist that runs node directly with a PATH-only EnvironmentVariables', async () => {
       const promptFn = makePromptFn(LAUNCHD_ANSWERS);
       const fs = createFakeFs();
       const result = await runInit(
@@ -504,74 +515,88 @@ describe('runInit', () => {
       );
 
       const envPath = `${HOME_DIR}/.config/note2web/env`;
-      const wrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
+      const oldWrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
       const plistPath = `${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`;
       const expectedConfigPath = `${HOME_DIR}/.config/note2web/zenn.yaml`;
 
       expect(fs.modes.get(envPath)).toBe(0o600);
-      expect(fs.modes.get(wrapperPath)).toBe(0o700);
+      // ラッパースクリプトはもう生成しない(issue #71)。
+      expect(fs.files.has(oldWrapperPath)).toBe(false);
 
       const envContent = fs.files.get(envPath) ?? '';
       expect(envContent).toContain('GH_TOKEN=');
       expect(envContent).toContain('R2_ACCESS_KEY_ID=');
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
-      // node / CLI パスの任意上書き変数名もテンプレートに含める(値は空欄)。npx は使わない。
-      expect(envContent).toContain('NOTE2WEB_NODE=');
-      expect(envContent).toContain('NOTE2WEB_CLI=');
-      expect(envContent).not.toContain('NOTE2WEB_NPX');
+      // node / CLI パスの任意上書き変数名(NOTE2WEB_NODE / NOTE2WEB_CLI)はラッパー廃止に伴い
+      // テンプレートから消える。
+      expect(envContent).not.toContain('NOTE2WEB_NODE');
+      expect(envContent).not.toContain('NOTE2WEB_CLI');
       // 値は常に空欄(秘匿値を絶対に書かない)。
       expect(envContent).not.toMatch(/GH_TOKEN=\S/);
 
-      // NOTE2WEB_NODE / NOTE2WEB_CLI は任意の上書きであり、未設定でも sync をブロックしない
-      // ため、「必要な変数」一覧や環境変数の警告には出てこない。
-      expect(result.summary.join('\n')).not.toContain('NOTE2WEB_NODE');
-      expect(result.summary.join('\n')).not.toContain('NOTE2WEB_CLI');
-
       // 新規作成した env ファイルには Ruby 環境のヒント(コメント行のみ、issue #67)を
-      // 含める。実際の変数として要求(必須/任意いずれの一覧にも)されるわけではない。
-      expect(envContent).toContain(
-        '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、',
-      );
-      expect(envContent).toContain(
-        '# launchd の最小限の PATH では apple_cloud_notes_parser の起動(bundle exec ruby)に',
-      );
-      expect(envContent).toContain(
-        '# 失敗することがあります。必要に応じて以下のような変数をここへ追記してください:',
-      );
-      expect(envContent).toContain('#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
-      expect(envContent).toContain('#   GEM_HOME=$HOME/.gem');
-      expect(envContent).toContain('#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile');
-
-      const wrapperContent = fs.files.get(wrapperPath) ?? '';
-      expect(wrapperContent).toContain('#!/bin/sh');
-      expect(wrapperContent).toContain('set -a');
-      expect(wrapperContent).toContain('. "$HOME/.config/note2web/env"');
-      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
-      expect(wrapperContent).toContain('  CLI="/fake/install/dist/cli.js"');
-      expect(wrapperContent).toContain('exec "$NODE" "$CLI" sync --config "$1"');
-      expect(wrapperContent).not.toContain('npx');
+      // 含める。launchd 実行時の PATH は plist 側に自動的に埋め込まれる点に言及している。
+      expect(envContent).toContain('[Ruby 環境のヒント](issue #67)');
+      expect(envContent).toContain('issue #71');
+      expect(envContent).toContain('PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
+      expect(envContent).toContain('GEM_HOME=$HOME/.gem');
+      expect(envContent).toContain('BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile');
 
       const plistContent = fs.files.get(plistPath) ?? '';
-      expect(plistContent).not.toContain('EnvironmentVariables');
       expect(plistContent).toContain('<key>Label</key>');
       expect(plistContent).toContain('<string>com.note2web.zenn</string>');
-      expect(plistContent).toContain(`<string>${wrapperPath}</string>`);
       expect(plistContent).toContain('<key>StartInterval</key>');
       expect(plistContent).toContain('<integer>1800</integer>');
       expect(plistContent).toContain('<key>StandardOutPath</key>');
       expect(plistContent).toContain('<key>StandardErrorPath</key>');
-      // env の値そのものは plist のどこにも出現しない。
+
+      // ProgramArguments: [node実体, cli.js, 'sync', '--config', configPath] のこの順。
+      const programArgumentsOrder = [
+        `<string>${FAKE_NODE_EXEC_PATH}</string>`,
+        '<string>/fake/install/dist/cli.js</string>',
+        '<string>sync</string>',
+        '<string>--config</string>',
+        `<string>${expectedConfigPath}</string>`,
+      ].map((needle) => plistContent.indexOf(needle));
+      expect(programArgumentsOrder.every((index) => index >= 0)).toBe(true);
+      expect([...programArgumentsOrder].sort((a, b) => a - b)).toEqual(programArgumentsOrder);
+
+      // EnvironmentVariables には PATH という1つのキーしか存在しない。
+      const environmentVariablesSection =
+        plistContent.split('<key>EnvironmentVariables</key>')[1]?.split('</dict>')[0] ?? '';
+      const environmentVariableKeys = [
+        ...environmentVariablesSection.matchAll(/<key>([^<]+)<\/key>/g),
+      ].map((match) => match[1]);
+      expect(environmentVariableKeys).toEqual(['PATH']);
+
+      const pathValueMatch = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(
+        environmentVariablesSection,
+      );
+      const pathValue = pathValueMatch?.[1] ?? '';
+      expect(pathValue).toContain('/fake/node/bin');
+      expect(pathValue).toContain('/opt/homebrew/bin');
+      expect(pathValue).toContain('/usr/local/bin');
+      expect(pathValue).toContain('/usr/bin');
+      expect(pathValue).toContain('/bin');
+      expect(pathValue).toContain('/usr/sbin');
+      expect(pathValue).toContain('/sbin');
+
+      // 秘匿情報らしき名前は plist のどこにも出現しない(EnvironmentVariables 以外も含め全体)。
       expect(plistContent).not.toMatch(/GH_TOKEN|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY/);
 
       // 次に実行するコマンドの案内: LaunchAgent はユーザー単位のため sudo なしの
       // `launchctl bootstrap gui/$(id -u)` を案内する(レガシーな `launchctl load` や
       // `sudo launchctl` は案内しない)。パスはシングルクォート済みの形で埋め込まれる。
+      // env ファイルの読み込みは CLI 自身が自動で行う(issue #70)ため、
+      // 「現在のシェルに読み込む(set -a; . env; set +a)」の手順はもう案内しない。
       const summary = result.summary.join('\n');
       expect(summary).toContain('次に実行するコマンド');
+      expect(summary).not.toContain('set -a');
       expect(summary).toContain(`\${EDITOR:-vi} '${envPath}'`);
-      expect(summary).toContain(`set -a; . '${envPath}'; set +a`);
       expect(summary).toContain(`note2web doctor --config '${expectedConfigPath}'`);
       expect(summary).toContain(`note2web sync --config '${expectedConfigPath}'`);
+      expect(summary).toContain('フルディスクアクセス');
+      expect(summary).toContain(FAKE_NODE_EXEC_PATH);
       expect(summary).toContain(`launchctl bootstrap gui/$(id -u) '${plistPath}'`);
       expect(summary).toContain('launchctl kickstart -k gui/$(id -u)/com.note2web.zenn');
       expect(summary).toContain(
@@ -580,17 +605,54 @@ describe('runInit', () => {
       expect(summary).toContain('launchctl bootout gui/$(id -u)/com.note2web.zenn');
       expect(summary).not.toContain('launchctl load');
       expect(summary).not.toContain('sudo launchctl');
-      // 手順が「env 読み込み → doctor → sync → bootstrap → kickstart → tail」の順で並ぶこと。
+      // 手順が「env記入 → doctor → sync → フルディスクアクセス → bootstrap → kickstart →
+      // tail」の順で並ぶこと。
       const order = [
-        'set -a; .',
+        `\${EDITOR:-vi} '${envPath}'`,
         'note2web doctor --config',
         'note2web sync --config',
+        'フルディスクアクセス',
         'launchctl bootstrap',
         'launchctl kickstart',
         'tail -f',
       ].map((needle) => summary.indexOf(needle));
       expect(order.every((index) => index >= 0)).toBe(true);
       expect([...order].sort((a, b) => a - b)).toEqual(order);
+    });
+
+    it('includes an existing rbenv shims directory in the plist PATH, and excludes it when absent', async () => {
+      const rbenvShims = `${HOME_DIR}/.rbenv/shims`;
+      const plistPath = `${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`;
+
+      const promptFnWithShims = makePromptFn(LAUNCHD_ANSWERS);
+      const fsWithShims = createFakeFs({}, [rbenvShims]);
+      await runInit(
+        buildOptions({
+          promptFn: promptFnWithShims,
+          fileExistsFn: fsWithShims.fileExistsFn,
+          readFileFn: fsWithShims.readFileFn,
+          writeFileFn: fsWithShims.writeFileFn,
+          mkdirFn: fsWithShims.mkdirFn,
+          chmodFn: fsWithShims.chmodFn,
+          env: {},
+        }),
+      );
+      expect(fsWithShims.files.get(plistPath) ?? '').toContain(rbenvShims);
+
+      const promptFnWithoutShims = makePromptFn(LAUNCHD_ANSWERS);
+      const fsWithoutShims = createFakeFs();
+      await runInit(
+        buildOptions({
+          promptFn: promptFnWithoutShims,
+          fileExistsFn: fsWithoutShims.fileExistsFn,
+          readFileFn: fsWithoutShims.readFileFn,
+          writeFileFn: fsWithoutShims.writeFileFn,
+          mkdirFn: fsWithoutShims.mkdirFn,
+          chmodFn: fsWithoutShims.chmodFn,
+          env: {},
+        }),
+      );
+      expect(fsWithoutShims.files.get(plistPath) ?? '').not.toContain(rbenvShims);
     });
 
     it('appends only missing variable names to an existing env file without touching existing values', async () => {
@@ -621,10 +683,12 @@ describe('runInit', () => {
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
     });
 
-    it('keeps an existing wrapper script unchanged by default (declines overwrite)', async () => {
-      const wrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
+    it('notes that an old wrapper script left over from a previous version is no longer used, without touching it', async () => {
+      const oldWrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
       const promptFn = makePromptFn(LAUNCHD_ANSWERS);
-      const fs = createFakeFs({ [wrapperPath]: '#!/bin/sh\n# custom wrapper, keep me\n' });
+      const fs = createFakeFs({
+        [oldWrapperPath]: '#!/bin/sh\n# old wrapper from a older version\n',
+      });
 
       const result = await runInit(
         buildOptions({
@@ -638,31 +702,11 @@ describe('runInit', () => {
         }),
       );
 
-      expect(fs.files.get(wrapperPath)).toBe('#!/bin/sh\n# custom wrapper, keep me\n');
-      expect(result.summary.join('\n')).toContain('Kept existing wrapper script unchanged');
-    });
-
-    it('overwrites an existing wrapper script when the user confirms', async () => {
-      const wrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
-      const promptFn = makePromptFn({
-        ...LAUNCHD_ANSWERS,
-        'Overwrite it': 'y',
-      });
-      const fs = createFakeFs({ [wrapperPath]: '#!/bin/sh\n# stale wrapper\n' });
-
-      await runInit(
-        buildOptions({
-          promptFn,
-          fileExistsFn: fs.fileExistsFn,
-          readFileFn: fs.readFileFn,
-          writeFileFn: fs.writeFileFn,
-          mkdirFn: fs.mkdirFn,
-          chmodFn: fs.chmodFn,
-          env: {},
-        }),
-      );
-
-      expect(fs.files.get(wrapperPath)).toContain('exec "$NODE" "$CLI"');
+      // 旧ラッパーは自動削除しない。
+      expect(fs.files.get(oldWrapperPath)).toBe('#!/bin/sh\n# old wrapper from a older version\n');
+      const summary = result.summary.join('\n');
+      expect(summary).toContain(oldWrapperPath);
+      expect(summary).toMatch(/no longer used/);
     });
 
     it('XML-escapes paths containing special characters in the generated plist', async () => {
@@ -691,7 +735,7 @@ describe('runInit', () => {
       expect(plistContent).not.toContain('cfg & <dir>');
     });
 
-    it('generates a wrapper requiring NOTE2WEB_CLI with a warning when the CLI entrypoint cannot be resolved', async () => {
+    it('skips plist generation (but still writes the env file) with a warning when the CLI entrypoint cannot be resolved', async () => {
       const promptFn = makePromptFn(LAUNCHD_ANSWERS);
       const fs = createFakeFs();
       const result = await runInit(
@@ -707,61 +751,12 @@ describe('runInit', () => {
         }),
       );
 
-      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
-      // パス解決に失敗した場合は既定値を空欄にし、NOTE2WEB_CLI の明示的な設定を要求する
-      // (npx へのフォールバックはしない: note2web は npm に公開されていないため)。
-      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
-      expect(wrapperContent).not.toContain('npx');
-      expect(result.summary.join('\n')).toMatch(/NOTE2WEB_CLI/);
-    });
-
-    it('escapes double quotes, backslashes, backticks, and dollar signs in the CLI path embedded in the wrapper', async () => {
-      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
-      const fs = createFakeFs();
-      const weirdPath = '/weird "path"/$HOME/dist/cli.js';
-      await runInit(
-        buildOptions({
-          promptFn,
-          fileExistsFn: fs.fileExistsFn,
-          readFileFn: fs.readFileFn,
-          writeFileFn: fs.writeFileFn,
-          mkdirFn: fs.mkdirFn,
-          chmodFn: fs.chmodFn,
-          resolveCliEntrypointFn: () => weirdPath,
-          env: {},
-        }),
-      );
-
-      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
-      expect(wrapperContent).toContain('  CLI="/weird \\"path\\"/\\$HOME/dist/cli.js"');
-      // 未エスケープの生の値がそのまま出現していないこと(二重引用符が壊れて別のシェル語
-      // に分割されてしまわないことの確認)。
-      expect(wrapperContent).not.toContain('CLI="/weird "path"');
-    });
-
-    it('keeps a CLI path containing "}" intact (not embedded inside the parameter expansion)', async () => {
-      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
-      const fs = createFakeFs();
-      const bracePath = '/opt/note{2}web/dist/cli.js';
-      await runInit(
-        buildOptions({
-          promptFn,
-          fileExistsFn: fs.fileExistsFn,
-          readFileFn: fs.readFileFn,
-          writeFileFn: fs.writeFileFn,
-          mkdirFn: fs.mkdirFn,
-          chmodFn: fs.chmodFn,
-          resolveCliEntrypointFn: () => bracePath,
-          env: {},
-        }),
-      );
-
-      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
-      // `}` は `${NOTE2WEB_CLI:-...}` の展開をそこで終端させてしまうため、既定パスは
-      // パラメータ展開の外の独立した代入として埋め込む。
-      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
-      expect(wrapperContent).toContain(`  CLI="${bracePath}"`);
-      expect(wrapperContent).not.toContain(`NOTE2WEB_CLI:-${bracePath}`);
+      expect(fs.files.has(`${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`)).toBe(false);
+      expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(true);
+      const summary = result.summary.join('\n');
+      expect(summary).toMatch(/skipping launchd plist generation/i);
+      expect(summary).toContain('note2web doctor --config');
+      expect(summary).toContain('note2web sync --config');
     });
 
     it('falls back to the 1800-second default when StartInterval is not a positive integer', async () => {

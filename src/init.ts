@@ -5,11 +5,12 @@
  * CodeRabbit の実装プラン(issue #61)をベースにしつつ、次の3点は既にマージ済みの決定
  * (PR #60 レビュー・T-21)を優先して上書きする:
  *
- * 1. **launchd 生成のセキュリティ契約(PR #60 レビュー)**: README の
- *    「cron / launchd での定期実行」節が定める「env ファイル + ラッパースクリプト + plist」の
- *    3点構成をそのまま踏襲し、**秘匿情報(または `*_env` が指す値)を plist の
- *    `EnvironmentVariables` へ書かない**。値そのものは常に空欄のテンプレートとしてのみ
- *    `~/.config/note2web/env` に書く。
+ * 1. **launchd 生成のセキュリティ契約(PR #60 レビュー、issue #71 で node 直接起動へ改訂)**:
+ *    README の「cron / launchd での定期実行」節が定める「env ファイル + plist」の2点構成を
+ *    踏襲し、**秘匿情報(または `*_env` が指す値)を plist の `EnvironmentVariables` へ書かない**。
+ *    値そのものは常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く。
+ *    `EnvironmentVariables` に書いてよいのは非秘匿の `PATH` 一つだけ(理由は `buildPlist` の
+ *    JSDoc を参照)。
  * 2. **依存 CLI のアシスト(T-21)**: `@qiita/qiita-cli` は note2web 自身の `dependencies`
  *    に固定バージョンで既に同梱されているため、ローカル解決できるかの確認のみ行う
  *    (`src/dependencies.ts` の `defaultQiitaCliResolvable` と同じ手法)。ruby /
@@ -92,7 +93,7 @@ export interface RunInitOptions {
   writeFileFn?: (path: string, content: string, options?: WriteFileOptions) => Promise<void>;
   /** ディレクトリ作成(再帰的)の注入点。既定は `fs/promises` の `mkdir`。 */
   mkdirFn?: (path: string) => Promise<void>;
-  /** パーミッション変更の注入点(env ファイル 600 / ラッパースクリプト 700 用)。既定は `fs/promises` の `chmod`。 */
+  /** パーミッション変更の注入点(env ファイル 600 用)。既定は `fs/promises` の `chmod`。 */
   chmodFn?: (path: string, mode: number) => Promise<void>;
   /** コマンド存在確認の注入点。既定は `src/subprocess.ts` の `commandExists`。 */
   commandExistsFn?: (command: string) => Promise<boolean>;
@@ -100,6 +101,14 @@ export interface RunInitOptions {
   qiitaCliResolvableFn?: () => boolean;
   /** 実行中インストールの `dist/cli.js` の絶対パスを解決する注入点(テスト用)。既定は `resolveCliEntrypoint`。 */
   resolveCliEntrypointFn?: () => string | undefined;
+  /**
+   * launchd の plist の `ProgramArguments[0]` に埋め込む `node` 実行ファイルの絶対パスを
+   * 解決する注入点(テスト用)。既定は `() => process.execPath`(= `note2web init` 自身を
+   * 起動している `node` のパス)。issue #71: TCC(macOS のプライバシー制御)の
+   * responsible process は `ProgramArguments[0]` で決まるため、シェルスクリプトではなく
+   * この `node` 実行ファイル自身にフルディスクアクセスを付与できるようにする。
+   */
+  nodeExecPathFn?: () => string;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /** ホームディレクトリ(`~` 展開・既定パス算出の基準)。既定は `os.homedir()`。テストで実ホームを触らないための注入点。 */
@@ -338,17 +347,16 @@ function defaultQiitaCliResolvable(): boolean {
 
 /**
  * 実行中の note2web インストールにおける CLI エントリポイント(`dist/cli.js`)の絶対パスを
- * 解決する(issue #63: note2web は npm へ公開されていないため、ラッパースクリプトから
- * `npx --yes note2web@<version>` を呼ぶと必ず 404 になる。代わりに `node` で直接この
- * エントリポイントを起動する)。`src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と
- * 同じ手法で、`import.meta.url`(実行時は `dist/init.js`)から見た兄弟ファイルとして
- * `cli.js`(= `dist/cli.js`)を解決する。
+ * 解決する(issue #63: note2web は npm へ公開されていないため、`npx --yes note2web@<version>`
+ * を plist から呼ぶと必ず 404 になる。代わりに `node` でこのエントリポイントを直接起動する
+ * ——issue #71 以降は生成した plist の `ProgramArguments` へ直接埋め込む)。
+ * `src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と同じ手法で、`import.meta.url`
+ * (実行時は `dist/init.js`)から見た兄弟ファイルとして `cli.js`(= `dist/cli.js`)を解決する。
  *
  * 存在確認は行わない(純粋に計算のみ) —— ここで `existsSync` 等の実ファイルシステムを
  * 見てしまうと、テストの DI フェイクからは見えない実ファイルの有無に依存してしまい、
- * `src/` から直接動かす開発時の実行(ビルド前で `dist/cli.js` が無い)が壊れる。実際に
- * ファイルが存在するかどうかの検証は、生成したラッパースクリプト自身の実行時チェック
- * (`[ ! -f "$CLI" ]`)に委ねる。
+ * `src/` から直接動かす開発時の実行(ビルド前で `dist/cli.js` が無い)が壊れる。呼び出し側
+ * (`runInit`)は、この関数が `undefined` を返した場合に plist の生成自体をスキップする。
  */
 function resolveCliEntrypoint(): string | undefined {
   try {
@@ -709,15 +717,6 @@ function envFileLine(name: string): string {
 }
 
 /**
- * env ファイルのテンプレートにのみ載せる任意の上書き変数名(issue #63)。ラッパースクリプト
- * (`buildWrapperScript`)の `node` / CLI エントリポイントを利用者が明示的に上書きしたい場合の
- * 逃げ道として名前だけを案内する。`requiredEnvNames`(`collectDependencyWarnings` の
- * unset 警告・サマリの「必要な変数」一覧)には含めない —— どちらも未設定のままで構わない
- * 任意項目であり、sync 実行をブロックする必須変数ではないため。
- */
-const OPTIONAL_ENV_TEMPLATE_NAMES = ['NOTE2WEB_NODE', 'NOTE2WEB_CLI'] as const;
-
-/**
  * `~/.config/note2web/env` を作成、または既存ファイルに不足している変数名だけを追記する。
  * 既存の値は一切書き換えない(CORRECTION A)。
  */
@@ -742,8 +741,11 @@ async function ensureEnvFile(
       '# 設定 YAML の *_env が指す名前で、値を直接ここに記入してください(YAML には書きません)。\n' +
       '#\n' +
       '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、\n' +
-      '# launchd の最小限の PATH では apple_cloud_notes_parser の起動(bundle exec ruby)に\n' +
-      '# 失敗することがあります。必要に応じて以下のような変数をここへ追記してください:\n' +
+      '# 対話シェルから直接 `note2web doctor`/`sync` を実行するときに、bundle exec ruby の\n' +
+      '# 起動に必要な PATH / GEM_HOME 等をここへ追記できます。launchd 経由で実行する場合の\n' +
+      '# PATH は(バージョンマネージャの shim ディレクトリを含め)`note2web init` が\n' +
+      '# 生成する plist の EnvironmentVariables に自動的に埋め込まれるため、通常はここへの\n' +
+      '# 追記は不要です(issue #71)。必要に応じて以下のような変数をここへ追記してください:\n' +
       '#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}\n' +
       '#   GEM_HOME=$HOME/.gem\n' +
       '#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile\n\n';
@@ -771,91 +773,61 @@ async function ensureEnvFile(
 }
 
 /**
- * 二重引用符(`"..."`)で囲んだシェルの単語の中に安全に埋め込めるよう、パス文字列を
- * エスケープする。二重引用符の中でも特別扱いされる `` \ `` `"` `` ` `` `$` の4文字だけを
- * `\` でエスケープすればよい(POSIX シェルの引用規則。他の文字は二重引用符の中では
- * リテラル扱いになる)。
+ * launchd の PATH 探索対象になり得るバージョンマネージャの shim / bin ディレクトリ
+ * (`<home>` からの相対位置。存在するものだけを `buildLaunchdPath` が PATH へ加える)。
  */
-function escapeShellDoubleQuoted(value: string): string {
-  return value.replaceAll(/[\\"`$]/g, (char) => `\\${char}`);
-}
+const VERSION_MANAGER_PATH_SUFFIXES = [
+  ['.rbenv', 'shims'],
+  ['.asdf', 'shims'],
+  ['.rvm', 'bin'],
+] as const;
+
+/** launchd の最小限の PATH に必ず含める OS 標準ディレクトリ(rbenv 等の shim より後ろに置く)。 */
+const STANDARD_PATH_TAIL = [
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+] as const;
 
 /**
- * README「cron / launchd での定期実行」節と同一の形の起動ラッパースクリプト
- * (issue #63)。note2web は npm へ公開されていないため `npx` は一切使わず、
- * `resolveCliEntrypoint` が解決した `dist/cli.js` の絶対パスを `node` で直接起動する。
- * `cliEntrypoint` が `undefined`(パス解決に失敗した場合)は既定値を空欄にし、
- * `NOTE2WEB_CLI` が env ファイル側で設定されない限りラッパー自身の実行時チェックで
- * exit 2 になるようにする。
+ * launchd の plist に埋め込む `PATH` を init 実行時点で確定させる(issue #71)。`PATH` は
+ * 秘匿情報ではないため、env ファイルではなく plist の `EnvironmentVariables` に直接書ける
+ * ——README のトラブルシューティング「ruby / bundle が cron / launchd の PATH に無い」節が
+ * 示すとおり、launchd の実行環境は `/usr/bin:/bin` 程度の最小限の PATH しか持たず、
+ * rbenv / asdf / rvm 等のバージョンマネージャの shim ディレクトリが無いと
+ * `bundle exec ruby`(apple_cloud_notes_parser の起動、issue #67)が解決できない。
+ *
+ * 並び順: (1) `node` 実行ファイル自身のディレクトリ、(2) 利用者のホームディレクトリに
+ * 実在するバージョンマネージャの shim/bin ディレクトリ(存在しないものは、使っていない
+ * バージョンマネージャの解決不能なパスを PATH に混入させないため加えない)、(3) Homebrew /
+ * OS 標準ディレクトリの固定末尾。同じディレクトリが重複した場合は最初の出現だけを残す。
  */
-function buildWrapperScript(cliEntrypoint: string | undefined): string {
-  // 既定パスは `${NOTE2WEB_CLI:-...}` の中へ直接埋め込まない。パスに `}` が含まれると
-  // パラメータ展開がそこで終端してしまうため、空値判定の後に別の二重引用符付き代入で
-  // 設定する(こちらは通常の文字列なので escapeShellDoubleQuoted だけで安全になる)。
-  const cliDefaultAssignment =
-    cliEntrypoint !== undefined
-      ? 'if [ -z "$CLI" ]; then\n' + `  CLI="${escapeShellDoubleQuoted(cliEntrypoint)}"\n` + 'fi\n'
-      : '';
-  return (
-    '#!/bin/sh\n' +
-    '# ~/bin/note2web-sync.sh(chmod 700 で保護)\n' +
-    '# 使い方: note2web-sync.sh <config.yaml>\n' +
-    'set -eu\n' +
-    'set -a\n' +
-    '. "$HOME/.config/note2web/env"\n' +
-    'set +a\n' +
-    '# cron / launchd の PATH は最小構成のため、一般的な Node.js / Ruby(bundle 含む)の\n' +
-    '# bin ディレクトリを補う(rbenv/rvm/Homebrew-ruby を使う場合は env ファイル側で PATH を\n' +
-    '# さらに拡張してください。バージョンマネージャの shim をここで自動追加はしません)\n' +
-    'PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' +
-    'NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"\n' +
-    'CLI="${NOTE2WEB_CLI:-}"\n' +
-    cliDefaultAssignment +
-    'if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then\n' +
-    '  echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2\n' +
-    '  exit 2\n' +
-    'fi\n' +
-    'if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then\n' +
-    '  echo "note2web-sync.sh: note2web CLI not found (set NOTE2WEB_CLI in ~/.config/note2web/env)" >&2\n' +
-    '  exit 2\n' +
-    'fi\n' +
-    'exec "$NODE" "$CLI" sync --config "$1"\n'
-  );
-}
-
-/**
- * `~/bin/note2web-sync.sh` を作成する。既に存在する場合は上書きするかどうかを
- * `promptFn` で尋ね、既定(空入力)では**上書きしない**(CORRECTION A)。
- */
-async function ensureWrapperScript(
-  wrapperPath: string,
-  cliEntrypoint: string | undefined,
-  promptFn: InitPromptFn,
-  options: {
-    fileExistsFn: (path: string) => Promise<boolean>;
-    writeFileFn: (path: string, content: string, options?: WriteFileOptions) => Promise<void>;
-    mkdirFn: (path: string) => Promise<void>;
-    chmodFn: (path: string, mode: number) => Promise<void>;
-  },
-): Promise<{ written: boolean }> {
-  const { fileExistsFn, writeFileFn, mkdirFn, chmodFn } = options;
-  await mkdirFn(dirname(wrapperPath));
-
-  const exists = await fileExistsFn(wrapperPath);
-  if (exists) {
-    const overwrite = await askYesNo(
-      promptFn,
-      `Wrapper script already exists at ${wrapperPath}. Overwrite it?`,
-      false,
-    );
-    if (!overwrite) {
-      return { written: false };
+async function buildLaunchdPath(
+  nodeExecPath: string,
+  homeDir: string,
+  fileExistsFn: (path: string) => Promise<boolean>,
+): Promise<string> {
+  const candidates = [dirname(nodeExecPath)];
+  for (const suffix of VERSION_MANAGER_PATH_SUFFIXES) {
+    const dir = join(homeDir, ...suffix);
+    if (await fileExistsFn(dir)) {
+      candidates.push(dir);
     }
   }
+  candidates.push(...STANDARD_PATH_TAIL);
 
-  await writeFileFn(wrapperPath, buildWrapperScript(cliEntrypoint), { mode: 0o700 });
-  await chmodFn(wrapperPath, 0o700);
-  return { written: true };
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const dir of candidates) {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      deduped.push(dir);
+    }
+  }
+  return deduped.join(':');
 }
 
 /** XML の特殊文字をエスケープする(plist に埋め込むパス等が `&`/`<`/`>`/`"`/`'` を含み得るため)。 */
@@ -869,19 +841,39 @@ function escapeXml(value: string): string {
 }
 
 /**
- * README「launchd の例」節と同一の形の plist(CORRECTION A: `EnvironmentVariables` は決して含めない)。
+ * README「launchd の例」節と同一の形の plist(issue #71: `node` を直接起動する構成へ改訂)。
+ *
+ * **`ProgramArguments[0]` を `node` 実行ファイル自身にする理由**: launchd が Apple の
+ * TCC(プライバシー制御。フルディスクアクセス等)へ通知する「責任のあるプロセス
+ * (responsible process)」は `ProgramArguments[0]` の実行ファイルで決まる。以前の実装
+ * (シェルラッパー `~/bin/note2web-sync.sh` を `ProgramArguments[0]` に置く構成)では
+ * `/bin/sh` にフルディスクアクセスを許可しても TCC が正しく紐付かず、実機で権限が
+ * 効かないという報告があった。`node` 実行ファイル自身を `ProgramArguments[0]` にすれば、
+ * その `node` バイナリへフルディスクアクセスを許可するだけでジョブ全体(`node` が
+ * `child_process` で起動する `ruby`/`bundle` を含む)に権限が及ぶ(子プロセスは責任のある
+ * プロセスの権限を継承する)。
+ *
+ * **`EnvironmentVariables` には決して秘匿情報を書かない**: `PATH` 一つだけが例外で、
+ * それ以外のキー(トークン等、`*_env` が指す値)は plist へ一切書かない。plist は
+ * `chmod 600` の env ファイルと異なり平文で読まれ得るため、秘匿情報は引き続き
+ * `~/.config/note2web/env` にのみ置き、note2web の CLI 自身がそれを自動読み込みする
+ * (issue #69)。
+ *
  * ホームディレクトリや設定パスに `&` 等の XML 特殊文字が含まれていても壊れた plist を
  * 生成しないよう、すべての埋め込み値を `escapeXml` で通す。
  */
 function buildPlist(options: {
   label: string;
-  wrapperPath: string;
-  configPath: string;
+  programArguments: readonly string[];
+  path: string;
   startInterval: number;
   stdoutLogPath: string;
   stderrLogPath: string;
 }): string {
-  const { label, wrapperPath, configPath, startInterval, stdoutLogPath, stderrLogPath } = options;
+  const { label, programArguments, path, startInterval, stdoutLogPath, stderrLogPath } = options;
+  const programArgumentsXml = programArguments
+    .map((argument) => `    <string>${escapeXml(argument)}</string>\n`)
+    .join('');
   return (
     '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
@@ -891,9 +883,13 @@ function buildPlist(options: {
     `  <string>${escapeXml(label)}</string>\n` +
     '  <key>ProgramArguments</key>\n' +
     '  <array>\n' +
-    `    <string>${escapeXml(wrapperPath)}</string>\n` +
-    `    <string>${escapeXml(configPath)}</string>\n` +
+    programArgumentsXml +
     '  </array>\n' +
+    '  <key>EnvironmentVariables</key>\n' +
+    '  <dict>\n' +
+    '    <key>PATH</key>\n' +
+    `    <string>${escapeXml(path)}</string>\n` +
+    '  </dict>\n' +
     '  <key>StartInterval</key>\n' +
     `  <integer>${String(startInterval)}</integer>\n` +
     '  <key>StandardOutPath</key>\n' +
@@ -907,10 +903,10 @@ function buildPlist(options: {
 
 /**
  * `note2web init` の本体。対話的にサービス・設定を収集して設定 YAML を書き出し、
- * 依存 CLI の状況を報告し、希望すれば launchd 用の3ファイル(env / ラッパー / plist)も
- * 生成する。design.md §7 のスキーマに沿った `Config` を組み立て、書き出し後に
- * `validateConfigObject`(スキーマのみ)で検証する——ここで問題が出るのは init 自身の
- * 生成ロジックの不具合を意味するため `InitError` を投げる(CORRECTION C)。
+ * 依存 CLI の状況を報告し、希望すれば launchd 用の2ファイル(env / plist、issue #71 で
+ * ラッパースクリプトを廃止)も生成する。design.md §7 のスキーマに沿った `Config` を
+ * 組み立て、書き出し後に `validateConfigObject`(スキーマのみ)で検証する——ここで問題が
+ * 出るのは init 自身の生成ロジックの不具合を意味するため `InitError` を投げる(CORRECTION C)。
  */
 export async function runInit(options: RunInitOptions = {}): Promise<InitResult> {
   const {
@@ -923,6 +919,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     commandExistsFn = commandExists,
     qiitaCliResolvableFn = defaultQiitaCliResolvable,
     resolveCliEntrypointFn = resolveCliEntrypoint,
+    nodeExecPathFn = () => process.execPath,
     env = process.env,
     homeDir = homedir(),
   } = options;
@@ -1059,22 +1056,18 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     // --- 7. launchd 用ファイルの生成(任意) ------------------------------------------
     const generateLaunchd = await askYesNo(
       ask_,
-      'Generate the launchd auto-run files (env template, wrapper script, plist)?',
+      'Generate the launchd auto-run files (env template + plist)?',
       false,
     );
     if (generateLaunchd) {
       const envPath = join(homeDir, '.config', 'note2web', 'env');
-      const envResult = await ensureEnvFile(
-        envPath,
-        [...requiredEnvNames, ...OPTIONAL_ENV_TEMPLATE_NAMES],
-        {
-          fileExistsFn,
-          readFileFn,
-          writeFileFn,
-          mkdirFn,
-          chmodFn,
-        },
-      );
+      const envResult = await ensureEnvFile(envPath, requiredEnvNames, {
+        fileExistsFn,
+        readFileFn,
+        writeFileFn,
+        mkdirFn,
+        chmodFn,
+      });
       if (envResult.created) {
         summary.push(`Created env file template: ${envPath} (chmod 600, values still blank)`);
       } else if (envResult.addedNames.length > 0) {
@@ -1085,70 +1078,93 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
         summary.push(`Existing env file already lists all required variable names: ${envPath}`);
       }
 
-      const wrapperPath = join(homeDir, 'bin', 'note2web-sync.sh');
-      const cliEntrypoint = resolveCliEntrypointFn();
-      if (cliEntrypoint === undefined) {
+      // issue #71: 以前のバージョンが生成していたラッパースクリプトはもう使われない
+      // (launchd は node を直接起動する)。旧ファイルが残っていても実害は無いが、放置される
+      // と紛らわしいため、存在すれば削除してよい旨だけをサマリで案内する(自動削除はしない
+      // ——他の用途に転用されている可能性を否定できないため)。
+      const oldWrapperPath = join(homeDir, 'bin', 'note2web-sync.sh');
+      if (await fileExistsFn(oldWrapperPath)) {
         summary.push(
-          'Warning: could not resolve the note2web CLI entrypoint path; ' +
-            'the generated wrapper script will require NOTE2WEB_CLI to be set ' +
-            'in ~/.config/note2web/env (see the env file template).',
+          `Note: an old wrapper script from a previous note2web version still exists at ` +
+            `${oldWrapperPath}; it is no longer used (launchd now runs node directly, issue #71) ` +
+            'and can be safely deleted.',
         );
       }
-      const wrapperResult = await ensureWrapperScript(wrapperPath, cliEntrypoint, ask_, {
-        fileExistsFn,
-        writeFileFn,
-        mkdirFn,
-        chmodFn,
-      });
-      summary.push(
-        wrapperResult.written
-          ? `Wrote wrapper script: ${wrapperPath} (chmod 700, ${cliEntrypoint !== undefined ? `runs ${cliEntrypoint}` : 'NOTE2WEB_CLI required'})`
-          : `Kept existing wrapper script unchanged: ${wrapperPath}`,
-      );
 
-      const intervalAnswer = await askRequired(ask_, 'launchd StartInterval in seconds', '1800');
-      const startInterval = Number(intervalAnswer);
-      const logsDir = join(homeDir, 'Library', 'Logs', 'note2web');
-      await mkdirFn(logsDir);
+      const cliEntrypoint = resolveCliEntrypointFn();
+      if (cliEntrypoint === undefined) {
+        // dist/cli.js が解決できない状態(ソースから直接動かす開発時の実行等)で plist を
+        // 生成すると、動かない ProgramArguments を持つ plist をそのまま書き出してしまう。
+        // env ファイルは(値を後から埋めれば使えるため)引き続き書き出すが、plist の生成は
+        // スキップし、利用者にビルド済み/インストール済みの状態で再実行するよう案内する。
+        summary.push(
+          'Warning: could not resolve the note2web CLI entrypoint path (dist/cli.js); ' +
+            'skipping launchd plist generation. Re-run "note2web init" from a built/installed ' +
+            'checkout (e.g. after "npm run build") to generate the plist.',
+        );
+        summary.push('');
+        summary.push('次に実行するコマンド(上から順に):');
+        summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
+        summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
+        summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+        summary.push(`  3. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
+      } else {
+        const nodeExecPath = nodeExecPathFn();
+        const path = await buildLaunchdPath(nodeExecPath, homeDir, fileExistsFn);
 
-      const label = `com.note2web.${service}`;
-      const stdoutLogPath = join(logsDir, `${service}.log`);
-      const stderrLogPath = join(logsDir, `${service}.err.log`);
-      const plistPath = join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
-      await mkdirFn(dirname(plistPath));
-      const plistContent = buildPlist({
-        label,
-        wrapperPath,
-        configPath: targetPath,
-        // `<integer>` に書き込むため、小数や安全でない大きさの数値は既定値 1800 へ倒す
-        // (`1.5` 等をそのまま埋め込むと launchctl がロードできない plist になる)。
-        startInterval:
-          Number.isSafeInteger(startInterval) && startInterval > 0 ? startInterval : 1800,
-        stdoutLogPath,
-        stderrLogPath,
-      });
-      await writeFileFn(plistPath, plistContent);
-      summary.push(`Wrote launchd plist: ${plistPath} (no secrets embedded)`);
-      summary.push('note2web does not run launchctl for you; review the generated files first.');
+        const intervalAnswer = await askRequired(ask_, 'launchd StartInterval in seconds', '1800');
+        const startInterval = Number(intervalAnswer);
+        const logsDir = join(homeDir, 'Library', 'Logs', 'note2web');
+        await mkdirFn(logsDir);
 
-      // 次に実行するコマンドの案内。launchd(LaunchAgent)はユーザー単位のため、
-      // `sudo` を付けると LaunchDaemons 扱いになりロードに失敗する(Load failed: 5)。
-      // レガシーな `launchctl load` ではなく、エラーが読みやすい `bootstrap` 形式を案内する。
-      summary.push('');
-      summary.push('次に実行するコマンド(上から順に):');
-      summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
-      summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
-      summary.push(`  2. 現在のシェルに読み込む: set -a; . ${shellQuote(envPath)}; set +a`);
-      summary.push(`  3. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
-      summary.push(`  4. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
-      summary.push(
-        `  5. launchd に登録する(sudo は付けない): launchctl bootstrap gui/$(id -u) ${shellQuote(plistPath)}`,
-      );
-      summary.push(`  6. すぐ1回実行して確認: launchctl kickstart -k gui/$(id -u)/${label}`);
-      summary.push(
-        `  7. ログを確認: tail -f ${shellQuote(stdoutLogPath)} ${shellQuote(stderrLogPath)}`,
-      );
-      summary.push(`  (定期実行を解除するとき: launchctl bootout gui/$(id -u)/${label})`);
+        const label = `com.note2web.${service}`;
+        const stdoutLogPath = join(logsDir, `${service}.log`);
+        const stderrLogPath = join(logsDir, `${service}.err.log`);
+        const plistPath = join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
+        await mkdirFn(dirname(plistPath));
+        const plistContent = buildPlist({
+          label,
+          programArguments: [nodeExecPath, cliEntrypoint, 'sync', '--config', targetPath],
+          path,
+          // `<integer>` に書き込むため、小数や安全でない大きさの数値は既定値 1800 へ倒す
+          // (`1.5` 等をそのまま埋め込むと launchctl がロードできない plist になる)。
+          startInterval:
+            Number.isSafeInteger(startInterval) && startInterval > 0 ? startInterval : 1800,
+          stdoutLogPath,
+          stderrLogPath,
+        });
+        await writeFileFn(plistPath, plistContent);
+        summary.push(
+          `Wrote launchd plist: ${plistPath} (runs node directly; EnvironmentVariables contains only PATH)`,
+        );
+        summary.push('note2web does not run launchctl for you; review the generated files first.');
+
+        // 次に実行するコマンドの案内。launchd(LaunchAgent)はユーザー単位のため、
+        // `sudo` を付けると LaunchDaemons 扱いになりロードに失敗する(Load failed: 5)。
+        // レガシーな `launchctl load` ではなく、エラーが読みやすい `bootstrap` 形式を案内する。
+        // env ファイルの読み込みは note2web の CLI 自身が自動で行う(issue #70)ため、
+        // 以前あった「現在のシェルに読み込む(set -a; . env; set +a)」の手順は不要。
+        summary.push('');
+        summary.push('次に実行するコマンド(上から順に):');
+        summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
+        summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
+        summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+        summary.push(`  3. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
+        summary.push(
+          `  4. フルディスクアクセスを付与する(launchd 実行に必須、issue #71): ` +
+            'システム設定 → プライバシーとセキュリティ → フルディスクアクセス を開き ' +
+            '(Cmd+Shift+G でパス入力可)、次の node 実行ファイルを追加する: ' +
+            shellQuote(nodeExecPath),
+        );
+        summary.push(
+          `  5. launchd に登録する(sudo は付けない): launchctl bootstrap gui/$(id -u) ${shellQuote(plistPath)}`,
+        );
+        summary.push(`  6. すぐ1回実行して確認: launchctl kickstart -k gui/$(id -u)/${label}`);
+        summary.push(
+          `  7. ログを確認: tail -f ${shellQuote(stdoutLogPath)} ${shellQuote(stderrLogPath)}`,
+        );
+        summary.push(`  (定期実行を解除するとき: launchctl bootout gui/$(id -u)/${label})`);
+      }
     } else {
       summary.push('Skipped launchd file generation (re-run "note2web init" later to add it).');
       summary.push('');
