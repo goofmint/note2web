@@ -7,12 +7,19 @@
 
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
-const DEFAULT_TIMEZONE = 'Asia/Tokyo';
+/**
+ * `timezone` 省略時の既定値(design.md §7)。`src/init.ts`(T-29)がテンプレート生成時に
+ * 再利用できるよう export する。
+ */
+export const DEFAULT_TIMEZONE = 'Asia/Tokyo';
 
-/** design.md §7 で列挙されている配信先サービス。 */
-const SERVICES = ['zenn', 'hugo', 'jekyll', 'qiita', 'devto', 'note', 'hatena'] as const;
+/**
+ * design.md §7 で列挙されている配信先サービス。`src/init.ts`(T-29、issue #61)が
+ * サービス選択の選択肢一覧としてそのまま再利用するため export する。
+ */
+export const SERVICES = ['zenn', 'hugo', 'jekyll', 'qiita', 'devto', 'note', 'hatena'] as const;
 export type ServiceName = (typeof SERVICES)[number];
 
 const sourceSchema = z
@@ -174,6 +181,28 @@ export class ConfigValidationError extends Error {
     this.name = 'ConfigValidationError';
     this.problems = problems;
   }
+}
+
+/**
+ * 設定オブジェクトを `configSchema` のみで検証する(`*_env` が指す環境変数の存在確認は
+ * 行わない)。`note2web init`(T-29、issue #61)が、生成した YAML を書き出した直後に使う:
+ * 利用者はまだ env ファイルへ値を書き込んでいない段階のため、`loadConfig` と違って
+ * 環境変数未設定を問題として報告してはならない(CORRECTION C)。スキーマ自体に反する場合は
+ * init 側の生成ロジックの不具合であり、`InitError` として報告させる。
+ * `loadConfig` と同じ `configSchema` / `zodErrorToProblems` を再利用し、ロジックの重複を避ける。
+ */
+export function validateConfigObject(parsed: unknown): ConfigProblem[] {
+  const result = configSchema.safeParse(parsed);
+  return result.success ? [] : zodErrorToProblems(result.error);
+}
+
+/**
+ * 検証済み `Config` を設定 YAML 文字列へ直列化する(`note2web init` が生成した設定を
+ * 書き出す際に使う)。`loadConfig` の逆変換に相当し、キーの並び順は `Config` オブジェクトの
+ * プロパティ順そのまま(呼び出し側が意図した順序で組み立てること)。
+ */
+export function serializeConfig(config: Config): string {
+  return stringifyYaml(config);
 }
 
 /** ZodError の issues を `ConfigProblem[]` へ変換する。 */
