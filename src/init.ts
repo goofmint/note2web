@@ -782,7 +782,13 @@ function escapeShellDoubleQuoted(value: string): string {
  * exit 2 になるようにする。
  */
 function buildWrapperScript(cliEntrypoint: string | undefined): string {
-  const cliDefault = cliEntrypoint !== undefined ? escapeShellDoubleQuoted(cliEntrypoint) : '';
+  // 既定パスは `${NOTE2WEB_CLI:-...}` の中へ直接埋め込まない。パスに `}` が含まれると
+  // パラメータ展開がそこで終端してしまうため、空値判定の後に別の二重引用符付き代入で
+  // 設定する(こちらは通常の文字列なので escapeShellDoubleQuoted だけで安全になる)。
+  const cliDefaultAssignment =
+    cliEntrypoint !== undefined
+      ? 'if [ -z "$CLI" ]; then\n' + `  CLI="${escapeShellDoubleQuoted(cliEntrypoint)}"\n` + 'fi\n'
+      : '';
   return (
     '#!/bin/sh\n' +
     '# ~/bin/note2web-sync.sh(chmod 700 で保護)\n' +
@@ -794,7 +800,8 @@ function buildWrapperScript(cliEntrypoint: string | undefined): string {
     '# cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う\n' +
     'PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' +
     'NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"\n' +
-    `CLI="\${NOTE2WEB_CLI:-${cliDefault}}"\n` +
+    'CLI="${NOTE2WEB_CLI:-}"\n' +
+    cliDefaultAssignment +
     'if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then\n' +
     '  echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2\n' +
     '  exit 2\n' +

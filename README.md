@@ -264,7 +264,10 @@ set +a
 PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"
 # インストール先の dist/cli.js を絶対パスで指定する(note2web init が自動的に埋め込む値の例)
-CLI="${NOTE2WEB_CLI:-/Users/you/src/note2web/dist/cli.js}"
+CLI="${NOTE2WEB_CLI:-}"
+if [ -z "$CLI" ]; then
+  CLI="/Users/you/src/note2web/dist/cli.js"
+fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
   echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2
   exit 2

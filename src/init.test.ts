@@ -531,7 +531,8 @@ describe('runInit', () => {
       expect(wrapperContent).toContain('#!/bin/sh');
       expect(wrapperContent).toContain('set -a');
       expect(wrapperContent).toContain('. "$HOME/.config/note2web/env"');
-      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-/fake/install/dist/cli.js}"');
+      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
+      expect(wrapperContent).toContain('  CLI="/fake/install/dist/cli.js"');
       expect(wrapperContent).toContain('exec "$NODE" "$CLI" sync --config "$1"');
       expect(wrapperContent).not.toContain('npx');
 
@@ -714,12 +715,35 @@ describe('runInit', () => {
       );
 
       const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
-      expect(wrapperContent).toContain(
-        'CLI="${NOTE2WEB_CLI:-/weird \\"path\\"/\\$HOME/dist/cli.js}"',
-      );
+      expect(wrapperContent).toContain('  CLI="/weird \\"path\\"/\\$HOME/dist/cli.js"');
       // 未エスケープの生の値がそのまま出現していないこと(二重引用符が壊れて別のシェル語
       // に分割されてしまわないことの確認)。
-      expect(wrapperContent).not.toContain('CLI:-/weird "path"');
+      expect(wrapperContent).not.toContain('CLI="/weird "path"');
+    });
+
+    it('keeps a CLI path containing "}" intact (not embedded inside the parameter expansion)', async () => {
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const bracePath = '/opt/note{2}web/dist/cli.js';
+      await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          resolveCliEntrypointFn: () => bracePath,
+          env: {},
+        }),
+      );
+
+      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
+      // `}` は `${NOTE2WEB_CLI:-...}` の展開をそこで終端させてしまうため、既定パスは
+      // パラメータ展開の外の独立した代入として埋め込む。
+      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
+      expect(wrapperContent).toContain(`  CLI="${bracePath}"`);
+      expect(wrapperContent).not.toContain(`NOTE2WEB_CLI:-${bracePath}`);
     });
 
     it('falls back to the 1800-second default when StartInterval is not a positive integer', async () => {
