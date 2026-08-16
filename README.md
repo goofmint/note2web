@@ -44,10 +44,10 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
   既定のインストール先は `~/tools/apple_cloud_notes_parser` です(設定 YAML の `exporter.parser_path` で変更可能)。
 
-- **macOS のフルディスクアクセス権限**: Apple Notes のデータ(`~/Library/Group Containers/group.com.apple.notes`)を読み取るため、`note2web` を実行するプロセス(ターミナルアプリ、または cron / launchd から起動する場合はそのシェル/実行ファイル)に「フルディスクアクセス」を許可する必要があります。
+- **macOS のフルディスクアクセス権限**: Apple Notes のデータ(`~/Library/Group Containers/group.com.apple.notes`)を読み取るため、`note2web` を実行するプロセスに「フルディスクアクセス」を許可する必要があります。**対話シェルから実行する場合はターミナルアプリ(Terminal.app / iTerm2 等)**に、**launchd / cron から無人実行する場合は `node` 実行ファイル自身**に許可してください(詳細・理由は [cron / launchd での定期実行](#cron--launchd-での定期実行)節を参照)。
   1. 「システム設定」→「プライバシーとセキュリティ」→「フルディスクアクセス」を開く
-  2. 実行に使うターミナルアプリ(Terminal.app / iTerm2 等)、または `node` バイナリ / cron を許可リストに追加する
-  3. 許可後、ターミナルアプリを再起動する
+  2. 実行に使うターミナルアプリ、または(launchd 経由の場合)`node` バイナリを許可リストに追加する(`node -e 'console.log(process.execPath)'` で自分の環境の絶対パスを確認できます。Cmd+Shift+G でパス入力してジャンプすると探しやすくなります)
+  3. 許可後、ターミナルアプリ(または launchd ジョブ)を再起動する
 
 - **Zenn / Hugo / Jekyll(Git リポジトリ出力モード)を使う場合**: `git` コマンドと [`gh`](https://cli.github.com/)(GitHub CLI)、および `GH_TOKEN` 環境変数(`gh` の認証用)
 - **Qiita を使う場合**: `@qiita/qiita-cli` は note2web の `dependencies` に固定バージョンで同梱されているため追加インストールは不要です。トークンは環境変数で渡します(後述)
@@ -58,14 +58,21 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
 ## インストール・実行
 
-インストール不要で `npx` から直接実行できます。
+`note2web` は現時点では npm に公開されていないため、`npx note2web ...` は使えません(npm レジストリの 404 で失敗します)。将来 npm へ公開されれば `npx note2web ...` がそのまま使えるようになる予定ですが、それまではリポジトリを clone してビルドしたうえで `node dist/cli.js` から起動します:
 
 ```sh
-npx note2web sync --config ~/.config/note2web/zenn.yaml
+git clone https://github.com/goofmint/note2web ~/src/note2web
+cd ~/src/note2web
+npm install
+npm run build
 ```
 
 ```sh
-npx note2web doctor --config ~/.config/note2web/zenn.yaml
+node dist/cli.js sync --config ~/.config/note2web/zenn.yaml
+```
+
+```sh
+node dist/cli.js doctor --config ~/.config/note2web/zenn.yaml
 ```
 
 - `sync`: エクスポート → 変換 → 公開を実行するメインコマンドです
@@ -75,10 +82,10 @@ npx note2web doctor --config ~/.config/note2web/zenn.yaml
 
 ### env ファイルの自動読み込み(`doctor` / `sync` 共通)
 
-`sync` / `doctor` は起動時、**設定ファイルと同じディレクトリの `env` ファイル**(既定パス、例: `~/.config/note2web/qiita.yaml` に対しては `~/.config/note2web/env`)を自動的に読み込み、まだシェルの環境変数として設定されていない名前だけを補います。これは [cron / launchd での定期実行](#cron--launchd-での定期実行)節のラッパースクリプトが `set -a; . "$HOME/.config/note2web/env"; set +a` で行っているのと同じ入力を CLI 自身にも与えるための機能で、`doctor --config <path>` を対話シェルから直接実行したときに「env ファイルには値を書いたのに `doctor` が未設定と報告する」というズレ(issue #69)を無くします。
+`sync` / `doctor` は起動時、**設定ファイルと同じディレクトリの `env` ファイル**(既定パス、例: `~/.config/note2web/qiita.yaml` に対しては `~/.config/note2web/env`)を自動的に読み込み、まだシェルの環境変数として設定されていない名前だけを補います(issue #69)。[cron / launchd での定期実行](#cron--launchd-での定期実行)節が示すとおり、launchd の plist は `EnvironmentVariables` に `PATH` 以外の秘匿情報を一切含めない構成のため、この自動読み込みが launchd 経由の実行でトークン等を `process.env` に載せる唯一の経路になっています。同じ経路を対話シェルからの直接実行(`doctor --config <path>` 等)にも使うことで、「env ファイルには値を書いたのに `doctor` が未設定と報告する」というズレを無くしています。
 
 - 既定のパスを変えたい場合は `--env-file <path>` で明示できます(このとき既定パスの `env` ファイルは無視されます)。明示指定したファイルが存在しない場合は設定エラー(exit 2)になりますが、既定パスが存在しない場合は単に無視され、通常どおり進みます(env ファイルを使わずシェルの `export` だけで環境変数を渡している利用者向け)
-- **シェルの環境変数(既に `export` 済みの値)は常に env ファイルの値より優先されます**。ラッパースクリプト実行時と同じ優先順位です
+- **シェルの環境変数(既に `export` 済みの値)は常に env ファイルの値より優先されます**
 - env ファイルのパースは単純な `NAME=value` 形式のみを対象とし、シェルとして評価しません(`$VAR` やコマンド置換は展開されず、リテラルな文字列として扱われます)。値は一切ログに出力しません
 
 ## 終了コード
@@ -229,22 +236,22 @@ hatena:
 
 ## cron / launchd での定期実行
 
-1つの設定ファイル = 1つの配信先サービスなので、複数サービスへ配信する場合は設定ファイルの数だけエントリを登録してください。
+1つの設定ファイル = 1つの配信先サービスなので、複数サービスへ配信する場合は設定ファイルの数だけエントリを登録してください。`note2web init` を実行し、最後の確認プロンプトで launchd 用ファイルの生成を選ぶと、以下で説明する **env ファイル**と**plist**の2ファイルが自動生成されます(パスは自動解決済み)。以下は生成される内容の説明と、手動で作成する場合の例です。
 
-### 準備: ログディレクトリと実行スクリプト
+### 準備: ログディレクトリ
 
-まずログの出力先ディレクトリを作成します(cron / launchd 共通):
+まずログの出力先ディレクトリを作成します:
 
 ```bash
 mkdir -p ~/Library/Logs/note2web
 ```
 
-秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。`note2web` は npm には公開されていないため、`npx` 経由では起動できません(`npx --yes note2web` はレジストリの 404 で必ず失敗します)。代わりに、実行中インストールの `dist/cli.js` の絶対パスを `node` で直接起動します。`node` のパスは環境により異なり(Homebrew の Node では `/opt/homebrew/bin/node`、nvm では `~/.nvm/versions/node/<ver>/bin/node` 等)、cron / launchd の `PATH` は最小構成のため、ラッパースクリプト内で PATH を補ってから解決します。`note2web init` を実行すると、この CLI パスは自動的に解決されてラッパースクリプトへ埋め込まれます(以下は手動で作成する場合の例です)。
+### env ファイル(秘匿情報。`~/.config/note2web/env`)
 
-まず配置先ディレクトリを作成します:
+秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル**経由で渡します。`sync` / `doctor` は起動時にこのファイルを自動的に読み込む(前述の [env ファイルの自動読み込み](#env-ファイルの自動読み込みdoctor--sync-共通)節)ため、launchd / cron からシェルを介さず `node` を直接起動しても値が `process.env` に載ります。
 
 ```bash
-mkdir -p ~/.config/note2web ~/bin
+mkdir -p ~/.config/note2web
 ```
 
 次の内容を `~/.config/note2web/env` として保存します:
@@ -254,64 +261,34 @@ mkdir -p ~/.config/note2web ~/bin
 GH_TOKEN=xxxx
 R2_ACCESS_KEY_ID=xxxx
 R2_SECRET_ACCESS_KEY=xxxx
-# node の絶対パスを明示したい場合は指定(未指定なら下記ラッパーが PATH から解決)
-# NOTE2WEB_NODE=/opt/homebrew/bin/node
-# note2web の dist/cli.js の絶対パスを明示したい場合は指定
-# (note2web init が自動的に埋め込むため、通常は不要)
-# NOTE2WEB_CLI=/Users/you/src/note2web/dist/cli.js
-```
-
-次の内容を `~/bin/note2web-sync.sh` として保存します:
-
-```bash
-#!/bin/sh
-# ~/bin/note2web-sync.sh(chmod 700 で保護)
-# 使い方: note2web-sync.sh <config.yaml>
-set -eu
-set -a
-. "$HOME/.config/note2web/env"
-set +a
-# cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"
-# インストール先の dist/cli.js を絶対パスで指定する(note2web init が自動的に埋め込む値の例)
-CLI="${NOTE2WEB_CLI:-}"
-if [ -z "$CLI" ]; then
-  CLI="/Users/you/src/note2web/dist/cli.js"
-fi
-if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2
-  exit 2
-fi
-if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then
-  echo "note2web-sync.sh: note2web CLI not found (set NOTE2WEB_CLI in ~/.config/note2web/env)" >&2
-  exit 2
-fi
-exec "$NODE" "$CLI" sync --config "$1"
 ```
 
 保存後、権限を絞ります:
 
 ```bash
 chmod 600 ~/.config/note2web/env
-chmod 700 ~/bin/note2web-sync.sh
 ```
 
-登録前に一度、手元のシェルから `~/bin/note2web-sync.sh <config.yaml>` を実行し、cron / launchd と同じ経路で動作することを確認してください。
+### note2web は npm に公開されていない(`npx` は使えない)
+
+`note2web` は npm には公開されていないため、`npx --yes note2web` はレジストリの 404 で必ず失敗します。代わりに、実行中インストールの `dist/cli.js` の絶対パスを `node` で直接指定して起動します(`note2web init` はこのパスと `node` 自身の絶対パス(`process.execPath`)を自動的に解決し、生成する plist の `ProgramArguments` へ埋め込みます)。
 
 ### cron の例
 
 ```cron
-# 30分おきに Zenn へ配信
-*/30 * * * * /Users/you/bin/note2web-sync.sh /Users/you/.config/note2web/zenn.yaml >> /Users/you/Library/Logs/note2web/zenn-cron.log 2>&1
+# 30分おきに Zenn へ配信(PATH は cron の最小環境を補うため明示する)
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+*/30 * * * * /opt/homebrew/bin/node /Users/you/src/note2web/dist/cli.js sync --config /Users/you/.config/note2web/zenn.yaml >> /Users/you/Library/Logs/note2web/zenn-cron.log 2>&1
 
-# 1時間おきに Qiita へ配信(env ファイル・設定を分ける場合はラッパーを複製)
-0 * * * * /Users/you/bin/note2web-sync.sh /Users/you/.config/note2web/qiita.yaml >> /Users/you/Library/Logs/note2web/qiita-cron.log 2>&1
+# 1時間おきに Qiita へ配信(設定ファイルを変えるだけで、同じ node 実行ファイルを再利用できる)
+0 * * * * /opt/homebrew/bin/node /Users/you/src/note2web/dist/cli.js sync --config /Users/you/.config/note2web/qiita.yaml >> /Users/you/Library/Logs/note2web/qiita-cron.log 2>&1
 ```
 
-crontab・launchd の plist はいずれも平文で読まれ得るため、トークン類は上記の `chmod 600` した env ファイルにのみ置いてください(より堅牢にするなら macOS キーチェーン + `security find-generic-password` での取得も選択肢です)。cron から起動するシェル/`node` バイナリにも「フルディスクアクセス」権限が必要な点に注意してください。
+crontab・launchd の plist はいずれも平文で読まれ得るため、トークン類は上記の `chmod 600` した env ファイルにのみ置いてください(より堅牢にするなら macOS キーチェーン + `security find-generic-password` での取得も選択肢です)。cron から起動する `node` バイナリにも「フルディスクアクセス」権限が必要な点に注意してください(次の launchd 節を参照)。
 
 ### launchd の例(`~/Library/LaunchAgents/com.note2web.zenn.plist`)
+
+`node` を直接起動し、`EnvironmentVariables` には秘匿情報を含まない `PATH` だけを含めます(トークン等は上記の env ファイルにのみ置き、CLI 自身が自動読み込みします)。以下は説明用の例で、実際のパスは環境ごとに異なります(`note2web init` が実際の絶対パスを埋め込んで生成します)。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -322,9 +299,17 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
   <string>com.note2web.zenn</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/bin/note2web-sync.sh</string>
+    <string>/Users/you/.nvm/versions/node/v22.0.0/bin/node</string>
+    <string>/Users/you/src/note2web/dist/cli.js</string>
+    <string>sync</string>
+    <string>--config</string>
     <string>/Users/you/.config/note2web/zenn.yaml</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/you/.nvm/versions/node/v22.0.0/bin:/Users/you/.rbenv/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>StartInterval</key>
   <integer>1800</integer>
   <key>StandardOutPath</key>
@@ -335,7 +320,13 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 </plist>
 ```
 
-サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.note2web.<service>` を使います。トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
+**なぜ `node` を直接起動するのか(以前のバージョンからの変更点)**: 以前のバージョンはシェルラッパー(`~/bin/note2web-sync.sh`)を `ProgramArguments[0]` に置き、そこから `node` を起動していました。しかし macOS の TCC(フルディスクアクセス等のプライバシー制御)は `ProgramArguments[0]` の実行ファイルを「責任のあるプロセス」として扱うため、`/bin/sh` にフルディスクアクセスを許可しても実機で権限が正しく効かないケースがありました。現在のバージョンは `node` 実行ファイル自身を `ProgramArguments[0]` に置くため、**その `node` バイナリへフルディスクアクセスを許可するだけでジョブ全体(`node` が起動する `ruby`/`bundle` を含む)に権限が及びます**。**旧バージョンが生成した `~/bin/note2web-sync.sh` は note2web からはもう使われません**。残っていても実害はありませんが、他の用途で使っていなければ削除して構いません。
+
+サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.note2web.<service>` を使います。
+
+**フルディスクアクセスの付与先**: 「システム設定」→「プライバシーとセキュリティ」→「フルディスクアクセス」を開き、**ターミナルアプリではなく上記の `node` 実行ファイル自身**を追加してください(`node -e 'console.log(process.execPath)'` で確認できます。`/bin/sh` や `note2web-sync.sh` を追加しても効果がありません)。
+
+note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
 
 ## トラブルシューティング
 
@@ -351,7 +342,7 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 
 代表的な原因は次のとおりです:
 
-1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。`~/.config/note2web/env` に `PATH=/opt/homebrew/opt/ruby/bin:${PATH}` のような行を追記してください(`note2web init` が生成する env ファイルのテンプレートにもヒントのコメントが入っています)
+1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / asdf / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。launchd については `note2web init` が生成する plist の `EnvironmentVariables` にホームディレクトリの rbenv/asdf/rvm の shim ディレクトリを自動的に含めます(issue #71)。それでも解決しない場合は、実行経路ごとに `PATH` の設定場所が異なる点に注意してください: **対話シェルから直接実行する場合**はシェルの初期化ファイル(`~/.zshrc` 等)で `PATH` を設定し、**launchd 経由の場合**は生成済み plist の `EnvironmentVariables` の `PATH` を使い、**cron を使う場合**は crontab 側のエントリに `PATH=...` を明示してください(env ファイルには `PATH` を書きません。`note2web init` が生成する env ファイルのテンプレートにもこの点のヒントコメントが入っています)
 2. **gem がインストールされていない**: `apple_cloud_notes_parser` の clone 先で `bundle install` を実行していないと、`bundle exec ruby notes_cloud_ripper.rb` は `Could not find gem 'sqlite3'...` のようなメッセージで失敗します。以下を実行してください:
    ```sh
    cd ~/tools/apple_cloud_notes_parser   # exporter.parser_path と同じパス
@@ -365,13 +356,13 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 
 **事前チェック**: `note2web doctor --config <path>` は `ruby` / `bundle` コマンドの存在、Ruby のバージョン(>= 3.0)、`bundle check` による gem の準備状況に加えて、Notes コンテナディレクトリ(`exporter.notes_container`)と `NoteStore.sqlite` の存在・読み取り可否までまとめて確認します(issue #69)。まずこれを実行してください。
 
-**手動デバッグ**: cron / launchd と同じ経路を手元のシェルで再現するには、ラッパースクリプトを直接実行します:
+**手動デバッグ**: cron / launchd と同じ経路を手元のシェルで再現するには、生成された plist の `ProgramArguments` と同じ `node` / `dist/cli.js` の絶対パスで直接実行します:
 
 ```sh
-~/bin/note2web-sync.sh ~/.config/note2web/zenn.yaml
+node /Users/you/src/note2web/dist/cli.js sync --config ~/.config/note2web/zenn.yaml
 ```
 
-これで launchd 経由と同じ `PATH` 補完・env ファイル読み込みで実行されるため、対話シェルでは再現しない `PATH` / 環境変数まわりの問題を切り分けられます。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o /tmp/out --individual-files --uuid` を直接実行し、parser 単体のエラーメッセージを確認してください。
+env ファイルの読み込みは CLI 自身が自動で行う(前述の [env ファイルの自動読み込み](#env-ファイルの自動読み込みdoctor--sync-共通)節)ため、`set -a; . env; set +a` のような追加のシェル設定は不要です。`PATH` 関連の問題を切り分けたい場合は、生成された plist(`~/Library/LaunchAgents/com.note2web.<service>.plist`)の `EnvironmentVariables` にある `PATH` の値を一時的に `export` してから実行してください。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o /tmp/out --individual-files --uuid` を直接実行し、parser 単体のエラーメッセージを確認してください。
 
 **`launcher: ruby` への切り替え**: Bundler を経由せず gem 環境が別の方法(システム全体への gem インストール等)で解決できている場合は、設定 YAML で `exporter.launcher: ruby` を指定すると `bundle exec` を挟まない従来どおりの起動に戻せます。
 
@@ -385,7 +376,7 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 
 代表的な原因は次のとおりです(`note2web` は該当パターンを検出すると、上記のようにエラーメッセージの末尾へ同内容の日本語ヒントを自動的に追記します):
 
-1. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。**ターミナルアプリではなく、実行コンテキスト自体**(launchd / cron から起動する場合はその実行コンテキスト)への付与が必要です
+1. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。**ターミナルアプリではなく、実行コンテキスト自体**(launchd / cron から起動する場合は、それらが直接起動する `node` 実行ファイル自身)への付与が必要です。`ProgramArguments[0]` が `node` である場合、TCC の責任のあるプロセスは `node` 自身になります(`/bin/sh` やシェルラッパーへ許可しても効きません)
 2. **Notes.app が起動したままで WAL がチェックポイントされていない**: Apple Notes は変更を Write-Ahead Log(WAL)にバッファし、アプリの終了時などにメインの `NoteStore.sqlite` へ反映(チェックポイント)します。Notes.app を起動したまま `sync` を実行すると、テーブルがまだ存在しない・スキーマが不完全な状態の DB を読むことがあります。Notes.app を一度終了してから再実行してください
 3. **macOS バージョン間での `NoteStore.sqlite` のスキーマ不一致**: `apple_cloud_notes_parser` が対応していない新しい(または非常に古い)macOS の Notes スキーマだと、想定したテーブルが見つからず失敗します。`apple_cloud_notes_parser` を最新版に更新して再試行してください
 

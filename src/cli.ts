@@ -117,16 +117,14 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   }
 
   // env ファイル読み込み(issue #69「doctor と sync-under-launchd とで検証環境が一致しない」)。
-  // `note2web init` が生成するラッパースクリプト(`~/bin/note2web-sync.sh`)は
-  // `set -a; . "$HOME/.config/note2web/env"; set +a` で env ファイルをシェル評価してから
-  // `sync` を起動するため、launchd/cron 経由の実行では値が既に `process.env` に載っている。
-  // しかし CLI 自身(`loadConfig` の `*_env` チェック・`checkDependencies` の `GH_TOKEN` 等)は
-  // これまで env ファイルを一切読んでおらず、対話シェルから直接 `doctor`/`sync` を実行した
-  // 場合に「環境変数が未設定」という偽陽性を報告していた。ここで doctor/sync 共通に、
-  // ラッパースクリプトと同じ既定パス(設定ファイルと同じディレクトリの `env`。`--env-file` で
-  // 上書き可能)を読み込み、**まだ `process.env` に無い名前だけ**を補う——既存の環境変数は
-  // 常に優先することで、ラッパースクリプト実行時(`set -a; . env; set +a` の後に
-  // `sync` を起動する)と同じ優先順位を再現する。値は一切ログに出さない(`src/env-file.ts`
+  // launchd(issue #71 以降は `node` を直接起動し、`EnvironmentVariables` には非秘匿の
+  // `PATH` しか置かない)経由の実行では、秘匿情報を含む環境変数は plist ではなくこの
+  // CLI 自身の起動時読み込みでしか渡す手段が無い。しかし `loadConfig` の `*_env` チェック・
+  // `checkDependencies` の `GH_TOKEN` 等はかつて env ファイルを一切読んでおらず、対話シェル
+  // から直接 `doctor`/`sync` を実行した場合に「環境変数が未設定」という偽陽性を報告して
+  // いた。ここで doctor/sync 共通に、設定ファイルと同じディレクトリの既定パス(`env`。
+  // `--env-file` で上書き可能)を読み込み、**まだ `process.env` に無い名前だけ**を補う
+  // ——既存のシェル環境変数は常に優先する。値は一切ログに出さない(`src/env-file.ts`
   // 参照)。`init` は生成物を書き出すだけのサブコマンドで、この時点では既に `return` 済みの
   // ため、ここへは到達しない(`init` の未設定環境変数の案内は意図的に現在のシェルの状態を
   // そのまま反映する)。
