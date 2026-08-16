@@ -536,7 +536,17 @@ describe('runInit', () => {
       // env の値そのものは plist のどこにも出現しない。
       expect(plistContent).not.toMatch(/GH_TOKEN|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY/);
 
-      expect(result.summary.join('\n')).toMatch(/launchctl load/);
+      // 次に実行するコマンドの案内: LaunchAgent はユーザー単位のため sudo なしの
+      // `launchctl bootstrap gui/$(id -u)` を案内する(レガシーな `launchctl load` や
+      // `sudo launchctl` は案内しない)。
+      const summary = result.summary.join('\n');
+      expect(summary).toContain('次に実行するコマンド');
+      expect(summary).toContain(`launchctl bootstrap gui/$(id -u) ${plistPath}`);
+      expect(summary).toContain('launchctl kickstart -k gui/$(id -u)/com.note2web.zenn');
+      expect(summary).toContain(`note2web doctor --config`);
+      expect(summary).toContain(`note2web sync --config`);
+      expect(summary).not.toContain('launchctl load');
+      expect(summary).not.toContain('sudo launchctl');
     });
 
     it('appends only missing variable names to an existing env file without touching existing values', async () => {
@@ -698,7 +708,12 @@ describe('runInit', () => {
 
       expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(false);
       expect(fs.files.has(`${HOME_DIR}/bin/note2web-sync.sh`)).toBe(false);
-      expect(result.summary.join('\n')).toContain('Skipped launchd file generation');
+      const summary = result.summary.join('\n');
+      expect(summary).toContain('Skipped launchd file generation');
+      // launchd を生成しない場合も、次に実行するコマンド(env 設定 → doctor → sync)を案内する。
+      expect(summary).toContain('次に実行するコマンド');
+      expect(summary).toContain('note2web doctor --config');
+      expect(summary).toContain('note2web sync --config');
     });
   });
 });

@@ -313,7 +313,7 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 </plist>
 ```
 
-サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl load ~/Library/LaunchAgents/com.example.note2web.<service>.plist` で登録します(トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます)。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
+サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.example.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.example.note2web.<service>` を使います。トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
 
 ## ログ
 
