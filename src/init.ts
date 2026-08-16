@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
   DEFAULT_TIMEZONE,
@@ -97,8 +98,8 @@ export interface RunInitOptions {
   commandExistsFn?: (command: string) => Promise<boolean>;
   /** `@qiita/qiita-cli` がローカル解決できるかどうかの注入点(テスト用)。 */
   qiitaCliResolvableFn?: () => boolean;
-  /** note2web 自身のバージョン文字列を読む注入点(テスト用)。既定は `readPackageVersion`。 */
-  readPackageVersionFn?: () => string | undefined;
+  /** 実行中インストールの `dist/cli.js` の絶対パスを解決する注入点(テスト用)。既定は `resolveCliEntrypoint`。 */
+  resolveCliEntrypointFn?: () => string | undefined;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /** ホームディレクトリ(`~` 展開・既定パス算出の基準)。既定は `os.homedir()`。テストで実ホームを触らないための注入点。 */
@@ -336,16 +337,22 @@ function defaultQiitaCliResolvable(): boolean {
 }
 
 /**
- * note2web 自身の `package.json` から現在のバージョン文字列を読む(ラッパースクリプトの
- * `npx --yes note2web@<version>` に埋め込む)。読み取れない場合は `undefined` を返し、
- * 呼び出し側でバージョン指定なし(unpinned)のラッパーへフォールバックする。
+ * 実行中の note2web インストールにおける CLI エントリポイント(`dist/cli.js`)の絶対パスを
+ * 解決する(issue #63: note2web は npm へ公開されていないため、ラッパースクリプトから
+ * `npx --yes note2web@<version>` を呼ぶと必ず 404 になる。代わりに `node` で直接この
+ * エントリポイントを起動する)。`src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と
+ * 同じ手法で、`import.meta.url`(実行時は `dist/init.js`)から見た兄弟ファイルとして
+ * `cli.js`(= `dist/cli.js`)を解決する。
+ *
+ * 存在確認は行わない(純粋に計算のみ) —— ここで `existsSync` 等の実ファイルシステムを
+ * 見てしまうと、テストの DI フェイクからは見えない実ファイルの有無に依存してしまい、
+ * `src/` から直接動かす開発時の実行(ビルド前で `dist/cli.js` が無い)が壊れる。実際に
+ * ファイルが存在するかどうかの検証は、生成したラッパースクリプト自身の実行時チェック
+ * (`[ ! -f "$CLI" ]`)に委ねる。
  */
-function readPackageVersion(): string | undefined {
+function resolveCliEntrypoint(): string | undefined {
   try {
-    const require = createRequire(import.meta.url);
-    // `src/init.ts`(ビルド後は `dist/init.js`)から見て1つ上がプロジェクトルート。
-    const pkg = require('../package.json') as { version?: unknown };
-    return typeof pkg.version === 'string' ? pkg.version : undefined;
+    return fileURLToPath(new URL('cli.js', import.meta.url));
   } catch {
     return undefined;
   }
@@ -702,6 +709,15 @@ function envFileLine(name: string): string {
 }
 
 /**
+ * env ファイルのテンプレートにのみ載せる任意の上書き変数名(issue #63)。ラッパースクリプト
+ * (`buildWrapperScript`)の `node` / CLI エントリポイントを利用者が明示的に上書きしたい場合の
+ * 逃げ道として名前だけを案内する。`requiredEnvNames`(`collectDependencyWarnings` の
+ * unset 警告・サマリの「必要な変数」一覧)には含めない —— どちらも未設定のままで構わない
+ * 任意項目であり、sync 実行をブロックする必須変数ではないため。
+ */
+const OPTIONAL_ENV_TEMPLATE_NAMES = ['NOTE2WEB_NODE', 'NOTE2WEB_CLI'] as const;
+
+/**
  * `~/.config/note2web/env` を作成、または既存ファイルに不足している変数名だけを追記する。
  * 既存の値は一切書き換えない(CORRECTION A)。
  */
@@ -748,12 +764,25 @@ async function ensureEnvFile(
 }
 
 /**
- * README「cron / launchd での定期実行」節と同一の形の起動ラッパースクリプト。
- * `version` が取得できなかった場合(`readPackageVersion` が `undefined` を返した場合)は
- * `@<version>` のピン留めを省略し、`npx --yes note2web`(unpinned)を使う。
+ * 二重引用符(`"..."`)で囲んだシェルの単語の中に安全に埋め込めるよう、パス文字列を
+ * エスケープする。二重引用符の中でも特別扱いされる `` \ `` `"` `` ` `` `$` の4文字だけを
+ * `\` でエスケープすればよい(POSIX シェルの引用規則。他の文字は二重引用符の中では
+ * リテラル扱いになる)。
  */
-function buildWrapperScript(version: string | undefined): string {
-  const pinnedPackage = version !== undefined ? `note2web@${version}` : 'note2web';
+function escapeShellDoubleQuoted(value: string): string {
+  return value.replaceAll(/[\\"`$]/g, (char) => `\\${char}`);
+}
+
+/**
+ * README「cron / launchd での定期実行」節と同一の形の起動ラッパースクリプト
+ * (issue #63)。note2web は npm へ公開されていないため `npx` は一切使わず、
+ * `resolveCliEntrypoint` が解決した `dist/cli.js` の絶対パスを `node` で直接起動する。
+ * `cliEntrypoint` が `undefined`(パス解決に失敗した場合)は既定値を空欄にし、
+ * `NOTE2WEB_CLI` が env ファイル側で設定されない限りラッパー自身の実行時チェックで
+ * exit 2 になるようにする。
+ */
+function buildWrapperScript(cliEntrypoint: string | undefined): string {
+  const cliDefault = cliEntrypoint !== undefined ? escapeShellDoubleQuoted(cliEntrypoint) : '';
   return (
     '#!/bin/sh\n' +
     '# ~/bin/note2web-sync.sh(chmod 700 で保護)\n' +
@@ -764,12 +793,17 @@ function buildWrapperScript(version: string | undefined): string {
     'set +a\n' +
     '# cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う\n' +
     'PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n' +
-    'NPX="${NOTE2WEB_NPX:-$(command -v npx || true)}"\n' +
-    'if [ -z "$NPX" ] || [ ! -x "$NPX" ]; then\n' +
-    '  echo "note2web-sync.sh: npx not found (set NOTE2WEB_NPX in ~/.config/note2web/env)" >&2\n' +
+    'NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"\n' +
+    `CLI="\${NOTE2WEB_CLI:-${cliDefault}}"\n` +
+    'if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then\n' +
+    '  echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2\n' +
     '  exit 2\n' +
     'fi\n' +
-    `exec "$NPX" --yes ${pinnedPackage} sync --config "$1"\n`
+    'if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then\n' +
+    '  echo "note2web-sync.sh: note2web CLI not found (set NOTE2WEB_CLI in ~/.config/note2web/env)" >&2\n' +
+    '  exit 2\n' +
+    'fi\n' +
+    'exec "$NODE" "$CLI" sync --config "$1"\n'
   );
 }
 
@@ -779,7 +813,7 @@ function buildWrapperScript(version: string | undefined): string {
  */
 async function ensureWrapperScript(
   wrapperPath: string,
-  version: string | undefined,
+  cliEntrypoint: string | undefined,
   promptFn: InitPromptFn,
   options: {
     fileExistsFn: (path: string) => Promise<boolean>;
@@ -803,7 +837,7 @@ async function ensureWrapperScript(
     }
   }
 
-  await writeFileFn(wrapperPath, buildWrapperScript(version), { mode: 0o700 });
+  await writeFileFn(wrapperPath, buildWrapperScript(cliEntrypoint), { mode: 0o700 });
   await chmodFn(wrapperPath, 0o700);
   return { written: true };
 }
@@ -872,7 +906,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     chmodFn = defaultChmod,
     commandExistsFn = commandExists,
     qiitaCliResolvableFn = defaultQiitaCliResolvable,
-    readPackageVersionFn = readPackageVersion,
+    resolveCliEntrypointFn = resolveCliEntrypoint,
     env = process.env,
     homeDir = homedir(),
   } = options;
@@ -1014,13 +1048,17 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     );
     if (generateLaunchd) {
       const envPath = join(homeDir, '.config', 'note2web', 'env');
-      const envResult = await ensureEnvFile(envPath, requiredEnvNames, {
-        fileExistsFn,
-        readFileFn,
-        writeFileFn,
-        mkdirFn,
-        chmodFn,
-      });
+      const envResult = await ensureEnvFile(
+        envPath,
+        [...requiredEnvNames, ...OPTIONAL_ENV_TEMPLATE_NAMES],
+        {
+          fileExistsFn,
+          readFileFn,
+          writeFileFn,
+          mkdirFn,
+          chmodFn,
+        },
+      );
       if (envResult.created) {
         summary.push(`Created env file template: ${envPath} (chmod 600, values still blank)`);
       } else if (envResult.addedNames.length > 0) {
@@ -1032,15 +1070,15 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       }
 
       const wrapperPath = join(homeDir, 'bin', 'note2web-sync.sh');
-      const version = readPackageVersionFn();
-      if (version === undefined) {
+      const cliEntrypoint = resolveCliEntrypointFn();
+      if (cliEntrypoint === undefined) {
         summary.push(
-          'Warning: could not determine the note2web package version; ' +
-            'the generated wrapper script will run unpinned "npx --yes note2web" ' +
-            'instead of a version-pinned "note2web@<version>".',
+          'Warning: could not resolve the note2web CLI entrypoint path; ' +
+            'the generated wrapper script will require NOTE2WEB_CLI to be set ' +
+            'in ~/.config/note2web/env (see the env file template).',
         );
       }
-      const wrapperResult = await ensureWrapperScript(wrapperPath, version, ask_, {
+      const wrapperResult = await ensureWrapperScript(wrapperPath, cliEntrypoint, ask_, {
         fileExistsFn,
         writeFileFn,
         mkdirFn,
@@ -1048,7 +1086,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       });
       summary.push(
         wrapperResult.written
-          ? `Wrote wrapper script: ${wrapperPath} (chmod 700, ${version !== undefined ? `note2web@${version}` : 'note2web (unpinned)'})`
+          ? `Wrote wrapper script: ${wrapperPath} (chmod 700, ${cliEntrypoint !== undefined ? `runs ${cliEntrypoint}` : 'NOTE2WEB_CLI required'})`
           : `Kept existing wrapper script unchanged: ${wrapperPath}`,
       );
 
