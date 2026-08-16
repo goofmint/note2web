@@ -770,8 +770,13 @@ describe('runInit', () => {
       expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(true);
       const summary = result.summary.join('\n');
       expect(summary).toMatch(/skipping launchd plist generation/i);
-      expect(summary).toContain('note2web doctor --config');
-      expect(summary).toContain('note2web sync --config');
+      // 未ビルド(dist/cli.js 不在 = note2web コマンドも PATH に無い)状態なので、
+      // 復旧手順は PATH 上の `note2web` ではなく、ビルド後の成果物を node で直接
+      // 実行する形で案内される。
+      expect(summary).toContain('npm run build');
+      expect(summary).toContain('node dist/cli.js doctor --config');
+      expect(summary).toContain('node dist/cli.js sync --config');
+      expect(summary).not.toMatch(/(^|\s)note2web doctor --config/m);
     });
 
     it('skips plist generation (but still writes the env file) with a warning when the resolved CLI entrypoint path does not exist on disk (e.g. before "npm run build")', async () => {
@@ -797,8 +802,13 @@ describe('runInit', () => {
       expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(true);
       const summary = result.summary.join('\n');
       expect(summary).toMatch(/skipping launchd plist generation/i);
-      expect(summary).toContain('note2web doctor --config');
-      expect(summary).toContain('note2web sync --config');
+      // 未ビルド(dist/cli.js 不在 = note2web コマンドも PATH に無い)状態なので、
+      // 復旧手順は PATH 上の `note2web` ではなく、ビルド後の成果物を node で直接
+      // 実行する形で案内される。
+      expect(summary).toContain('npm run build');
+      expect(summary).toContain('node dist/cli.js doctor --config');
+      expect(summary).toContain('node dist/cli.js sync --config');
+      expect(summary).not.toMatch(/(^|\s)note2web doctor --config/m);
     });
 
     it('colocates the generated env file with a custom --config path instead of the default ~/.config/note2web', async () => {

@@ -1112,15 +1112,23 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
         // 生成はスキップし、利用者にビルド済み/インストール済みの状態で再実行するよう案内する。
         summary.push(
           'Warning: could not find the note2web CLI entrypoint (dist/cli.js); ' +
-            'skipping launchd plist generation. Re-run "note2web init" from a built/installed ' +
-            'checkout (e.g. after "npm run build") to generate the plist.',
+            'skipping launchd plist generation. Run "npm run build" in the note2web checkout, ' +
+            'then re-run init ("node dist/cli.js init --config <path>") to generate the plist.',
         );
         summary.push('');
         summary.push('次に実行するコマンド(上から順に):');
         summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
         summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
-        summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
-        summary.push(`  3. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
+        // この分岐は dist/cli.js が無い(=未ビルドで note2web コマンドも PATH に無い)状態
+        // なので、PATH 上の `note2web` ではなく、ビルド後に成果物を node で直接実行する
+        // 手順を案内する(issue #71 レビュー)。
+        summary.push('  2. note2web をビルドする: npm run build (note2web のチェックアウトで実行)');
+        summary.push(
+          `  3. 事前チェック: node dist/cli.js doctor --config ${shellQuote(targetPath)}`,
+        );
+        summary.push(
+          `  4. 手動で初回同期: node dist/cli.js sync --config ${shellQuote(targetPath)}`,
+        );
       } else {
         const nodeExecPath = nodeExecPathFn();
         const path = await buildLaunchdPath(nodeExecPath, homeDir, fileExistsFn);
