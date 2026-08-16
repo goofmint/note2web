@@ -53,7 +53,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
-import { DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
+import { DEFAULT_NOTES_CONTAINER, DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
 import { expandHome } from './paths.js';
 import {
   commandExists,
@@ -221,8 +221,16 @@ export class DependencyCheckError extends Error {
 export interface CheckDependenciesOptions {
   /** コマンド存在確認の注入点。既定は `src/subprocess.ts` の `commandExists`。 */
   commandExistsFn?: (command: string) => Promise<boolean>;
-  /** ファイル存在確認の注入点(parser 本体の実在確認に使う)。既定は実 `fs.access`。 */
+  /**
+   * ファイル存在確認の注入点(parser 本体・Notes コンテナディレクトリの実在確認に使う。
+   * issue #69)。既定は実 `fs.access(path, constants.F_OK)`。
+   */
   fileExistsFn?: (path: string) => Promise<boolean>;
+  /**
+   * ファイル読み取り可否確認の注入点(`NoteStore.sqlite` の読み取り可否確認に使う。
+   * issue #69)。既定は実 `fs.access(path, constants.R_OK)`。
+   */
+  fileReadableFn?: (path: string) => Promise<boolean>;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /**
@@ -253,6 +261,16 @@ async function defaultFileExists(path: string): Promise<boolean> {
   }
 }
 
+/** `fileReadableFn` の既定実装(issue #69)。読み取り権限(`R_OK`)まで確認する。 */
+async function defaultFileReadable(path: string): Promise<boolean> {
+  try {
+    await access(path, fsConstants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * design.md §6 の依存表に基づき、`config.service` に必要な依存だけを検証する
  * (「不要な依存は要求しない」)。不足があれば `DependencyCheckError` を投げる
@@ -266,6 +284,7 @@ export async function checkDependencies(
   const {
     commandExistsFn = commandExists,
     fileExistsFn = defaultFileExists,
+    fileReadableFn = defaultFileReadable,
     env = process.env,
     qiitaCliResolvableFn = defaultQiitaCliResolvable,
     nodeVersionFn = () => process.version,
@@ -304,6 +323,34 @@ export async function checkDependencies(
   if (!parserEntryPointExists) {
     problems.push({
       message: `apple_cloud_notes_parser entry point not found: ${parserEntryPoint} (check exporter.parser_path)`,
+    });
+  }
+
+  // Notes コンテナディレクトリ / NoteStore.sqlite の事前チェック(issue #69 問題2)。
+  // フルディスクアクセス未許可・Notes.app が開いたままで WAL 未チェックポイント・macOS の
+  // バージョン間でのスキーマ不一致といった状況では、parser の実行が
+  // `no such table: ZACCOUNT: (SQLite3::SQLException)` という原因の分かりにくいエラーで
+  // 失敗しがちだった。parser を実際に起動する前にコンテナディレクトリと NoteStore.sqlite の
+  // 存在・読み取り可否を確認し、最も疑わしい原因(フルディスクアクセス)へ早期に誘導する
+  // (`src/exporter/apple-notes.ts` の `runExport` 側にも、実際に parser がこの種のエラーで
+  // 失敗した場合の同種のヒントを追加している。どちらも自動修復は行わず、案内のみ)。
+  const notesContainer = expandHome(config.exporter?.notes_container ?? DEFAULT_NOTES_CONTAINER);
+  const noteStorePath = join(notesContainer, 'NoteStore.sqlite');
+  const notesContainerExists = await fileExistsFn(notesContainer);
+  if (!notesContainerExists) {
+    problems.push({
+      message:
+        `Apple Notes container directory not found: ${notesContainer} ` +
+        '(check exporter.notes_container)',
+    });
+  } else if (!(await fileReadableFn(noteStorePath))) {
+    problems.push({
+      message:
+        `Apple Notes database not found or not readable: ${noteStorePath}; ` +
+        'this most likely means Full Disk Access (フルディスクアクセス) has not been granted ' +
+        'to the process executing note2web (the Terminal app for interactive runs, or the ' +
+        'launchd/cron execution context itself for unattended runs) — see the README ' +
+        'troubleshooting section for how to grant it',
     });
   }
 

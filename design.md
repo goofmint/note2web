@@ -74,11 +74,12 @@ note2web sync --config ~/.config/note2web/zenn.yaml
 ### 5.1 CLI(`src/cli.ts`)
 
 ```
-note2web sync --config <path>     # メインコマンド。エクスポート→変換→公開を実行
-note2web doctor --config <path>   # 依存 CLI・環境変数・権限の事前チェックのみ実行
+note2web sync --config <path> [--env-file <path>]     # メインコマンド。エクスポート→変換→公開を実行
+note2web doctor --config <path> [--env-file <path>]   # 依存 CLI・環境変数・権限の事前チェックのみ実行
 ```
 
 - `doctor` は NFR-05(依存欠如時の明確なエラー)を独立コマンドとしても提供するもの。`sync` も実行冒頭で同じチェックを行い、欠けていれば何も配信せずに失敗する
+- **env ファイルの自動読み込み(issue #69)**: `sync` / `doctor` は設定検証(`loadConfig`)・依存チェック(`checkDependencies`)の前に、設定ファイルと同じディレクトリの `env` ファイル(既定パス。`--env-file` で上書き可能)を読み込み(`src/env-file.ts`)、`process.env` にまだ無い名前だけを補う。これは「cron / launchd での定期実行」節のラッパースクリプトが `set -a; . env; set +a` で行っている入力と同じものを CLI 自身にも与えるためで、doctor の検証環境を sync-under-launchd の実行環境と一致させる(既存のシェル環境変数は常に優先)。`init` はこの読み込みを行わない(生成物を書き出すのみのサブコマンドのため)
 - 終了コード: 全ノート成功(スキップ含む)= 0、1件でも失敗 = 1、実行前提の不成立(設定不正・依存欠如)= 2
 
 ### 5.2 Exporter(`src/exporter/`)
@@ -242,6 +243,8 @@ interface Publisher {
 
 ```text
 sync:
+  0. env ファイルの読み込み(既定: 設定ファイルと同じディレクトリの `env`。`--env-file` で上書き可。
+     `process.env` に未設定の名前のみ補う。issue #69。§5.1 参照)
   1. 設定 YAML 読み込み・検証(環境変数の存在チェック含む)
   2. 依存チェック（下表。service ごとに必要なものだけ）        … 失敗なら exit 2
   3. Exporter 実行 → 一時ディレクトリ
@@ -265,7 +268,7 @@ sync:
 
 | service | 必須依存(共通分を除く) |
 |---|---|
-| 共通 | `ruby`(>= 3.0)+ `apple_cloud_notes_parser`、R2 / S3 の認証環境変数。`exporter.launcher`(既定 `bundle`)が `bundle` のときは加えて `bundle` コマンドと `bundle check` による gem 準備状況(issue #67) |
+| 共通 | `ruby`(>= 3.0)+ `apple_cloud_notes_parser`、R2 / S3 の認証環境変数。`exporter.launcher`(既定 `bundle`)が `bundle` のときは加えて `bundle` コマンドと `bundle check` による gem 準備状況(issue #67)。加えて `exporter.notes_container` が指す Notes コンテナディレクトリと `NoteStore.sqlite` の存在・読み取り可否(issue #69。未許可が最も多い原因はフルディスクアクセス未付与で、フルディスクアクセスが無いと `apple_cloud_notes_parser` は `no such table: ZACCOUNT: (SQLite3::SQLException)` という原因の分かりにくいエラーで失敗する) |
 | zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
 | qiita | Node.js(qiita-cli の要求 engine >= 20)、`@qiita/qiita-cli`(note2web の `dependencies` に固定バージョンで追加し、`npx --no-install` で解決。§5.7。**現時点では未導入・依存チェック未実装 = T-21 で実装する契約**)、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
 | devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |

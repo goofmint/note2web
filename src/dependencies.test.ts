@@ -112,6 +112,7 @@ describe('checkDependencies', () => {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn: fakeRubyBundleSubprocess(),
+          fileReadableFn: () => Promise.resolve(true),
         },
       ),
     ).resolves.toBeUndefined();
@@ -268,6 +269,7 @@ describe('checkDependencies', () => {
           nodeVersionFn: () => 'v22.22.1',
           qiitaCliEnginesFn: () => '>=22.22.1',
           runSubprocessFn: fakeRubyBundleSubprocess(),
+          fileReadableFn: () => Promise.resolve(true),
         },
       ),
     ).resolves.toBeUndefined();
@@ -287,6 +289,7 @@ describe('checkDependencies', () => {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
           env: {},
           runSubprocessFn: fakeRubyBundleSubprocess(),
+          fileReadableFn: () => Promise.resolve(true),
         },
       ),
     ).resolves.toBeUndefined();
@@ -310,6 +313,7 @@ describe('checkDependencies', () => {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
           env: {},
           runSubprocessFn: fakeRubyBundleSubprocess(),
+          fileReadableFn: () => Promise.resolve(true),
         },
       ),
     ).resolves.toBeUndefined();
@@ -336,7 +340,10 @@ describe('checkDependencies', () => {
 
   it('expands a leading ~ in exporter.parser_path when locating notes_cloud_ripper.rb', async () => {
     // 実ファイルシステムに依存せず、fileExistsFn へ渡された実際のパスを記録して検証する
-    // (CodeRabbit review, PR #47: ホスト環境の実在有無に依存させない)。
+    // (CodeRabbit review, PR #47: ホスト環境の実在有無に依存させない)。`fileExistsFn` は
+    // parser 本体の実在確認だけでなく、issue #69 で追加した Notes コンテナディレクトリの
+    // 実在確認にも使われるため、ここでは2回(parser entry point → notes container の順)
+    // 呼ばれる。
     const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
     const checkedPaths: string[] = [];
     const error = await expectDependencyError(buildConfig(), {
@@ -349,7 +356,7 @@ describe('checkDependencies', () => {
       runSubprocessFn: fakeRubyBundleSubprocess(),
     });
 
-    expect(checkedPaths).toHaveLength(1);
+    expect(checkedPaths).toHaveLength(2);
     const checkedPath = checkedPaths[0];
     if (checkedPath === undefined) {
       throw new Error('test setup: fileExistsFn was not called');
@@ -359,9 +366,18 @@ describe('checkDependencies', () => {
     expect(checkedPath).toMatch(/^\//);
     expect(checkedPath.endsWith('notes_cloud_ripper.rb')).toBe(true);
 
+    // 2件目(Notes コンテナディレクトリ)も同じく `~` が展開されていること。
+    const containerCheckedPath = checkedPaths[1];
+    if (containerCheckedPath === undefined) {
+      throw new Error('test setup: fileExistsFn was not called for the notes container');
+    }
+    expect(containerCheckedPath).not.toContain('~/');
+    expect(containerCheckedPath).toMatch(/^\//);
+
     const message = error.problems.map((problem) => problem.message).join('\n');
     expect(message).not.toContain('~/');
     expect(message).toContain(checkedPath);
+    expect(message).toContain(containerCheckedPath);
   });
 
   describe('Ruby version check (issue #67)', () => {
@@ -478,6 +494,7 @@ describe('checkDependencies', () => {
                 stderr: '',
               },
             }),
+            fileReadableFn: () => Promise.resolve(true),
           },
         ),
       ).resolves.toBeUndefined();
@@ -574,10 +591,100 @@ describe('checkDependencies', () => {
               }
               return fakeRubyBundleSubprocess()(options);
             },
+            fileReadableFn: () => Promise.resolve(true),
           },
         ),
       ).resolves.toBeUndefined();
       expect(bundleCalled).toBe(false);
+    });
+  });
+
+  describe('Notes container / NoteStore.sqlite preflight (issue #69)', () => {
+    it('reports a problem naming the path and config key when the notes container directory is missing', async () => {
+      const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
+      const missingContainer = join(dir, 'missing-container');
+      const error = await expectDependencyError(
+        buildConfig({
+          exporter: { parser_path: parserPath, notes_container: missingContainer },
+        }),
+        {
+          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+          env: { GH_TOKEN: 'token-value' },
+          runSubprocessFn: fakeRubyBundleSubprocess(),
+        },
+      );
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/Apple Notes container directory not found/);
+      expect(messages).toContain(missingContainer);
+      expect(messages).toMatch(/exporter\.notes_container/);
+    });
+
+    it('reports a Full Disk Access hint when the container exists but NoteStore.sqlite is missing/unreadable', async () => {
+      const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
+      const containerDir = join(dir, 'notes-container');
+      mkdirSync(containerDir, { recursive: true });
+      // NoteStore.sqlite は意図的に作らない(存在しない = 読み取り不可のケースを兼ねる)。
+
+      const error = await expectDependencyError(
+        buildConfig({
+          exporter: { parser_path: parserPath, notes_container: containerDir },
+        }),
+        {
+          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+          env: { GH_TOKEN: 'token-value' },
+          runSubprocessFn: fakeRubyBundleSubprocess(),
+        },
+      );
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/Apple Notes database not found or not readable/);
+      expect(messages).toContain(join(containerDir, 'NoteStore.sqlite'));
+      expect(messages).toMatch(/Full Disk Access/);
+      expect(messages).toMatch(/フルディスクアクセス/);
+    });
+
+    it('reports the Full Disk Access hint when NoteStore.sqlite exists but is not readable', async () => {
+      const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
+      const containerDir = join(dir, 'notes-container-unreadable');
+      mkdirSync(containerDir, { recursive: true });
+      writeFileSync(join(containerDir, 'NoteStore.sqlite'), 'fixture stub');
+
+      const error = await expectDependencyError(
+        buildConfig({
+          exporter: { parser_path: parserPath, notes_container: containerDir },
+        }),
+        {
+          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+          env: { GH_TOKEN: 'token-value' },
+          runSubprocessFn: fakeRubyBundleSubprocess(),
+          fileReadableFn: () => Promise.resolve(false),
+        },
+      );
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/Apple Notes database not found or not readable/);
+      expect(messages).toMatch(/Full Disk Access/);
+    });
+
+    it('does not report a notes-container problem when the container exists and NoteStore.sqlite is readable', async () => {
+      const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
+      const containerDir = join(dir, 'notes-container-ok');
+      mkdirSync(containerDir, { recursive: true });
+      writeFileSync(join(containerDir, 'NoteStore.sqlite'), 'fixture stub');
+
+      await expect(
+        checkDependencies(
+          buildConfig({
+            exporter: { parser_path: parserPath, notes_container: containerDir },
+          }),
+          {
+            commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+            env: { GH_TOKEN: 'token-value' },
+            runSubprocessFn: fakeRubyBundleSubprocess(),
+          },
+        ),
+      ).resolves.toBeUndefined();
     });
   });
 });

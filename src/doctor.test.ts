@@ -115,6 +115,7 @@ describe('runDoctorChecks', () => {
             env: { GH_TOKEN: 'token-value' },
             runSubprocessFn,
             dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
+            fileReadableFn: () => Promise.resolve(true),
           },
         ),
       ).resolves.toBeUndefined();
@@ -299,6 +300,7 @@ describe('runDoctorChecks', () => {
             env: { GH_TOKEN: 'token-value' },
             runSubprocessFn,
             dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
+            fileReadableFn: () => Promise.resolve(true),
           },
         ),
       ).resolves.toBeUndefined();
@@ -328,6 +330,7 @@ describe('runDoctorChecks', () => {
             env: {},
             runSubprocessFn,
             dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
+            fileReadableFn: () => Promise.resolve(true),
           },
         ),
       ).resolves.toBeUndefined();
