@@ -58,14 +58,21 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
 ## インストール・実行
 
-インストール不要で `npx` から直接実行できます。
+`note2web` は現時点では npm に公開されていないため、`npx note2web ...` は使えません(npm レジストリの 404 で失敗します)。将来 npm へ公開されれば `npx note2web ...` がそのまま使えるようになる予定ですが、それまではリポジトリを clone してビルドしたうえで `node dist/cli.js` から起動します:
 
 ```sh
-npx note2web sync --config ~/.config/note2web/zenn.yaml
+git clone https://github.com/goofmint/note2web ~/src/note2web
+cd ~/src/note2web
+npm install
+npm run build
 ```
 
 ```sh
-npx note2web doctor --config ~/.config/note2web/zenn.yaml
+node dist/cli.js sync --config ~/.config/note2web/zenn.yaml
+```
+
+```sh
+node dist/cli.js doctor --config ~/.config/note2web/zenn.yaml
 ```
 
 - `sync`: エクスポート → 変換 → 公開を実行するメインコマンドです
@@ -313,7 +320,7 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 </plist>
 ```
 
-**なぜ `node` を直接起動するのか(以前のバージョンからの変更点)**: 以前のバージョンはシェルラッパー(`~/bin/note2web-sync.sh`)を `ProgramArguments[0]` に置き、そこから `node` を起動していました。しかし macOS の TCC(フルディスクアクセス等のプライバシー制御)は `ProgramArguments[0]` の実行ファイルを「責任のあるプロセス」として扱うため、`/bin/sh` にフルディスクアクセスを許可しても実機で権限が正しく効かないケースがありました。現在のバージョンは `node` 実行ファイル自身を `ProgramArguments[0]` に置くため、**その `node` バイナリへフルディスクアクセスを許可するだけでジョブ全体(`node` が起動する `ruby`/`bundle` を含む)に権限が及びます**。**旧バージョンが生成した `~/bin/note2web-sync.sh` はもう使われません**。残っていても実害はありませんが、削除して構いません。
+**なぜ `node` を直接起動するのか(以前のバージョンからの変更点)**: 以前のバージョンはシェルラッパー(`~/bin/note2web-sync.sh`)を `ProgramArguments[0]` に置き、そこから `node` を起動していました。しかし macOS の TCC(フルディスクアクセス等のプライバシー制御)は `ProgramArguments[0]` の実行ファイルを「責任のあるプロセス」として扱うため、`/bin/sh` にフルディスクアクセスを許可しても実機で権限が正しく効かないケースがありました。現在のバージョンは `node` 実行ファイル自身を `ProgramArguments[0]` に置くため、**その `node` バイナリへフルディスクアクセスを許可するだけでジョブ全体(`node` が起動する `ruby`/`bundle` を含む)に権限が及びます**。**旧バージョンが生成した `~/bin/note2web-sync.sh` は note2web からはもう使われません**。残っていても実害はありませんが、他の用途で使っていなければ削除して構いません。
 
 サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.note2web.<service>` を使います。
 
@@ -335,7 +342,7 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 
 代表的な原因は次のとおりです:
 
-1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / asdf / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。launchd については `note2web init` が生成する plist の `EnvironmentVariables` にホームディレクトリの rbenv/asdf/rvm の shim ディレクトリを自動的に含めます(issue #71)。それでも解決しない場合や cron を使っている場合は、crontab のエントリに `PATH=...` を明示するか、`~/.config/note2web/env` に `PATH=/opt/homebrew/opt/ruby/bin:${PATH}` のような行を追記してください(対話シェルからの直接実行にのみ効きます。`note2web init` が生成する env ファイルのテンプレートにもヒントのコメントが入っています)
+1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / asdf / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。launchd については `note2web init` が生成する plist の `EnvironmentVariables` にホームディレクトリの rbenv/asdf/rvm の shim ディレクトリを自動的に含めます(issue #71)。それでも解決しない場合は、実行経路ごとに `PATH` の設定場所が異なる点に注意してください: **対話シェルから直接実行する場合**はシェルの初期化ファイル(`~/.zshrc` 等)で `PATH` を設定し、**launchd 経由の場合**は生成済み plist の `EnvironmentVariables` の `PATH` を使い、**cron を使う場合**は crontab 側のエントリに `PATH=...` を明示してください(env ファイルには `PATH` を書きません。`note2web init` が生成する env ファイルのテンプレートにもこの点のヒントコメントが入っています)
 2. **gem がインストールされていない**: `apple_cloud_notes_parser` の clone 先で `bundle install` を実行していないと、`bundle exec ruby notes_cloud_ripper.rb` は `Could not find gem 'sqlite3'...` のようなメッセージで失敗します。以下を実行してください:
    ```sh
    cd ~/tools/apple_cloud_notes_parser   # exporter.parser_path と同じパス

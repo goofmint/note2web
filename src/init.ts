@@ -353,10 +353,13 @@ function defaultQiitaCliResolvable(): boolean {
  * `src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と同じ手法で、`import.meta.url`
  * (実行時は `dist/init.js`)から見た兄弟ファイルとして `cli.js`(= `dist/cli.js`)を解決する。
  *
- * 存在確認は行わない(純粋に計算のみ) —— ここで `existsSync` 等の実ファイルシステムを
- * 見てしまうと、テストの DI フェイクからは見えない実ファイルの有無に依存してしまい、
- * `src/` から直接動かす開発時の実行(ビルド前で `dist/cli.js` が無い)が壊れる。呼び出し側
- * (`runInit`)は、この関数が `undefined` を返した場合に plist の生成自体をスキップする。
+ * この関数自体は存在確認を行わない(純粋にパスを計算するのみ)——ここで `existsSync` 等の
+ * 実ファイルシステムを直接見てしまうと、テストの DI フェイクからは見えない実ファイルの
+ * 有無に依存してしまう。実ファイルの存在確認は呼び出し側(`runInit`)が注入済みの
+ * `fileExistsFn`(テストではフェイク fs)を使って行う——`src/` から直接動かす開発時の実行
+ * (ビルド前で `dist/cli.js` が無い)を、CodeRabbit レビュー(issue #71)で指摘のとおり
+ * 「パスは解決できるがファイルが実在しない」ケースとして検出し、`undefined` の場合と同様に
+ * plist の生成自体をスキップする。
  */
 function resolveCliEntrypoint(): string | undefined {
   try {
@@ -742,11 +745,11 @@ async function ensureEnvFile(
       '#\n' +
       '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、\n' +
       '# 対話シェルから直接 `note2web doctor`/`sync` を実行するときに、bundle exec ruby の\n' +
-      '# 起動に必要な PATH / GEM_HOME 等をここへ追記できます。launchd 経由で実行する場合の\n' +
-      '# PATH は(バージョンマネージャの shim ディレクトリを含め)`note2web init` が\n' +
-      '# 生成する plist の EnvironmentVariables に自動的に埋め込まれるため、通常はここへの\n' +
-      '# 追記は不要です(issue #71)。必要に応じて以下のような変数をここへ追記してください:\n' +
-      '#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}\n' +
+      '# 起動に必要な GEM_HOME 等をここへ追記できます。PATH はこのファイルには書きません:\n' +
+      '# 対話実行時の PATH はシェルの初期化ファイル(~/.zshrc 等)で設定してください。launchd\n' +
+      '# 経由で実行する場合は、生成済み plist の EnvironmentVariables の PATH が使われます\n' +
+      '# (issue #71)。cron を使う場合は crontab 側の PATH 設定を使ってください。\n' +
+      '# 必要に応じて以下のような変数をここへ追記してください:\n' +
       '#   GEM_HOME=$HOME/.gem\n' +
       '#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile\n\n';
     const body = requiredNames.map((name) => envFileLine(name)).join('\n');
@@ -1060,7 +1063,10 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       false,
     );
     if (generateLaunchd) {
-      const envPath = join(homeDir, '.config', 'note2web', 'env');
+      // issue #71 レビュー: env ファイルは設定 YAML と同じディレクトリに置く(`--config` で
+      // カスタムパスを指定した場合も含む)。CLI の自動読み込み(issue #70、`src/cli.ts` の
+      // `join(dirname(configPath), 'env')`)が探すパスと一致させる必要があるため。
+      const envPath = join(dirname(targetPath), 'env');
       const envResult = await ensureEnvFile(envPath, requiredEnvNames, {
         fileExistsFn,
         readFileFn,
@@ -1086,19 +1092,26 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       if (await fileExistsFn(oldWrapperPath)) {
         summary.push(
           `Note: an old wrapper script from a previous note2web version still exists at ` +
-            `${oldWrapperPath}; it is no longer used (launchd now runs node directly, issue #71) ` +
-            'and can be safely deleted.',
+            `${oldWrapperPath}; it is no longer used by note2web (launchd now runs node directly, ` +
+            'issue #71). You can delete it if you are not using it for anything else.',
         );
       }
 
       const cliEntrypoint = resolveCliEntrypointFn();
-      if (cliEntrypoint === undefined) {
-        // dist/cli.js が解決できない状態(ソースから直接動かす開発時の実行等)で plist を
-        // 生成すると、動かない ProgramArguments を持つ plist をそのまま書き出してしまう。
-        // env ファイルは(値を後から埋めれば使えるため)引き続き書き出すが、plist の生成は
-        // スキップし、利用者にビルド済み/インストール済みの状態で再実行するよう案内する。
+      // issue #71 レビュー: パスが解決できても、実際に `dist/cli.js` が存在するとは限らない
+      // (`npm run build` していないソースチェックアウトから `note2web init` を実行した場合
+      // 等)。存在しないパスを plist の ProgramArguments に埋め込むと、launchd がロードは
+      // できても起動のたびに失敗するだけの plist を書き出してしまうため、未解決の場合と
+      // 同様に扱ってスキップする。
+      const cliEntrypointExists =
+        cliEntrypoint !== undefined && (await fileExistsFn(cliEntrypoint));
+      if (cliEntrypoint === undefined || !cliEntrypointExists) {
+        // dist/cli.js が解決できない、または解決はできても実ファイルが存在しない状態で
+        // plist を生成すると、動かない ProgramArguments を持つ plist をそのまま書き出して
+        // しまう。env ファイルは(値を後から埋めれば使えるため)引き続き書き出すが、plist の
+        // 生成はスキップし、利用者にビルド済み/インストール済みの状態で再実行するよう案内する。
         summary.push(
-          'Warning: could not resolve the note2web CLI entrypoint path (dist/cli.js); ' +
+          'Warning: could not find the note2web CLI entrypoint (dist/cli.js); ' +
             'skipping launchd plist generation. Re-run "note2web init" from a built/installed ' +
             'checkout (e.g. after "npm run build") to generate the plist.',
         );

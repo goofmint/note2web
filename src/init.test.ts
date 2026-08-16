@@ -47,7 +47,11 @@ function createFakeFs(
   mkdirFn: (path: string) => Promise<void>;
   chmodFn: (path: string, mode: number) => Promise<void>;
 } {
-  const files = new Map(Object.entries(initialFiles));
+  // FAKE_CLI_ENTRYPOINT を既定で「存在するファイル」として含める(issue #71 レビュー:
+  // `runInit` が `resolveCliEntrypointFn()` の返すパスの実在を `fileExistsFn` で確認する
+  // ようになったため。個々のテストの `initialFiles` で明示的に上書き・削除はできない
+  // ——存在しないケースを検証したいテストは `resolveCliEntrypointFn` 側で別のパスを返す)。
+  const files = new Map(Object.entries({ [FAKE_CLI_ENTRYPOINT]: '', ...initialFiles }));
   const dirs = new Set(initialDirs);
   const modes = new Map<string, number>();
   return {
@@ -78,6 +82,13 @@ function createFakeFs(
 
 const HOME_DIR = '/home/tester';
 const FAKE_NODE_EXEC_PATH = '/fake/node/bin/node';
+/**
+ * `buildOptions` の既定 `resolveCliEntrypointFn` が返すパス(issue #71 レビュー: `runInit` は
+ * このパスの実在を `fileExistsFn` で確認するようになったため、フェイク fs 側にも既定で
+ * このファイルを「存在するもの」として含めておく必要がある。個々のテストが独自の
+ * `createFakeFs(...)` を呼んでいても既定で拾われるよう、`createFakeFs` 側でマージする)。
+ */
+const FAKE_CLI_ENTRYPOINT = '/fake/install/dist/cli.js';
 
 /** `runInit` に渡す既定オプション。個々のテストが必要な項目だけ上書きする。 */
 function buildOptions(
@@ -538,7 +549,11 @@ describe('runInit', () => {
       // 含める。launchd 実行時の PATH は plist 側に自動的に埋め込まれる点に言及している。
       expect(envContent).toContain('[Ruby 環境のヒント](issue #67)');
       expect(envContent).toContain('issue #71');
-      expect(envContent).toContain('PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
+      // PATH はもう env ファイルのヒントに例示しない(launchd は plist の
+      // EnvironmentVariables の PATH を使う。対話実行はシェルの初期化ファイル、cron は
+      // crontab 側の PATH 設定を使う旨を案内するのみ)。
+      expect(envContent).not.toContain('PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
+      expect(envContent).toContain('~/.zshrc');
       expect(envContent).toContain('GEM_HOME=$HOME/.gem');
       expect(envContent).toContain('BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile');
 
@@ -757,6 +772,58 @@ describe('runInit', () => {
       expect(summary).toMatch(/skipping launchd plist generation/i);
       expect(summary).toContain('note2web doctor --config');
       expect(summary).toContain('note2web sync --config');
+    });
+
+    it('skips plist generation (but still writes the env file) with a warning when the resolved CLI entrypoint path does not exist on disk (e.g. before "npm run build")', async () => {
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const unbuiltCliPath = '/fake/install/dist/cli.js.not-built-yet';
+      const result = await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          // パスは解決できるが、フェイク fs には存在しない(= 未ビルドのソースチェック
+          // アウトから `note2web init` を実行した状態を模擬する)。
+          resolveCliEntrypointFn: () => unbuiltCliPath,
+          env: {},
+        }),
+      );
+
+      expect(fs.files.has(`${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`)).toBe(false);
+      expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(true);
+      const summary = result.summary.join('\n');
+      expect(summary).toMatch(/skipping launchd plist generation/i);
+      expect(summary).toContain('note2web doctor --config');
+      expect(summary).toContain('note2web sync --config');
+    });
+
+    it('colocates the generated env file with a custom --config path instead of the default ~/.config/note2web', async () => {
+      const configPath = '/custom/dir/myblog.yaml';
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const result = await runInit(
+        buildOptions({
+          configPath,
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          env: {},
+        }),
+      );
+
+      const expectedEnvPath = '/custom/dir/env';
+      expect(fs.files.has(expectedEnvPath)).toBe(true);
+      // 既定パス(~/.config/note2web/env)には書かれない。
+      expect(fs.files.has(`${HOME_DIR}/.config/note2web/env`)).toBe(false);
+      const summary = result.summary.join('\n');
+      expect(summary).toContain(expectedEnvPath);
     });
 
     it('falls back to the 1800-second default when StartInterval is not a positive integer', async () => {
