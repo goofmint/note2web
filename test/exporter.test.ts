@@ -385,6 +385,29 @@ describe('exportAppleNotes', () => {
     // フルディスクアクセス / WAL / スキーマ不一致のヒントが追記される。
     await expect(promise).rejects.toThrow(/フルディスクアクセス/);
     await expect(promise).rejects.toThrow(/WAL/);
+    await expect(promise).rejects.toThrow(/スキーマ不一致/);
+  });
+
+  it('appends the SQLite hint when stderr is empty and only stdout contains "SQLite3::SQLException"', async () => {
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'exit_code',
+      exitCode: 1,
+      signal: null,
+      stdout: 'query failed: (SQLite3::SQLException)',
+      stderr: '',
+    });
+
+    const promise = exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    await expect(promise).rejects.toThrow(/フルディスクアクセス/);
+    await expect(promise).rejects.toThrow(/WAL/);
+    await expect(promise).rejects.toThrow(/スキーマ不一致/);
   });
 
   it('appends the SQLite hint when the failure is signaled via "SQLite3::SQLException" without "no such table"', async () => {
