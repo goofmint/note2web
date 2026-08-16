@@ -166,6 +166,14 @@ async function askUrl(
   }
 }
 
+/**
+ * POSIX シェルの単一引数として安全になるようシングルクォートで囲む(サマリで案内する
+ * コマンド用。パスに空白や `&` が含まれてもコピー&ペーストでそのまま動くようにする)。
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 /** `askYesNo` / `askChoice` が無効な入力を受け取り続けたときに諦めるまでの最大再試行回数。 */
 const MAX_PROMPT_RETRIES = 10;
 
@@ -1049,25 +1057,53 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       const logsDir = join(homeDir, 'Library', 'Logs', 'note2web');
       await mkdirFn(logsDir);
 
-      const plistPath = join(homeDir, 'Library', 'LaunchAgents', `com.note2web.${service}.plist`);
+      const label = `com.note2web.${service}`;
+      const stdoutLogPath = join(logsDir, `${service}.log`);
+      const stderrLogPath = join(logsDir, `${service}.err.log`);
+      const plistPath = join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
       await mkdirFn(dirname(plistPath));
       const plistContent = buildPlist({
-        label: `com.note2web.${service}`,
+        label,
         wrapperPath,
         configPath: targetPath,
         // `<integer>` に書き込むため、小数や安全でない大きさの数値は既定値 1800 へ倒す
         // (`1.5` 等をそのまま埋め込むと launchctl がロードできない plist になる)。
         startInterval:
           Number.isSafeInteger(startInterval) && startInterval > 0 ? startInterval : 1800,
-        stdoutLogPath: join(logsDir, `${service}.log`),
-        stderrLogPath: join(logsDir, `${service}.err.log`),
+        stdoutLogPath,
+        stderrLogPath,
       });
       await writeFileFn(plistPath, plistContent);
       summary.push(`Wrote launchd plist: ${plistPath} (no secrets embedded)`);
-      summary.push(`Load it with: launchctl load ${plistPath}`);
       summary.push('note2web does not run launchctl for you; review the generated files first.');
+
+      // 次に実行するコマンドの案内。launchd(LaunchAgent)はユーザー単位のため、
+      // `sudo` を付けると LaunchDaemons 扱いになりロードに失敗する(Load failed: 5)。
+      // レガシーな `launchctl load` ではなく、エラーが読みやすい `bootstrap` 形式を案内する。
+      summary.push('');
+      summary.push('次に実行するコマンド(上から順に):');
+      summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
+      summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
+      summary.push(`  2. 現在のシェルに読み込む: set -a; . ${shellQuote(envPath)}; set +a`);
+      summary.push(`  3. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+      summary.push(`  4. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
+      summary.push(
+        `  5. launchd に登録する(sudo は付けない): launchctl bootstrap gui/$(id -u) ${shellQuote(plistPath)}`,
+      );
+      summary.push(`  6. すぐ1回実行して確認: launchctl kickstart -k gui/$(id -u)/${label}`);
+      summary.push(
+        `  7. ログを確認: tail -f ${shellQuote(stdoutLogPath)} ${shellQuote(stderrLogPath)}`,
+      );
+      summary.push(`  (定期実行を解除するとき: launchctl bootout gui/$(id -u)/${label})`);
     } else {
       summary.push('Skipped launchd file generation (re-run "note2web init" later to add it).');
+      summary.push('');
+      summary.push('次に実行するコマンド(上から順に):');
+      summary.push(
+        `  1. 環境変数を設定する: export <変数名>=<値> (必要な変数: ${requiredEnvNames.join(', ')})`,
+      );
+      summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+      summary.push(`  3. 同期を実行: note2web sync --config ${shellQuote(targetPath)}`);
     }
 
     return { summary };
