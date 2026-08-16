@@ -82,6 +82,7 @@ function buildOptions(
     chmodFn: fs.chmodFn,
     commandExistsFn: () => Promise.resolve(true),
     qiitaCliResolvableFn: () => true,
+    resolveCliEntrypointFn: () => '/fake/install/dist/cli.js',
     env: {},
     homeDir: HOME_DIR,
     ...overrides,
@@ -514,16 +515,26 @@ describe('runInit', () => {
       expect(envContent).toContain('GH_TOKEN=');
       expect(envContent).toContain('R2_ACCESS_KEY_ID=');
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
+      // node / CLI パスの任意上書き変数名もテンプレートに含める(値は空欄)。npx は使わない。
+      expect(envContent).toContain('NOTE2WEB_NODE=');
+      expect(envContent).toContain('NOTE2WEB_CLI=');
+      expect(envContent).not.toContain('NOTE2WEB_NPX');
       // 値は常に空欄(秘匿値を絶対に書かない)。
       expect(envContent).not.toMatch(/GH_TOKEN=\S/);
+
+      // NOTE2WEB_NODE / NOTE2WEB_CLI は任意の上書きであり、未設定でも sync をブロックしない
+      // ため、「必要な変数」一覧や環境変数の警告には出てこない。
+      expect(result.summary.join('\n')).not.toContain('NOTE2WEB_NODE');
+      expect(result.summary.join('\n')).not.toContain('NOTE2WEB_CLI');
 
       const wrapperContent = fs.files.get(wrapperPath) ?? '';
       expect(wrapperContent).toContain('#!/bin/sh');
       expect(wrapperContent).toContain('set -a');
       expect(wrapperContent).toContain('. "$HOME/.config/note2web/env"');
-      expect(wrapperContent).toMatch(
-        /exec "\$NPX" --yes note2web@\d+\.\d+\.\d+ sync --config "\$1"/,
-      );
+      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
+      expect(wrapperContent).toContain('  CLI="/fake/install/dist/cli.js"');
+      expect(wrapperContent).toContain('exec "$NODE" "$CLI" sync --config "$1"');
+      expect(wrapperContent).not.toContain('npx');
 
       const plistContent = fs.files.get(plistPath) ?? '';
       expect(plistContent).not.toContain('EnvironmentVariables');
@@ -633,7 +644,7 @@ describe('runInit', () => {
         }),
       );
 
-      expect(fs.files.get(wrapperPath)).toContain('exec "$NPX"');
+      expect(fs.files.get(wrapperPath)).toContain('exec "$NODE" "$CLI"');
     });
 
     it('XML-escapes paths containing special characters in the generated plist', async () => {
@@ -662,7 +673,7 @@ describe('runInit', () => {
       expect(plistContent).not.toContain('cfg & <dir>');
     });
 
-    it('generates an unpinned wrapper with a warning when the package version cannot be determined', async () => {
+    it('generates a wrapper requiring NOTE2WEB_CLI with a warning when the CLI entrypoint cannot be resolved', async () => {
       const promptFn = makePromptFn(LAUNCHD_ANSWERS);
       const fs = createFakeFs();
       const result = await runInit(
@@ -673,16 +684,66 @@ describe('runInit', () => {
           writeFileFn: fs.writeFileFn,
           mkdirFn: fs.mkdirFn,
           chmodFn: fs.chmodFn,
-          readPackageVersionFn: () => undefined,
+          resolveCliEntrypointFn: () => undefined,
           env: {},
         }),
       );
 
       const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
-      // バージョン不明時は `note2web@0.0.0` のような偽ピンではなく、ピンなしで生成する。
-      expect(wrapperContent).toContain('exec "$NPX" --yes note2web sync --config "$1"');
-      expect(wrapperContent).not.toContain('note2web@');
-      expect(result.summary.join('\n')).toMatch(/could not determine the note2web package version/);
+      // パス解決に失敗した場合は既定値を空欄にし、NOTE2WEB_CLI の明示的な設定を要求する
+      // (npx へのフォールバックはしない: note2web は npm に公開されていないため)。
+      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
+      expect(wrapperContent).not.toContain('npx');
+      expect(result.summary.join('\n')).toMatch(/NOTE2WEB_CLI/);
+    });
+
+    it('escapes double quotes, backslashes, backticks, and dollar signs in the CLI path embedded in the wrapper', async () => {
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const weirdPath = '/weird "path"/$HOME/dist/cli.js';
+      await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          resolveCliEntrypointFn: () => weirdPath,
+          env: {},
+        }),
+      );
+
+      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
+      expect(wrapperContent).toContain('  CLI="/weird \\"path\\"/\\$HOME/dist/cli.js"');
+      // 未エスケープの生の値がそのまま出現していないこと(二重引用符が壊れて別のシェル語
+      // に分割されてしまわないことの確認)。
+      expect(wrapperContent).not.toContain('CLI="/weird "path"');
+    });
+
+    it('keeps a CLI path containing "}" intact (not embedded inside the parameter expansion)', async () => {
+      const promptFn = makePromptFn(LAUNCHD_ANSWERS);
+      const fs = createFakeFs();
+      const bracePath = '/opt/note{2}web/dist/cli.js';
+      await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          resolveCliEntrypointFn: () => bracePath,
+          env: {},
+        }),
+      );
+
+      const wrapperContent = fs.files.get(`${HOME_DIR}/bin/note2web-sync.sh`) ?? '';
+      // `}` は `${NOTE2WEB_CLI:-...}` の展開をそこで終端させてしまうため、既定パスは
+      // パラメータ展開の外の独立した代入として埋め込む。
+      expect(wrapperContent).toContain('CLI="${NOTE2WEB_CLI:-}"');
+      expect(wrapperContent).toContain(`  CLI="${bracePath}"`);
+      expect(wrapperContent).not.toContain(`NOTE2WEB_CLI:-${bracePath}`);
     });
 
     it('falls back to the 1800-second default when StartInterval is not a positive integer', async () => {

@@ -228,7 +228,7 @@ hatena:
 mkdir -p ~/Library/Logs/note2web
 ```
 
-秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。また、`npx` のパスは環境により異なり(Homebrew の Node では `/opt/homebrew/bin/npx`、nvm では `~/.nvm/versions/node/<ver>/bin/npx` 等)、cron / launchd の `PATH` は最小構成のため、ラッパースクリプト内で PATH を補ってから解決します。`note2web` は**バージョンを固定**して起動します。
+秘匿情報は crontab や plist に直書きせず、**権限を絞った環境変数ファイル + ラッパースクリプト**経由で渡します。`note2web` は npm には公開されていないため、`npx` 経由では起動できません(`npx --yes note2web` はレジストリの 404 で必ず失敗します)。代わりに、実行中インストールの `dist/cli.js` の絶対パスを `node` で直接起動します。`node` のパスは環境により異なり(Homebrew の Node では `/opt/homebrew/bin/node`、nvm では `~/.nvm/versions/node/<ver>/bin/node` 等)、cron / launchd の `PATH` は最小構成のため、ラッパースクリプト内で PATH を補ってから解決します。`note2web init` を実行すると、この CLI パスは自動的に解決されてラッパースクリプトへ埋め込まれます(以下は手動で作成する場合の例です)。
 
 まず配置先ディレクトリを作成します:
 
@@ -243,8 +243,11 @@ mkdir -p ~/.config/note2web ~/bin
 GH_TOKEN=xxxx
 R2_ACCESS_KEY_ID=xxxx
 R2_SECRET_ACCESS_KEY=xxxx
-# npx の絶対パスを明示したい場合は指定(未指定なら下記ラッパーが PATH から解決)
-# NOTE2WEB_NPX=/opt/homebrew/bin/npx
+# node の絶対パスを明示したい場合は指定(未指定なら下記ラッパーが PATH から解決)
+# NOTE2WEB_NODE=/opt/homebrew/bin/node
+# note2web の dist/cli.js の絶対パスを明示したい場合は指定
+# (note2web init が自動的に埋め込むため、通常は不要)
+# NOTE2WEB_CLI=/Users/you/src/note2web/dist/cli.js
 ```
 
 次の内容を `~/bin/note2web-sync.sh` として保存します:
@@ -259,13 +262,21 @@ set -a
 set +a
 # cron / launchd の PATH は最小構成のため、一般的な Node.js の bin ディレクトリを補う
 PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-NPX="${NOTE2WEB_NPX:-$(command -v npx || true)}"
-if [ -z "$NPX" ] || [ ! -x "$NPX" ]; then
-  echo "note2web-sync.sh: npx not found (set NOTE2WEB_NPX in ~/.config/note2web/env)" >&2
+NODE="${NOTE2WEB_NODE:-$(command -v node || true)}"
+# インストール先の dist/cli.js を絶対パスで指定する(note2web init が自動的に埋め込む値の例)
+CLI="${NOTE2WEB_CLI:-}"
+if [ -z "$CLI" ]; then
+  CLI="/Users/you/src/note2web/dist/cli.js"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "note2web-sync.sh: node not found (set NOTE2WEB_NODE in ~/.config/note2web/env)" >&2
   exit 2
 fi
-# バージョンは固定する(例: 0.1.0)。更新時はこの数字を意図的に上げる
-exec "$NPX" --yes note2web@0.1.0 sync --config "$1"
+if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then
+  echo "note2web-sync.sh: note2web CLI not found (set NOTE2WEB_CLI in ~/.config/note2web/env)" >&2
+  exit 2
+fi
+exec "$NODE" "$CLI" sync --config "$1"
 ```
 
 保存後、権限を絞ります:
