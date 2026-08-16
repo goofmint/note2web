@@ -1055,7 +1055,10 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
         label: `com.note2web.${service}`,
         wrapperPath,
         configPath: targetPath,
-        startInterval: Number.isFinite(startInterval) && startInterval > 0 ? startInterval : 1800,
+        // `<integer>` に書き込むため、小数や安全でない大きさの数値は既定値 1800 へ倒す
+        // (`1.5` 等をそのまま埋め込むと launchctl がロードできない plist になる)。
+        startInterval:
+          Number.isSafeInteger(startInterval) && startInterval > 0 ? startInterval : 1800,
         stdoutLogPath: join(logsDir, `${service}.log`),
         stderrLogPath: join(logsDir, `${service}.err.log`),
       });

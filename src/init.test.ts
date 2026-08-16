@@ -657,6 +657,31 @@ describe('runInit', () => {
       expect(result.summary.join('\n')).toMatch(/could not determine the note2web package version/);
     });
 
+    it('falls back to the 1800-second default when StartInterval is not a positive integer', async () => {
+      const promptFn = makePromptFn({
+        ...LAUNCHD_ANSWERS,
+        StartInterval: '1.5',
+      });
+      const fs = createFakeFs();
+      await runInit(
+        buildOptions({
+          promptFn,
+          fileExistsFn: fs.fileExistsFn,
+          readFileFn: fs.readFileFn,
+          writeFileFn: fs.writeFileFn,
+          mkdirFn: fs.mkdirFn,
+          chmodFn: fs.chmodFn,
+          env: {},
+        }),
+      );
+
+      const plistContent =
+        fs.files.get(`${HOME_DIR}/Library/LaunchAgents/com.note2web.zenn.plist`) ?? '';
+      // 小数をそのまま <integer> へ書くと launchctl がロードできないため、既定値へ倒す。
+      expect(plistContent).toContain('<integer>1800</integer>');
+      expect(plistContent).not.toContain('1.5');
+    });
+
     it('skips launchd file generation entirely when declined (the default)', async () => {
       const promptFn = makePromptFn(SERVICE_ANSWERS.zenn);
       const fs = createFakeFs();
