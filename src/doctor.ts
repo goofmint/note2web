@@ -78,6 +78,11 @@ export interface RunDoctorOptions {
   commandExistsFn?: (command: string) => Promise<boolean>;
   /** ファイル存在確認の注入点(`checkDependencies` にそのまま渡す)。既定は実 `fs.access`。 */
   fileExistsFn?: (path: string) => Promise<boolean>;
+  /**
+   * ファイル読み取り可否確認の注入点(`checkDependencies` にそのまま渡す。issue #69の
+   * NoteStore.sqlite 読み取り可否チェック用)。既定は実 `fs.access(path, constants.R_OK)`。
+   */
+  fileReadableFn?: (path: string) => Promise<boolean>;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /** サブプロセス実行の注入点(`gh auth status` / `gh repo view` に使う)。既定は本物の `runSubprocess`。 */
@@ -105,6 +110,7 @@ export async function runDoctorChecks(
   const {
     commandExistsFn = commandExists,
     fileExistsFn,
+    fileReadableFn,
     env = process.env,
     runSubprocessFn = runSubprocess,
     dependencyRunSubprocessFn = runSubprocess,
@@ -119,6 +125,9 @@ export async function runDoctorChecks(
   };
   if (fileExistsFn !== undefined) {
     dependencyOptions.fileExistsFn = fileExistsFn;
+  }
+  if (fileReadableFn !== undefined) {
+    dependencyOptions.fileReadableFn = fileReadableFn;
   }
 
   try {

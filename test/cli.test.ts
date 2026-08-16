@@ -190,7 +190,154 @@ describe('runCli', () => {
     expect(result.stderr.join('\n')).toContain('R2_SECRET_ACCESS_KEY');
   });
 
+  describe('env file loading (issue #69)', () => {
+    // 既に外側の beforeEach/afterEach が `VALID_CONFIG_ENV_VARS`(この2つの名前と同じ)を
+    // 保存・復元しているため、ここでは追加の save/restore を行わず、その仕組みへ相乗りする。
+    const [ENV_FILE_TEST_VAR_A, ENV_FILE_TEST_VAR_B] = VALID_CONFIG_ENV_VARS as [string, string];
+
+    /** `zenn.yaml`(T-04 fixture)と同じ形の、スキーマ検証を通る設定ファイルを書き出す。 */
+    function writeValidConfig(targetDir: string): string {
+      const path = join(targetDir, 'zenn.yaml');
+      writeFileSync(
+        path,
+        [
+          'service: zenn',
+          'source:',
+          '  folders: [tech]',
+          'assets:',
+          '  provider: r2',
+          '  bucket: blog-assets',
+          '  endpoint: https://example-account.r2.cloudflarestorage.com',
+          '  region: auto',
+          '  prefix: notes/',
+          '  public_base_url: https://assets.example.com/notes/',
+          `  access_key_id_env: ${ENV_FILE_TEST_VAR_A}`,
+          `  secret_access_key_env: ${ENV_FILE_TEST_VAR_B}`,
+          'git:',
+          '  repo_path: ~/src/zenn-content',
+          '  base_branch: main',
+          '  output_dir: articles',
+          '  auto_merge: true',
+          '',
+        ].join('\n'),
+      );
+      return path;
+    }
+
+    beforeEach(() => {
+      delete process.env[ENV_FILE_TEST_VAR_A];
+      delete process.env[ENV_FILE_TEST_VAR_B];
+    });
+
+    it('loads values from the default env file path (next to --config) and applies them before loadConfig', async () => {
+      const validConfigPath = writeValidConfig(dir);
+      writeFileSync(
+        join(dir, 'env'),
+        `${ENV_FILE_TEST_VAR_A}=from-env-file\n${ENV_FILE_TEST_VAR_B}=also-from-env-file\n`,
+      );
+      vi.mocked(runDoctorChecks).mockResolvedValueOnce(undefined);
+
+      const result = await runCli(['doctor', '--config', validConfigPath]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr).toHaveLength(0);
+      expect(process.env[ENV_FILE_TEST_VAR_A]).toBe('from-env-file');
+      expect(process.env[ENV_FILE_TEST_VAR_B]).toBe('also-from-env-file');
+    });
+
+    it('keeps the existing process.env value instead of overriding it with the env-file value', async () => {
+      const validConfigPath = writeValidConfig(dir);
+      writeFileSync(
+        join(dir, 'env'),
+        `${ENV_FILE_TEST_VAR_A}=from-env-file\n${ENV_FILE_TEST_VAR_B}=also-from-env-file\n`,
+      );
+      process.env[ENV_FILE_TEST_VAR_A] = 'from-shell';
+      vi.mocked(runDoctorChecks).mockResolvedValueOnce(undefined);
+
+      const result = await runCli(['doctor', '--config', validConfigPath]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      // シェルで既に設定済みの値は env ファイルの値で上書きされない。
+      expect(process.env[ENV_FILE_TEST_VAR_A]).toBe('from-shell');
+      // 一方、シェルに無い方は env ファイルの値で補われる。
+      expect(process.env[ENV_FILE_TEST_VAR_B]).toBe('also-from-env-file');
+    });
+
+    it('proceeds normally when the default env file path does not exist next to --config', async () => {
+      const validConfigPath = writeValidConfig(dir);
+      process.env[ENV_FILE_TEST_VAR_A] = 'from-shell';
+      process.env[ENV_FILE_TEST_VAR_B] = 'also-from-shell';
+      vi.mocked(runDoctorChecks).mockResolvedValueOnce(undefined);
+
+      const result = await runCli(['doctor', '--config', validConfigPath]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr).toHaveLength(0);
+    });
+
+    it('exits 2 with an error naming the path when an explicitly given --env-file does not exist', async () => {
+      const validConfigPath = writeValidConfig(dir);
+      process.env[ENV_FILE_TEST_VAR_A] = 'from-shell';
+      process.env[ENV_FILE_TEST_VAR_B] = 'also-from-shell';
+      const missingEnvFile = join(dir, 'does-not-exist-env');
+
+      const result = await runCli([
+        'doctor',
+        '--config',
+        validConfigPath,
+        '--env-file',
+        missingEnvFile,
+      ]);
+
+      expect(result.exitCode).toBe(PRECONDITION_FAILURE);
+      expect(result.stderr.join('\n')).toContain(missingEnvFile);
+      expect(runDoctorChecks).not.toHaveBeenCalled();
+    });
+
+    it('loads values from an explicitly given --env-file instead of the default path', async () => {
+      const validConfigPath = writeValidConfig(dir);
+      const explicitEnvFile = join(dir, 'custom-env');
+      writeFileSync(
+        explicitEnvFile,
+        `${ENV_FILE_TEST_VAR_A}=from-explicit-file\n${ENV_FILE_TEST_VAR_B}=also-from-explicit-file\n`,
+      );
+      // 既定パスにも env ファイルを置き、`--env-file` 指定時はそちらが無視されることを示す。
+      writeFileSync(
+        join(dir, 'env'),
+        `${ENV_FILE_TEST_VAR_A}=from-default-file\n${ENV_FILE_TEST_VAR_B}=also-from-default-file\n`,
+      );
+      vi.mocked(runDoctorChecks).mockResolvedValueOnce(undefined);
+
+      const result = await runCli([
+        'doctor',
+        '--config',
+        validConfigPath,
+        '--env-file',
+        explicitEnvFile,
+      ]);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(process.env[ENV_FILE_TEST_VAR_A]).toBe('from-explicit-file');
+      expect(process.env[ENV_FILE_TEST_VAR_B]).toBe('also-from-explicit-file');
+    });
+  });
+
   describe('init (T-29, issue #61)', () => {
+    it('tolerates --env-file without applying it (init never reads an env file; issue #69)', async () => {
+      // `--env-file` is a recognized flag (parsed the same way for every subcommand, like
+      // `--config`), so passing it to `init` does not raise a "failed to parse arguments"
+      // error — but `init` never reads the env file, does not receive it, and its unset-env
+      // listing intentionally reflects only the current shell's environment.
+      vi.mocked(runInit).mockResolvedValueOnce({ summary: ['ok'] });
+
+      const result = await runCli(['init', '--env-file', '/nonexistent/env']);
+
+      expect(result.exitCode).toBe(SUCCESS);
+      expect(result.stderr.join('\n')).not.toMatch(/usage/i);
+      expect(result.stderr.join('\n')).not.toMatch(/failed to parse arguments/);
+      expect(runInit).toHaveBeenCalledExactlyOnceWith({ configPath: undefined });
+    });
+
     it('accepts "init" as a known subcommand (does not fall through to the usage error)', async () => {
       vi.mocked(runInit).mockResolvedValueOnce({ summary: [] });
 

@@ -73,6 +73,14 @@ npx note2web doctor --config ~/.config/note2web/zenn.yaml
 
 `--config` は必須です。設定ファイルのパスは任意ですが、`~/.config/note2web/` 配下に置くことを推奨します。
 
+### env ファイルの自動読み込み(`doctor` / `sync` 共通)
+
+`sync` / `doctor` は起動時、**設定ファイルと同じディレクトリの `env` ファイル**(既定パス、例: `~/.config/note2web/qiita.yaml` に対しては `~/.config/note2web/env`)を自動的に読み込み、まだシェルの環境変数として設定されていない名前だけを補います。これは [cron / launchd での定期実行](#cron--launchd-での定期実行)節のラッパースクリプトが `set -a; . "$HOME/.config/note2web/env"; set +a` で行っているのと同じ入力を CLI 自身にも与えるための機能で、`doctor --config <path>` を対話シェルから直接実行したときに「env ファイルには値を書いたのに `doctor` が未設定と報告する」というズレ(issue #69)を無くします。
+
+- 既定のパスを変えたい場合は `--env-file <path>` で明示できます(このとき既定パスの `env` ファイルは無視されます)。明示指定したファイルが存在しない場合は設定エラー(exit 2)になりますが、既定パスが存在しない場合は単に無視され、通常どおり進みます(env ファイルを使わずシェルの `export` だけで環境変数を渡している利用者向け)
+- **シェルの環境変数(既に `export` 済みの値)は常に env ファイルの値より優先されます**。ラッパースクリプト実行時と同じ優先順位です
+- env ファイルのパースは単純な `NAME=value` 形式のみを対象とし、シェルとして評価しません(`$VAR` やコマンド置換は展開されず、リテラルな文字列として扱われます)。値は一切ログに出力しません
+
 ## 終了コード
 
 | 終了コード | 意味 |
@@ -355,7 +363,7 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 
 **ログの読み方**: 上記のエラーメッセージの末尾(`exitCode=... signal=...:` の後ろ)には、parser の stderr(無ければ stdout)の先頭の意味のある1行がそのまま含まれます(parser のコマンドライン自体は秘匿情報を含みうる引数がないため、この出力のみを載せています)。`bundle: command not found` なら原因1、`Could not find gem` なら原因2、というように読み分けられます。
 
-**事前チェック**: `note2web doctor --config <path>` は `ruby` / `bundle` コマンドの存在、Ruby のバージョン(>= 3.0)、`bundle check` による gem の準備状況までまとめて確認します。まずこれを実行してください。
+**事前チェック**: `note2web doctor --config <path>` は `ruby` / `bundle` コマンドの存在、Ruby のバージョン(>= 3.0)、`bundle check` による gem の準備状況に加えて、Notes コンテナディレクトリ(`exporter.notes_container`)と `NoteStore.sqlite` の存在・読み取り可否までまとめて確認します(issue #69)。まずこれを実行してください。
 
 **手動デバッグ**: cron / launchd と同じ経路を手元のシェルで再現するには、ラッパースクリプトを直接実行します:
 
@@ -366,6 +374,22 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 これで launchd 経由と同じ `PATH` 補完・env ファイル読み込みで実行されるため、対話シェルでは再現しない `PATH` / 環境変数まわりの問題を切り分けられます。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o /tmp/out --individual-files --uuid` を直接実行し、parser 単体のエラーメッセージを確認してください。
 
 **`launcher: ruby` への切り替え**: Bundler を経由せず gem 環境が別の方法(システム全体への gem インストール等)で解決できている場合は、設定 YAML で `exporter.launcher: ruby` を指定すると `bundle exec` を挟まない従来どおりの起動に戻せます。
+
+### `no such table: ZACCOUNT: (SQLite3::SQLException)`
+
+parser 自体は起動できているものの、`NoteStore.sqlite` の読み取り中にこのようなログで失敗する場合の対処法です(issue #69)。
+
+```text
+note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): exitCode=1, signal=null: no such table: ZACCOUNT: (SQLite3::SQLException) ヒント(issue #69): ...
+```
+
+代表的な原因は次のとおりです(`note2web` は該当パターンを検出すると、上記のようにエラーメッセージの末尾へ同内容の日本語ヒントを自動的に追記します):
+
+1. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。**ターミナルアプリではなく、実行コンテキスト自体**(launchd / cron から起動する場合はその実行コンテキスト)への付与が必要です
+2. **Notes.app が起動したままで WAL がチェックポイントされていない**: Apple Notes は変更を Write-Ahead Log(WAL)にバッファし、アプリの終了時などにメインの `NoteStore.sqlite` へ反映(チェックポイント)します。Notes.app を起動したまま `sync` を実行すると、テーブルがまだ存在しない・スキーマが不完全な状態の DB を読むことがあります。Notes.app を一度終了してから再実行してください
+3. **macOS バージョン間での `NoteStore.sqlite` のスキーマ不一致**: `apple_cloud_notes_parser` が対応していない新しい(または非常に古い)macOS の Notes スキーマだと、想定したテーブルが見つからず失敗します。`apple_cloud_notes_parser` を最新版に更新して再試行してください
+
+**事前チェック**: `note2web doctor --config <path>` は、`exporter.notes_container` が指すディレクトリと `NoteStore.sqlite` の存在・読み取り可否を確認します。フルディスクアクセスが未許可の場合はこの時点で「Apple Notes database not found or not readable」として検出できます(上記の原因1のみ事前検出可能。原因2・3は実際に parser を実行するまで判別できません)。
 
 ## ログ
 

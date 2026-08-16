@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 
+import { access, constants as fsConstants } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createS3UploaderClient } from './assets/uploader.js';
 import { ConfigValidationError, loadConfig } from './config.js';
 import { DoctorError, runDoctorChecks } from './doctor.js';
+import { loadEnvFile } from './env-file.js';
 import { PRECONDITION_FAILURE, SUCCESS } from './exit-codes.js';
 import { InitError, runInit } from './init.js';
 import { createLogger } from './logger.js';
+import { expandHome } from './paths.js';
 import {
   createPublisher,
   PublisherNotImplementedError,
@@ -26,16 +30,20 @@ function isSubcommand(value: string | undefined): value is Subcommand {
 }
 
 const USAGE = [
-  'Usage: note2web <sync|doctor|init> --config <path>',
+  'Usage: note2web <sync|doctor|init> --config <path> [--env-file <path>]',
   '',
   '  sync    Export, transform, and publish notes',
   '  doctor  Check dependencies, environment, and configuration only',
   '  init    Interactively generate a configuration file and launchd files',
   '',
   'Options:',
-  '  --config <path>  Path to the configuration YAML file',
-  '                    (required for sync/doctor; optional for init, which',
-  '                    picks a default path from the selected service)',
+  '  --config <path>    Path to the configuration YAML file',
+  '                      (required for sync/doctor; optional for init, which',
+  '                      picks a default path from the selected service)',
+  '  --env-file <path>  Path to an env file to load before checking/using',
+  '                      environment variables (sync/doctor only; ignored by',
+  '                      init). Defaults to "env" next to the config file.',
+  '                      Names already set in the environment always win.',
 ].join('\n');
 
 /** `runCli` の結果。プロセスを直接終了させず、呼び出し側(main / テスト)が扱えるようにする。 */
@@ -62,15 +70,18 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   const subcommand: Subcommand = subcommandArg;
 
   let configPath: string | undefined;
+  let envFileArg: string | undefined;
   try {
     const { values } = parseArgs({
       args: rest,
       options: {
         config: { type: 'string' },
+        'env-file': { type: 'string' },
       },
       allowPositionals: false,
     });
     configPath = values.config;
+    envFileArg = values['env-file'];
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     stderr.push(`note2web: failed to parse arguments: ${message}`);
@@ -103,6 +114,51 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   if (configPath === undefined) {
     stderr.push('note2web: missing required option --config <path>');
     return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+  }
+
+  // env ファイル読み込み(issue #69「doctor と sync-under-launchd とで検証環境が一致しない」)。
+  // `note2web init` が生成するラッパースクリプト(`~/bin/note2web-sync.sh`)は
+  // `set -a; . "$HOME/.config/note2web/env"; set +a` で env ファイルをシェル評価してから
+  // `sync` を起動するため、launchd/cron 経由の実行では値が既に `process.env` に載っている。
+  // しかし CLI 自身(`loadConfig` の `*_env` チェック・`checkDependencies` の `GH_TOKEN` 等)は
+  // これまで env ファイルを一切読んでおらず、対話シェルから直接 `doctor`/`sync` を実行した
+  // 場合に「環境変数が未設定」という偽陽性を報告していた。ここで doctor/sync 共通に、
+  // ラッパースクリプトと同じ既定パス(設定ファイルと同じディレクトリの `env`。`--env-file` で
+  // 上書き可能)を読み込み、**まだ `process.env` に無い名前だけ**を補う——既存の環境変数は
+  // 常に優先することで、ラッパースクリプト実行時(`set -a; . env; set +a` の後に
+  // `sync` を起動する)と同じ優先順位を再現する。値は一切ログに出さない(`src/env-file.ts`
+  // 参照)。`init` は生成物を書き出すだけのサブコマンドで、この時点では既に `return` 済みの
+  // ため、ここへは到達しない(`init` の未設定環境変数の案内は意図的に現在のシェルの状態を
+  // そのまま反映する)。
+  const expandedConfigPath = expandHome(configPath);
+  const envFilePath =
+    envFileArg !== undefined ? expandHome(envFileArg) : join(dirname(expandedConfigPath), 'env');
+
+  if (envFileArg !== undefined) {
+    // `--env-file` は利用者が明示的に指定したパスのため、既定パスと異なり
+    // 「存在しなければ黙って何もしない」では利用者の意図(このファイルを読ませたい)を
+    // 裏切ってしまう。存在しない場合は設定エラーとして扱う(他の CLI 使用法エラーと
+    // 同じ整形: stderr + exit 2)。
+    try {
+      await access(envFilePath, fsConstants.F_OK);
+    } catch {
+      stderr.push(`note2web: env file not found: ${envFilePath}`);
+      return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+    }
+  }
+
+  let envFileValues: Record<string, string>;
+  try {
+    envFileValues = await loadEnvFile(envFilePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    stderr.push(`note2web: failed to read env file (${envFilePath}): ${message}`);
+    return { exitCode: PRECONDITION_FAILURE, stdout, stderr };
+  }
+  for (const [name, value] of Object.entries(envFileValues)) {
+    if (process.env[name] === undefined) {
+      process.env[name] = value;
+    }
   }
 
   let config;

@@ -360,6 +360,96 @@ describe('exportAppleNotes', () => {
     );
   });
 
+  it('appends a Full Disk Access / WAL / schema hint when the failure output looks like a SQLite schema error (issue #69)', async () => {
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'exit_code',
+      exitCode: 1,
+      signal: null,
+      stdout: '',
+      stderr: 'no such table: ZACCOUNT: (SQLite3::SQLException)',
+    });
+
+    const promise = exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    // classification/exitCode/signal 部分は変更されない。
+    await expect(promise).rejects.toMatchObject({ classification: 'exit_code' });
+    await expect(promise).rejects.toThrow(/exitCode=1, signal=null/);
+    // 元のエラー本文(stderr の先頭行)はそのまま含まれる。
+    await expect(promise).rejects.toThrow(/no such table: ZACCOUNT/);
+    // フルディスクアクセス / WAL / スキーマ不一致のヒントが追記される。
+    await expect(promise).rejects.toThrow(/フルディスクアクセス/);
+    await expect(promise).rejects.toThrow(/WAL/);
+    await expect(promise).rejects.toThrow(/スキーマの不一致/);
+  });
+
+  it('appends the SQLite hint when stderr is empty and only stdout contains "SQLite3::SQLException"', async () => {
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'exit_code',
+      exitCode: 1,
+      signal: null,
+      stdout: 'query failed: (SQLite3::SQLException)',
+      stderr: '',
+    });
+
+    const promise = exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    await expect(promise).rejects.toThrow(/フルディスクアクセス/);
+    await expect(promise).rejects.toThrow(/WAL/);
+    await expect(promise).rejects.toThrow(/スキーマの不一致/);
+  });
+
+  it('appends the SQLite hint when the failure is signaled via "SQLite3::SQLException" without "no such table"', async () => {
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'exit_code',
+      exitCode: 1,
+      signal: null,
+      stdout: '',
+      stderr: 'some wrapping error (SQLite3::SQLException)',
+    });
+
+    const promise = exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    await expect(promise).rejects.toThrow(/フルディスクアクセス/);
+  });
+
+  it('does not append the SQLite hint for unrelated failures (e.g. a LoadError)', async () => {
+    const runner: SubprocessRunner = async () => ({
+      status: 'failure',
+      classification: 'exit_code',
+      exitCode: 1,
+      signal: null,
+      stdout: '',
+      stderr: 'boom\ncannot load such file -- sqlite3 (LoadError)',
+    });
+
+    const promise = exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    await expect(promise).rejects.not.toThrow(/フルディスクアクセス/);
+  });
+
   it('cleans up the temporary export directory when the run fails (runner failure)', async () => {
     const { mkdir } = await import('node:fs/promises');
     const { existsSync } = await import('node:fs');

@@ -406,7 +406,11 @@ async function locateNotesJsonFile(
  *    経由しない旧来の直接起動)にフォールバックできる。
  * 2. 非成功終了は `ExportError`(分類つき)を投げる。実行全体を中断させる想定
  *    (design.md §10「parser の実行失敗」→ 呼び出し側で exit 1)であり、ここでは
- *    `process.exit` は呼ばない。
+ *    `process.exit` は呼ばない。stderr/stdout に `no such table` / `SQLite3::SQLException`
+ *    が含まれる場合(issue #69 問題2。フルディスクアクセス未許可・Notes.app 起動中で WAL
+ *    未チェックポイント・macOS 間のスキーマ不一致等が典型的な原因)は、考えられる原因を
+ *    案内する短い日本語のヒントをメッセージ末尾に追記する(`classification`・exitCode・
+ *    signal の各部分は変更しない)。
  * 3. `json/all_notes_<N>.json` を読み、`source.folders`(FR-02、配下=サブツリー
  *    マッチ)でノートを絞り込む。
  * 4. 各ノートについて、JSON の `folders` 階層からフォルダディレクトリパスを再構築し、
@@ -483,10 +487,29 @@ async function runExport(params: {
       firstNonEmptyLine(subprocessResult.stderr) ??
       firstNonEmptyLine(subprocessResult.stdout) ??
       'unknown error';
+    // issue #69 問題2: `no such table: ZACCOUNT: (SQLite3::SQLException)` のような
+    // NoteStore.sqlite のスキーマ関連エラーは、原因の当たりが付けにくい(単なる
+    // exitCode/signal からは分からない)。stderr/stdout 全体(先頭1行だけでなく)を
+    // 走査し、その種のエラーだと判別できた場合のみ、考えられる原因を案内する短い
+    // ヒントをメッセージ末尾に追記する。`classification` / exitCode / signal 部分は
+    // 変更しない(呼び出し側の判定ロジックに影響を与えないため)。
+    const combinedOutput = `${subprocessResult.stderr}\n${subprocessResult.stdout}`;
+    const looksLikeSqliteSchemaFailure =
+      /no such table/i.test(combinedOutput) || combinedOutput.includes('SQLite3::SQLException');
+    const hint = looksLikeSqliteSchemaFailure
+      ? ' ヒント(issue #69): NoteStore.sqlite のスキーマに関するエラーです。考えられる原因: ' +
+        '(1) フルディスクアクセス(macOS の「システム設定」→「プライバシーとセキュリティ」→' +
+        '「フルディスクアクセス」)が実行コンテキストに付与されていない(launchd/cron 実行時は' +
+        'ターミナルアプリではなく、その実行コンテキスト自体への付与が必要)、' +
+        '(2) Notes.app が起動したままで WAL チェックポイントが発生していない' +
+        '(Notes.app を一度終了してから再実行してください)、' +
+        '(3) macOS バージョン間での NoteStore.sqlite スキーマの不一致。' +
+        '詳細は README のトラブルシューティングを参照してください。'
+      : '';
     throw new ExportError(
       `apple_cloud_notes_parser (notes_cloud_ripper.rb) failed ` +
         `(${subprocessResult.classification ?? 'unknown'}): ` +
-        `exitCode=${String(subprocessResult.exitCode)}, signal=${String(subprocessResult.signal)}: ${detail}`,
+        `exitCode=${String(subprocessResult.exitCode)}, signal=${String(subprocessResult.signal)}: ${detail}${hint}`,
       { classification: subprocessResult.classification },
     );
   }
