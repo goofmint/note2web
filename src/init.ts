@@ -166,6 +166,14 @@ async function askUrl(
   }
 }
 
+/**
+ * POSIX シェルの単一引数として安全になるようシングルクォートで囲む(サマリで案内する
+ * コマンド用。パスに空白や `&` が含まれてもコピー&ペーストでそのまま動くようにする)。
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 /** `askYesNo` / `askChoice` が無効な入力を受け取り続けたときに諦めるまでの最大再試行回数。 */
 const MAX_PROMPT_RETRIES = 10;
 
@@ -1074,16 +1082,18 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       // レガシーな `launchctl load` ではなく、エラーが読みやすい `bootstrap` 形式を案内する。
       summary.push('');
       summary.push('次に実行するコマンド(上から順に):');
-      summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${envPath}`);
+      summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
       summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
-      summary.push(`  2. 現在のシェルに読み込む: set -a; . ${envPath}; set +a`);
-      summary.push(`  3. 事前チェック: note2web doctor --config ${targetPath}`);
-      summary.push(`  4. 手動で初回同期: note2web sync --config ${targetPath}`);
+      summary.push(`  2. 現在のシェルに読み込む: set -a; . ${shellQuote(envPath)}; set +a`);
+      summary.push(`  3. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+      summary.push(`  4. 手動で初回同期: note2web sync --config ${shellQuote(targetPath)}`);
       summary.push(
-        `  5. launchd に登録する(sudo は付けない): launchctl bootstrap gui/$(id -u) ${plistPath}`,
+        `  5. launchd に登録する(sudo は付けない): launchctl bootstrap gui/$(id -u) ${shellQuote(plistPath)}`,
       );
       summary.push(`  6. すぐ1回実行して確認: launchctl kickstart -k gui/$(id -u)/${label}`);
-      summary.push(`  7. ログを確認: tail -f ${stdoutLogPath} ${stderrLogPath}`);
+      summary.push(
+        `  7. ログを確認: tail -f ${shellQuote(stdoutLogPath)} ${shellQuote(stderrLogPath)}`,
+      );
       summary.push(`  (定期実行を解除するとき: launchctl bootout gui/$(id -u)/${label})`);
     } else {
       summary.push('Skipped launchd file generation (re-run "note2web init" later to add it).');
@@ -1092,8 +1102,8 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       summary.push(
         `  1. 環境変数を設定する: export <変数名>=<値> (必要な変数: ${requiredEnvNames.join(', ')})`,
       );
-      summary.push(`  2. 事前チェック: note2web doctor --config ${targetPath}`);
-      summary.push(`  3. 同期を実行: note2web sync --config ${targetPath}`);
+      summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
+      summary.push(`  3. 同期を実行: note2web sync --config ${shellQuote(targetPath)}`);
     }
 
     return { summary };

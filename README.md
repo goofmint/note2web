@@ -289,7 +289,7 @@ chmod 700 ~/bin/note2web-sync.sh
 
 crontab・launchd の plist はいずれも平文で読まれ得るため、トークン類は上記の `chmod 600` した env ファイルにのみ置いてください(より堅牢にするなら macOS キーチェーン + `security find-generic-password` での取得も選択肢です)。cron から起動するシェル/`node` バイナリにも「フルディスクアクセス」権限が必要な点に注意してください。
 
-### launchd の例(`~/Library/LaunchAgents/com.example.note2web.zenn.plist`)
+### launchd の例(`~/Library/LaunchAgents/com.note2web.zenn.plist`)
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -297,7 +297,7 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.example.note2web.zenn</string>
+  <string>com.note2web.zenn</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/you/bin/note2web-sync.sh</string>
@@ -313,7 +313,7 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 </plist>
 ```
 
-サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.example.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.example.note2web.<service>` を使います。トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
+サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.note2web.<service>` を使います。トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
 
 ## ログ
 
