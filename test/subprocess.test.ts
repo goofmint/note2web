@@ -297,9 +297,10 @@ describe('sanitizeOutputSummary', () => {
     const longLine = 'x'.repeat(250);
     const result = sanitizeOutputSummary(longLine, homedirFn);
 
-    expect(result.length).toBe(201);
+    // `…` を含めた全体が上限 200 文字以内に収まる。
+    expect(result.length).toBe(200);
     expect(result.endsWith('…')).toBe(true);
-    expect(result.slice(0, 200)).toBe('x'.repeat(200));
+    expect(result.slice(0, 199)).toBe('x'.repeat(199));
   });
 
   it('leaves a short, non-sensitive line unchanged', () => {

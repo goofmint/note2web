@@ -308,7 +308,8 @@ export function sanitizeOutputSummary(line: string, homedirFn: () => string = ho
   }
 
   if (sanitized.length > OUTPUT_SUMMARY_MAX_LENGTH) {
-    sanitized = `${sanitized.slice(0, OUTPUT_SUMMARY_MAX_LENGTH)}…`;
+    // `…` を含めた全体が上限以内に収まるよう、1文字分を空けてから付与する。
+    sanitized = `${sanitized.slice(0, OUTPUT_SUMMARY_MAX_LENGTH - 1)}…`;
   }
 
   return sanitized;
