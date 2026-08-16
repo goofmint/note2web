@@ -385,7 +385,7 @@ describe('exportAppleNotes', () => {
     // フルディスクアクセス / WAL / スキーマ不一致のヒントが追記される。
     await expect(promise).rejects.toThrow(/フルディスクアクセス/);
     await expect(promise).rejects.toThrow(/WAL/);
-    await expect(promise).rejects.toThrow(/スキーマ不一致/);
+    await expect(promise).rejects.toThrow(/スキーマの不一致/);
   });
 
   it('appends the SQLite hint when stderr is empty and only stdout contains "SQLite3::SQLException"', async () => {
@@ -407,7 +407,7 @@ describe('exportAppleNotes', () => {
     await expect(promise).rejects.toBeInstanceOf(ExportError);
     await expect(promise).rejects.toThrow(/フルディスクアクセス/);
     await expect(promise).rejects.toThrow(/WAL/);
-    await expect(promise).rejects.toThrow(/スキーマ不一致/);
+    await expect(promise).rejects.toThrow(/スキーマの不一致/);
   });
 
   it('appends the SQLite hint when the failure is signaled via "SQLite3::SQLException" without "no such table"', async () => {
