@@ -12,7 +12,13 @@
  *
  * 本モジュールが追加でチェックするのは、config スキーマに現れない依存
  * (コマンドの実在・`GH_TOKEN` のような固定名の環境変数・parser 本体の実在)のみ:
- *   - 共通: `ruby` コマンド、`exporter.parser_path` 配下の `notes_cloud_ripper.rb`
+ *   - 共通: `ruby` コマンド・そのバージョン(`ruby -v` を実行し >= 3.0 を要求)、
+ *     `exporter.parser_path` 配下の `notes_cloud_ripper.rb`。加えて issue #67 で、
+ *     `exporter.launcher`(既定 `'bundle'`)が `'bundle'` のときのみ `bundle` コマンドと
+ *     gem の準備状況(`bundle check` を `parser_path` で実行)を検証する——launchd の
+ *     最小限の環境では `bundle exec ruby` の前提(Bundler・gem のインストール)が
+ *     欠けたまま実行され、`apple_cloud_notes_parser failed` としか分からない失敗に
+ *     なりがちだったため(issue #67 の根本原因)
  *   - zenn/hugo/jekyll(Git モード): `git` / `gh` コマンド、`GH_TOKEN` 環境変数
  *     (`GH_TOKEN` は design.md §5.7 が定める固定名で、設定スキーマの `*_env` には
  *     現れないため、config.ts の汎用チェックではカバーされない)
@@ -49,7 +55,30 @@ import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
 import { DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
 import { expandHome } from './paths.js';
-import { commandExists } from './subprocess.js';
+import {
+  commandExists,
+  firstNonEmptyLine,
+  runSubprocess,
+  type RunSubprocessOptions,
+  type RunSubprocessResult,
+} from './subprocess.js';
+
+/**
+ * `ruby -v` / `bundle check` の実行を差し替えるための最小限の関数シグネチャ(issue #67)。
+ * `src/exporter/apple-notes.ts` の `SubprocessRunner` とちょうど同じ形(`RunSubprocessOptions`
+ * → `Promise<RunSubprocessResult>`)。本番では `runSubprocess` をそのまま既定値として渡せ、
+ * テストでは差し替えられるようにする。
+ */
+export type DependencySubprocessRunner = (
+  options: RunSubprocessOptions,
+) => Promise<RunSubprocessResult>;
+
+/**
+ * apple_cloud_notes_parser(notes_cloud_ripper.rb)を `bundle exec` で起動する前提として
+ * 要求する Ruby の最低バージョン(issue #67)。`>= 3.0` は design.md 未記載の実務上の下限で、
+ * 古い Ruby では Bundler / 依存 gem が要求する言語機能が欠けることがあるための予防的な下限。
+ */
+const RUBY_MIN_VERSION: readonly [number, number, number] = [3, 0, 0];
 
 /**
  * qiita-cli(`@qiita/qiita-cli`)が要求する Node.js の最低メジャーバージョンの下限
@@ -102,6 +131,24 @@ function parseNodeVersionTriple(version: string): [number, number, number] {
     throw new Error(
       `internal error: could not parse Node.js version string: ${JSON.stringify(version)}`,
     );
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/**
+ * `ruby -v` の出力(例: `"ruby 3.2.2p53 (2023-03-30 revision e51014f9c0) [x86_64-darwin23]"`)
+ * から `[major, minor, patch]` を取り出す(issue #67)。先頭付近に `ruby X.Y.Z` があれば
+ * 十分で、`p53` のようなパッチレベル接尾辞は無視する。マッチしない場合は `undefined`。
+ */
+function parseRubyVersionTriple(output: string): [number, number, number] | undefined {
+  const match = /ruby\s+(\d+)\.(\d+)\.(\d+)/.exec(output);
+  if (
+    match === null ||
+    match[1] === undefined ||
+    match[2] === undefined ||
+    match[3] === undefined
+  ) {
+    return undefined;
   }
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
@@ -190,6 +237,11 @@ export interface CheckDependenciesOptions {
    * 既定は `defaultQiitaCliEnginesNode`(解決不能・宣言なしは `undefined`)。
    */
   qiitaCliEnginesFn?: () => string | undefined;
+  /**
+   * `ruby -v` / `bundle check` の実行を差し替える注入点(テスト用、issue #67)。
+   * 既定は `src/subprocess.ts` の `runSubprocess`。
+   */
+  runSubprocessFn?: DependencySubprocessRunner;
 }
 
 async function defaultFileExists(path: string): Promise<boolean> {
@@ -218,6 +270,7 @@ export async function checkDependencies(
     qiitaCliResolvableFn = defaultQiitaCliResolvable,
     nodeVersionFn = () => process.version,
     qiitaCliEnginesFn = defaultQiitaCliEnginesNode,
+    runSubprocessFn = runSubprocess,
   } = options;
 
   const problems: DependencyProblem[] = [];
@@ -231,14 +284,99 @@ export async function checkDependencies(
   };
 
   // 共通(design.md §6 依存表「共通」行。R2/S3 認証環境変数は config.ts が既に検証済み)。
-  await requireCommand('ruby', 'required by apple_cloud_notes_parser, design.md §5.2');
+  const rubyExists = await commandExistsFn('ruby');
+  if (!rubyExists) {
+    problems.push({
+      message:
+        'required command "ruby" was not found on PATH ' +
+        '(required by apple_cloud_notes_parser / notes_cloud_ripper.rb, design.md §5.2)',
+    });
+  }
 
   const parserPath = expandHome(config.exporter?.parser_path ?? DEFAULT_PARSER_PATH);
   const parserEntryPoint = join(parserPath, 'notes_cloud_ripper.rb');
-  if (!(await fileExistsFn(parserEntryPoint))) {
+  // parser 本体の実在チェックの結果を保持しておく。存在しない場合は後段の
+  // `bundle check`(下記)を実行しない — parser_path が誤っている状態で
+  // `bundle check` を parserPath 配下で実行しても意味のある結果にならず、
+  // 本来の原因(parser_path 設定)を覆い隠す「bundle install してください」という
+  // 誤誘導のメッセージを追加してしまうため。
+  const parserEntryPointExists = await fileExistsFn(parserEntryPoint);
+  if (!parserEntryPointExists) {
     problems.push({
       message: `apple_cloud_notes_parser entry point not found: ${parserEntryPoint} (check exporter.parser_path)`,
     });
+  }
+
+  // Ruby バージョンチェック(issue #67)。`ruby` コマンド自体が無い場合は上で既に問題を
+  // 報告済みのため、ここでは実行を試みない(二重報告を避ける)。
+  if (rubyExists) {
+    const versionResult = await runSubprocessFn({
+      command: 'ruby',
+      args: ['-v'],
+      timeoutMs: 10_000,
+    });
+    if (versionResult.status !== 'success') {
+      const detail =
+        firstNonEmptyLine(versionResult.stderr) ??
+        firstNonEmptyLine(versionResult.stdout) ??
+        'unknown error';
+      problems.push({
+        message: `failed to run "ruby -v" to determine the Ruby version: ${detail}`,
+      });
+    } else {
+      const rubyVersion = parseRubyVersionTriple(versionResult.stdout);
+      if (rubyVersion === undefined) {
+        problems.push({
+          message:
+            'could not parse the Ruby version from "ruby -v" output: ' +
+            (firstNonEmptyLine(versionResult.stdout) ?? '(empty output)'),
+        });
+      } else if (compareVersionTriples(rubyVersion, RUBY_MIN_VERSION) < 0) {
+        problems.push({
+          message:
+            `Ruby ${rubyVersion.join('.')} is older than the required minimum ` +
+            `(>=${RUBY_MIN_VERSION.join('.')}) for apple_cloud_notes_parser (notes_cloud_ripper.rb)`,
+        });
+      }
+    }
+  }
+
+  // gem 起動方法の依存(issue #67)。既定 'bundle' のときのみ `bundle` コマンドと
+  // gem の準備状況(`bundle check`)を検証する。'ruby' 起動を選んでいれば Bundler を
+  // 経由しないため、これらのチェックは行わない。
+  const launcher = config.exporter?.launcher ?? 'bundle';
+  if (launcher === 'bundle') {
+    const bundleExists = await commandExistsFn('bundle');
+    if (!bundleExists) {
+      problems.push({
+        message:
+          'required command "bundle" was not found on PATH ' +
+          '(required by exporter.launcher "bundle" (default) to run ' +
+          '"bundle exec ruby notes_cloud_ripper.rb"; install it with `gem install bundler`, ' +
+          'or set exporter.launcher: ruby to bypass Bundler)',
+      });
+    } else if (parserEntryPointExists) {
+      // parser_path が有効なときだけ `bundle check` を実行する(上記の parser 本体
+      // 実在チェック参照)。parser_path が無効な場合は、上で既に parser_path の
+      // 問題を報告済みなので、ここでの二重報告(かつ誤誘導)を避ける。
+      const bundleCheckResult = await runSubprocessFn({
+        command: 'bundle',
+        args: ['check'],
+        cwd: parserPath,
+        timeoutMs: 30_000,
+      });
+      if (bundleCheckResult.status !== 'success') {
+        const detail =
+          firstNonEmptyLine(bundleCheckResult.stderr) ??
+          firstNonEmptyLine(bundleCheckResult.stdout) ??
+          'unknown error';
+        problems.push({
+          message:
+            `apple_cloud_notes_parser's gems are not installed ("bundle check" failed in ` +
+            `${parserPath}); run "bundle install" there before syncing: ${detail}`,
+        });
+      }
+    }
   }
 
   switch (config.service) {

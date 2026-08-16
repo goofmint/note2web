@@ -527,6 +527,21 @@ describe('runInit', () => {
       expect(result.summary.join('\n')).not.toContain('NOTE2WEB_NODE');
       expect(result.summary.join('\n')).not.toContain('NOTE2WEB_CLI');
 
+      // 新規作成した env ファイルには Ruby 環境のヒント(コメント行のみ、issue #67)を
+      // 含める。実際の変数として要求(必須/任意いずれの一覧にも)されるわけではない。
+      expect(envContent).toContain(
+        '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、',
+      );
+      expect(envContent).toContain(
+        '# launchd の最小限の PATH では apple_cloud_notes_parser の起動(bundle exec ruby)に',
+      );
+      expect(envContent).toContain(
+        '# 失敗することがあります。必要に応じて以下のような変数をここへ追記してください:',
+      );
+      expect(envContent).toContain('#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
+      expect(envContent).toContain('#   GEM_HOME=$HOME/.gem');
+      expect(envContent).toContain('#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile');
+
       const wrapperContent = fs.files.get(wrapperPath) ?? '';
       expect(wrapperContent).toContain('#!/bin/sh');
       expect(wrapperContent).toContain('set -a');
@@ -600,6 +615,9 @@ describe('runInit', () => {
       const envContent = fs.files.get(envPath) ?? '';
       expect(envContent).toContain('GH_TOKEN=already-set-do-not-touch');
       expect(envContent).toContain('R2_ACCESS_KEY_ID=');
+      // 既存ファイルへの追記は実在する変数名の行のみ(issue #67 の Ruby ヒントコメントは
+      // 新規作成テンプレートにのみ含め、追記対象には含めない)。
+      expect(envContent).not.toContain('# [Ruby 環境のヒント]');
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
     });
 

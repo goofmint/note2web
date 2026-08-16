@@ -24,6 +24,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 - [設定ファイル](#設定ファイル)
 - [サービス別セットアップ](#サービス別セットアップ)
 - [cron / launchd での定期実行](#cron--launchd-での定期実行)
+- [トラブルシューティング](#トラブルシューティング)
 - [ログ](#ログ)
 - [既知の制約・実機未確認事項](#既知の制約実機未確認事項)
 - [開発](#開発)
@@ -32,7 +33,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
 - **macOS**(Apple Notes のデータへローカルアクセスできる環境が前提です)
 - **Node.js**: `^20.19.0 || ^22.13.0 || >=24`(`package.json` の `engines` を参照)
-- **Ruby**(下記 `apple_cloud_notes_parser` の実行に必要)
+- **Ruby**: 3.0 以上(下記 `apple_cloud_notes_parser` の実行に必要)
 - **[apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)**(Apple Notes のエクスポートに使う外部 Ruby ツール。note2web には同梱されないため、別途 clone してセットアップします)
 
   ```sh
@@ -102,6 +103,8 @@ source:
 exporter:
   parser_path: ~/tools/apple_cloud_notes_parser        # apple_cloud_notes_parser の clone 先(省略可、既定値どおりなら省略可)
   notes_container: ~/Library/Group Containers/group.com.apple.notes  # Apple Notes のコンテナ(省略可、既定値どおりなら省略可)
+  launcher: bundle               # bundle | ruby(省略可、既定 bundle。`bundle exec ruby notes_cloud_ripper.rb ...` として起動する。
+                                  # 素の `ruby notes_cloud_ripper.rb ...` で起動したい場合のみ ruby を指定。後述「トラブルシューティング」参照)
 state_file: ./zenn.state.json  # 省略時: <設定ファイル名>.state.json
 log:
   file: ~/Library/Logs/note2web/zenn.log   # 省略可。標準出力へは常に JSON Lines を出す
@@ -325,6 +328,44 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 ```
 
 サービスごとに `Label` / 設定ファイル / ログパスを変えた plist を用意し、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.note2web.<service>.plist` で登録します(LaunchAgent はユーザー単位のため **`sudo` は付けません**。`sudo` を付けると LaunchDaemons 扱いになり `Load failed: 5: Input/output error` で失敗します)。すぐ1回実行して動作確認するには `launchctl kickstart -k gui/$(id -u)/com.note2web.<service>`、解除するには `launchctl bootout gui/$(id -u)/com.note2web.<service>` を使います。トークンは plist の `EnvironmentVariables` ではなく、上記ラッパースクリプトが読む env ファイルに置きます。note.com 向けの構成では、上記に加えてログイン済みブラウザと `noet` 拡張機能が常時起動している必要がある点に注意してください(無人の launchd だけでは前提を満たせません)。
+
+## トラブルシューティング
+
+### `apple_cloud_notes_parser (notes_cloud_ripper.rb) failed`
+
+cron / launchd から `note2web sync` を実行したときに以下のようなログが出て失敗する場合の対処法です。
+
+```text
+note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): exitCode=1, signal=null: <出力の先頭1行>
+```
+
+まず**「apple_cloud_notes_parser」はプロジェクト名、「notes_cloud_ripper.rb」はその中のエントリスクリプト名**です。両方とも [threeplanetssoftware/apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) という**同一の Ruby 製 CLI ツール**を指しています(似た名前の Python 製ライブラリ `apple-notes-parser` とは別物です)。note2web はこのツールを clone してサブプロセスとして呼び出しているだけで、同梱・再配布はしていません。
+
+代表的な原因は次のとおりです:
+
+1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。`~/.config/note2web/env` に `PATH=/opt/homebrew/opt/ruby/bin:${PATH}` のような行を追記してください(`note2web init` が生成する env ファイルのテンプレートにもヒントのコメントが入っています)
+2. **gem がインストールされていない**: `apple_cloud_notes_parser` の clone 先で `bundle install` を実行していないと、`bundle exec ruby notes_cloud_ripper.rb` は `Could not find gem 'sqlite3'...` のようなメッセージで失敗します。以下を実行してください:
+   ```sh
+   cd ~/tools/apple_cloud_notes_parser   # exporter.parser_path と同じパス
+   bundle install
+   ```
+3. **Ruby のバージョンが古い(< 3.0)**: `ruby -v` で確認してください。`note2web doctor` はこのバージョンチェックも行います
+4. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。この場合 parser 自体は起動するものの `NoteStore.sqlite` の読み取りで失敗します
+5. **`exporter.parser_path` が誤っている**: clone 先のパスと設定ファイルの `exporter.parser_path` が一致しているか確認してください
+
+**ログの読み方**: 上記のエラーメッセージの末尾(`exitCode=... signal=...:` の後ろ)には、parser の stderr(無ければ stdout)の先頭の意味のある1行がそのまま含まれます(parser のコマンドライン自体は秘匿情報を含みうる引数がないため、この出力のみを載せています)。`bundle: command not found` なら原因1、`Could not find gem` なら原因2、というように読み分けられます。
+
+**事前チェック**: `note2web doctor --config <path>` は `ruby` / `bundle` コマンドの存在、Ruby のバージョン(>= 3.0)、`bundle check` による gem の準備状況までまとめて確認します。まずこれを実行してください。
+
+**手動デバッグ**: cron / launchd と同じ経路を手元のシェルで再現するには、ラッパースクリプトを直接実行します:
+
+```sh
+~/bin/note2web-sync.sh ~/.config/note2web/zenn.yaml
+```
+
+これで launchd 経由と同じ `PATH` 補完・env ファイル読み込みで実行されるため、対話シェルでは再現しない `PATH` / 環境変数まわりの問題を切り分けられます。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o /tmp/out --individual-files --uuid` を直接実行し、parser 単体のエラーメッセージを確認してください。
+
+**`launcher: ruby` への切り替え**: Bundler を経由せず gem 環境が別の方法(システム全体への gem インストール等)で解決できている場合は、設定 YAML で `exporter.launcher: ruby` を指定すると `bundle exec` を挟まない従来どおりの起動に戻せます。
 
 ## ログ
 

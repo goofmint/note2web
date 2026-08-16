@@ -25,6 +25,7 @@ import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
 import {
   DEFAULT_TIMEOUTS,
+  firstNonEmptyLine,
   runSubprocess,
   type RunSubprocessOptions,
   type RunSubprocessResult,
@@ -395,9 +396,14 @@ async function locateNotesJsonFile(
  * 組み立てる(design.md §5.2)。
  *
  * 1. `exporter.parser_path` / `exporter.notes_container`(既定値あり、design.md §7)を
- *    `~` 展開したうえで、`ruby notes_cloud_ripper.rb -m <container> -o <tmpdir>
+ *    `~` 展開したうえで、`notes_cloud_ripper.rb -m <container> -o <tmpdir>
  *    --individual-files --uuid` を `cwd: parser_path` で実行する(タイムアウトは
- *    `DEFAULT_TIMEOUTS.parser` = 15分、T-05)。
+ *    `DEFAULT_TIMEOUTS.parser` = 15分、T-05)。起動コマンドは `exporter.launcher`
+ *    (既定 `'bundle'`)で選ぶ——既定は `bundle exec ruby notes_cloud_ripper.rb ...`
+ *    (Gemfile の `sqlite3`/`nokogiri` 等を Bundler 経由で解決する。launchd の最小限の
+ *    環境では素の `ruby` だけでは gem が解決できず `LoadError` になりがちなため。
+ *    issue #67)。`'ruby'` を指定すると `ruby notes_cloud_ripper.rb ...`(Bundler を
+ *    経由しない旧来の直接起動)にフォールバックできる。
  * 2. 非成功終了は `ExportError`(分類つき)を投げる。実行全体を中断させる想定
  *    (design.md §10「parser の実行失敗」→ 呼び出し側で exit 1)であり、ここでは
  *    `process.exit` は呼ばない。
@@ -442,26 +448,45 @@ async function runExport(params: {
 }): Promise<ExportResult> {
   const { config, logger, runner, parserPath, notesContainer, exportDir } = params;
 
+  // 起動コマンドの組み立て(design.md §5.2、issue #67)。既定 'bundle' は Gemfile の
+  // gem(sqlite3/nokogiri 等)を Bundler 経由で解決する — launchd の最小限の PATH/GEM_HOME
+  // では素の ruby だけでは解決できず LoadError になりがちなため、こちらを既定にする。
+  const rubyScriptArgs = [
+    'notes_cloud_ripper.rb',
+    '-m',
+    notesContainer,
+    '-o',
+    exportDir,
+    '--individual-files',
+    '--uuid',
+  ];
+  const launcher = config.exporter?.launcher ?? 'bundle';
+  const { command, args } =
+    launcher === 'ruby'
+      ? { command: 'ruby', args: rubyScriptArgs }
+      : { command: 'bundle', args: ['exec', 'ruby', ...rubyScriptArgs] };
+
   const subprocessResult = await runner({
-    command: 'ruby',
-    args: [
-      'notes_cloud_ripper.rb',
-      '-m',
-      notesContainer,
-      '-o',
-      exportDir,
-      '--individual-files',
-      '--uuid',
-    ],
+    command,
+    args,
     cwd: parserPath,
     timeoutMs: DEFAULT_TIMEOUTS.parser,
     logger,
   });
 
   if (subprocessResult.status !== 'success') {
+    // stderr/stdout の先頭1行を含める(issue #67: launchd 環境では標準エラーが
+    // 単純な exitCode/signal のみに丸められ、原因(gem 未解決の LoadError 等)が
+    // 分からなかったため)。parser の argv(コマンドライン)には秘匿情報を一切含まない
+    // ため、出力内容を含めても FR-30 には抵触しない。
+    const detail =
+      firstNonEmptyLine(subprocessResult.stderr) ??
+      firstNonEmptyLine(subprocessResult.stdout) ??
+      'unknown error';
     throw new ExportError(
-      `apple_cloud_notes_parser failed (${subprocessResult.classification ?? 'unknown'}): ` +
-        `exitCode=${String(subprocessResult.exitCode)}, signal=${String(subprocessResult.signal)}`,
+      `apple_cloud_notes_parser (notes_cloud_ripper.rb) failed ` +
+        `(${subprocessResult.classification ?? 'unknown'}): ` +
+        `exitCode=${String(subprocessResult.exitCode)}, signal=${String(subprocessResult.signal)}: ${detail}`,
       { classification: subprocessResult.classification },
     );
   }

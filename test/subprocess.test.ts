@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join, dirname, basename, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { commandExists, DEFAULT_TIMEOUTS, runSubprocess } from '../src/subprocess.js';
+import {
+  commandExists,
+  DEFAULT_TIMEOUTS,
+  runSubprocess,
+  sanitizeOutputSummary,
+} from '../src/subprocess.js';
 
 const FIXTURES_DIR = fileURLToPath(new URL('./fixtures/subprocess/', import.meta.url));
 const fixture = (name: string): string => join(FIXTURES_DIR, name);
@@ -168,6 +173,47 @@ describe('runSubprocess', () => {
     expect(payload.message).toContain('exit_code');
   });
 
+  it('includes a one-line stderr/stdout output summary in the failure warn log (issue #67)', async () => {
+    const warn = vi.fn();
+
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('fail-with-output.js')],
+      timeoutMs: 2000,
+      logger: { warn },
+    });
+
+    expect(result.status).toBe('failure');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [payload] = warn.mock.calls[0] as [{ message: string }];
+    // 出力の先頭意味のある1行(ここでは stderr の "hello from stderr")が含まれる。
+    // コマンドライン(command/args)自体は含めない(FR-30)。
+    expect(payload.message).toContain('output: hello from stderr');
+    expect(payload.message).not.toContain(fixture('fail-with-output.js'));
+    expect(payload.message).not.toContain(process.execPath);
+  });
+
+  it('falls back to the first non-empty stdout line when stderr is empty, skipping blank/whitespace-only lines (issue #67)', async () => {
+    const warn = vi.fn();
+
+    const result = await runSubprocess({
+      command: process.execPath,
+      args: [fixture('fail-with-stdout-only.js')],
+      timeoutMs: 2000,
+      logger: { warn },
+    });
+
+    expect(result.status).toBe('failure');
+    expect(result.stderr).toBe('');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [payload] = warn.mock.calls[0] as [{ message: string }];
+    // stdout の先頭行は空行・空白のみの行なので読み飛ばされ、trim 済みの
+    // "actual failure reason" が summary として採用される。
+    expect(payload.message).toContain('output: actual failure reason');
+    expect(payload.message).not.toContain(fixture('fail-with-stdout-only.js'));
+    expect(payload.message).not.toContain(process.execPath);
+  });
+
   it('does not call the logger on success', async () => {
     const warn = vi.fn();
 
@@ -220,6 +266,48 @@ describe('runSubprocess', () => {
     // process.env(PATH を含む)がベースとして保持され続けていることを確認する。
     // 親プロセス自体に PATH がない環境でも成立するよう、期待値は親の状態から導出する。
     expect(result.stdout).toContain(`PATH_PRESENT=${expectedPathPresent}`);
+  });
+});
+
+describe('sanitizeOutputSummary', () => {
+  it('replaces the home directory prefix with ~', () => {
+    const homedirFn = (): string => '/home/testuser';
+    const result = sanitizeOutputSummary(
+      'error reading /home/testuser/Library/Group Containers/foo',
+      homedirFn,
+    );
+
+    expect(result).toBe('error reading ~/Library/Group Containers/foo');
+    expect(result).not.toContain('testuser');
+  });
+
+  it('masks a ghp_ GitHub token', () => {
+    const homedirFn = (): string => '/home/testuser';
+    const result = sanitizeOutputSummary(
+      'authentication failed: token=ghp_1234567890abcdefghijklmnopqrstuvwxyz used',
+      homedirFn,
+    );
+
+    expect(result).not.toContain('ghp_1234567890abcdefghijklmnopqrstuvwxyz');
+    expect(result).toContain('***');
+  });
+
+  it('truncates to 200 characters and appends an ellipsis', () => {
+    const homedirFn = (): string => '/home/testuser';
+    const longLine = 'x'.repeat(250);
+    const result = sanitizeOutputSummary(longLine, homedirFn);
+
+    // `…` を含めた全体が上限 200 文字以内に収まる。
+    expect(result.length).toBe(200);
+    expect(result.endsWith('…')).toBe(true);
+    expect(result.slice(0, 199)).toBe('x'.repeat(199));
+  });
+
+  it('leaves a short, non-sensitive line unchanged', () => {
+    const homedirFn = (): string => '/home/testuser';
+    const result = sanitizeOutputSummary("Could not find gem 'sqlite3'", homedirFn);
+
+    expect(result).toBe("Could not find gem 'sqlite3'");
   });
 });
 

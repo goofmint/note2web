@@ -38,7 +38,7 @@ import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
 import type { RunSubprocessOptions, RunSubprocessResult } from '../subprocess.js';
-import { runSubprocess } from '../subprocess.js';
+import { firstNonEmptyLine, runSubprocess } from '../subprocess.js';
 import type { NoteState } from '../state/store.js';
 import type { FinalizeOutcome, Publisher, PublishResult, RenderedArticle } from './types.js';
 
@@ -75,14 +75,6 @@ function formatBranchTimestamp(date: Date): string {
   const minutes = pad(date.getUTCMinutes());
   const seconds = pad(date.getUTCSeconds());
   return `${year}${month}${day}T${hours}${minutes}${seconds}Z`;
-}
-
-/** サブプロセスの stdout/stderr から、エラーメッセージ用に先頭の意味のある1行を取り出す。 */
-function firstNonEmptyLine(text: string): string | undefined {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
 }
 
 /**

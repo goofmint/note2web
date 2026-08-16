@@ -58,10 +58,31 @@ function failure(stderr = 'error'): RunSubprocessResult {
   };
 }
 
+/**
+ * `checkDependencies`(issue #67 で追加された `ruby -v` / `bundle check`)が実ホストの
+ * サブプロセスに触れないようにする既定成功フェイク。`runDoctorChecks` の
+ * `dependencyRunSubprocessFn` に渡す(`gh auth status` 用の `runSubprocessFn` とは別物)。
+ */
+function fakeRubyBundleSubprocess(): (
+  options: RunSubprocessOptions,
+) => Promise<RunSubprocessResult> {
+  return (options) => {
+    if (options.command === 'ruby') {
+      return Promise.resolve(success('ruby 3.2.2p53 (2023-03-30 revision e51014f9c0)\n'));
+    }
+    if (options.command === 'bundle') {
+      return Promise.resolve(success("The Gemfile's dependencies are satisfied\n"));
+    }
+    return Promise.reject(
+      new Error(`test fake: unexpected command in dependencyRunSubprocessFn: ${options.command}`),
+    );
+  };
+}
+
 describe('runDoctorChecks', () => {
   let dir: string;
   let parserPath: string;
-  const allCommandsPresent = new Set(['ruby', 'git', 'gh', 'node', 'npx', 'noet']);
+  const allCommandsPresent = new Set(['ruby', 'bundle', 'git', 'gh', 'node', 'npx', 'noet']);
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'note2web-doctor-test-'));
@@ -93,6 +114,7 @@ describe('runDoctorChecks', () => {
             commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
             env: { GH_TOKEN: 'token-value' },
             runSubprocessFn,
+            dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
           },
         ),
       ).resolves.toBeUndefined();
@@ -111,6 +133,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -136,6 +159,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -161,6 +185,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -183,6 +208,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -195,7 +221,7 @@ describe('runDoctorChecks', () => {
       const runSubprocessFn = vi.fn<
         (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
       >(() => Promise.resolve(success()));
-      const commands = new Set(['ruby', 'git']);
+      const commands = new Set(['ruby', 'bundle', 'git']);
 
       const error = await expectDoctorError(
         buildConfig({ exporter: { parser_path: parserPath, notes_container: '/dev/null' } }),
@@ -203,6 +229,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
           env: { GH_TOKEN: 'token-value' },
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -222,6 +249,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
           env: {},
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -270,6 +298,7 @@ describe('runDoctorChecks', () => {
             commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
             env: { GH_TOKEN: 'token-value' },
             runSubprocessFn,
+            dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
           },
         ),
       ).resolves.toBeUndefined();
@@ -298,6 +327,7 @@ describe('runDoctorChecks', () => {
             commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
             env: {},
             runSubprocessFn,
+            dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
           },
         ),
       ).resolves.toBeUndefined();
@@ -321,6 +351,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(command === 'ruby'),
           env: {},
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -346,6 +377,7 @@ describe('runDoctorChecks', () => {
           commandExistsFn: (command) => Promise.resolve(command === 'ruby'),
           env: {},
           runSubprocessFn,
+          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
@@ -360,6 +392,7 @@ describe('runDoctorChecks', () => {
       fileExistsFn: () => Promise.resolve(false),
       env: { GH_TOKEN: 'token-value' },
       runSubprocessFn: () => Promise.resolve(success()),
+      dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
     });
 
     const messages = error.problems.map((problem) => problem.message).join('\n');
