@@ -33,7 +33,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 
 - **macOS**(Apple Notes のデータへローカルアクセスできる環境が前提です)
 - **Node.js**: `^20.19.0 || ^22.13.0 || >=24`(`package.json` の `engines` を参照)
-- **Ruby**(下記 `apple_cloud_notes_parser` の実行に必要)
+- **Ruby**: 3.0 以上(下記 `apple_cloud_notes_parser` の実行に必要)
 - **[apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)**(Apple Notes のエクスポートに使う外部 Ruby ツール。note2web には同梱されないため、別途 clone してセットアップします)
 
   ```sh
@@ -335,7 +335,7 @@ crontab・launchd の plist はいずれも平文で読まれ得るため、ト�
 
 cron / launchd から `note2web sync` を実行したときに以下のようなログが出て失敗する場合の対処法です。
 
-```
+```text
 note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): exitCode=1, signal=null: <出力の先頭1行>
 ```
 
@@ -353,7 +353,7 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 4. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。この場合 parser 自体は起動するものの `NoteStore.sqlite` の読み取りで失敗します
 5. **`exporter.parser_path` が誤っている**: clone 先のパスと設定ファイルの `exporter.parser_path` が一致しているか確認してください
 
-**ログの読み方**: 上記のエラーメッセージの末尾(`exitCode=... signal=...: ` の後ろ)には、parser の stderr(無ければ stdout)の先頭の意味のある1行がそのまま含まれます(parser のコマンドライン自体は秘匿情報を含みうる引数がないため、この出力のみを載せています)。`bundle: command not found` なら原因1、`Could not find gem` なら原因2、というように読み分けられます。
+**ログの読み方**: 上記のエラーメッセージの末尾(`exitCode=... signal=...:` の後ろ)には、parser の stderr(無ければ stdout)の先頭の意味のある1行がそのまま含まれます(parser のコマンドライン自体は秘匿情報を含みうる引数がないため、この出力のみを載せています)。`bundle: command not found` なら原因1、`Could not find gem` なら原因2、というように読み分けられます。
 
 **事前チェック**: `note2web doctor --config <path>` は `ruby` / `bundle` コマンドの存在、Ruby のバージョン(>= 3.0)、`bundle check` による gem の準備状況までまとめて確認します。まずこれを実行してください。
 

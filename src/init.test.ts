@@ -529,10 +529,18 @@ describe('runInit', () => {
 
       // 新規作成した env ファイルには Ruby 環境のヒント(コメント行のみ、issue #67)を
       // 含める。実際の変数として要求(必須/任意いずれの一覧にも)されるわけではない。
-      expect(envContent).toContain('# [Ruby 環境のヒント]');
-      expect(envContent).toContain('PATH=/opt/homebrew/opt/ruby/bin');
-      expect(envContent).toContain('GEM_HOME=');
-      expect(envContent).toContain('BUNDLE_GEMFILE=');
+      expect(envContent).toContain(
+        '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、',
+      );
+      expect(envContent).toContain(
+        '# launchd の最小限の PATH では apple_cloud_notes_parser の起動(bundle exec ruby)に',
+      );
+      expect(envContent).toContain(
+        '# 失敗することがあります。必要に応じて以下のような変数をここへ追記してください:',
+      );
+      expect(envContent).toContain('#   PATH=/opt/homebrew/opt/ruby/bin:${PATH}');
+      expect(envContent).toContain('#   GEM_HOME=$HOME/.gem');
+      expect(envContent).toContain('#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile');
 
       const wrapperContent = fs.files.get(wrapperPath) ?? '';
       expect(wrapperContent).toContain('#!/bin/sh');

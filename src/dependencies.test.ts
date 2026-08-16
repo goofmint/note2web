@@ -526,6 +526,33 @@ describe('checkDependencies', () => {
       expect(messages).toMatch(/The following gems are missing/);
     });
 
+    it('does not invoke "bundle check" when the parser entry point is missing (reports only the parser_path problem)', async () => {
+      const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
+      const calls: string[] = [];
+      const missingParserPath = join(dir, 'missing-parser');
+      const error = await expectDependencyError(
+        buildConfig({
+          exporter: { parser_path: missingParserPath, notes_container: '/dev/null' },
+        }),
+        {
+          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+          env: { GH_TOKEN: 'token-value' },
+          runSubprocessFn: (options) => {
+            calls.push(options.command);
+            return fakeRubyBundleSubprocess()(options);
+          },
+        },
+      );
+
+      // "bundle check" は起動されない(呼ばれるのは "ruby -v" のみ)。
+      expect(calls).not.toContain('bundle');
+      expect(calls).toEqual(['ruby']);
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/apple_cloud_notes_parser entry point not found/);
+      expect(messages).not.toMatch(/bundle install/);
+    });
+
     it('does not check bundle command or gem readiness when exporter.launcher is "ruby"', async () => {
       const commands = new Set(['ruby', 'git', 'gh']);
       let bundleCalled = false;

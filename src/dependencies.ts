@@ -295,7 +295,13 @@ export async function checkDependencies(
 
   const parserPath = expandHome(config.exporter?.parser_path ?? DEFAULT_PARSER_PATH);
   const parserEntryPoint = join(parserPath, 'notes_cloud_ripper.rb');
-  if (!(await fileExistsFn(parserEntryPoint))) {
+  // parser 本体の実在チェックの結果を保持しておく。存在しない場合は後段の
+  // `bundle check`(下記)を実行しない — parser_path が誤っている状態で
+  // `bundle check` を parserPath 配下で実行しても意味のある結果にならず、
+  // 本来の原因(parser_path 設定)を覆い隠す「bundle install してください」という
+  // 誤誘導のメッセージを追加してしまうため。
+  const parserEntryPointExists = await fileExistsFn(parserEntryPoint);
+  if (!parserEntryPointExists) {
     problems.push({
       message: `apple_cloud_notes_parser entry point not found: ${parserEntryPoint} (check exporter.parser_path)`,
     });
@@ -349,7 +355,10 @@ export async function checkDependencies(
           '"bundle exec ruby notes_cloud_ripper.rb"; install it with `gem install bundler`, ' +
           'or set exporter.launcher: ruby to bypass Bundler)',
       });
-    } else {
+    } else if (parserEntryPointExists) {
+      // parser_path が有効なときだけ `bundle check` を実行する(上記の parser 本体
+      // 実在チェック参照)。parser_path が無効な場合は、上で既に parser_path の
+      // 問題を報告済みなので、ここでの二重報告(かつ誤誘導)を避ける。
       const bundleCheckResult = await runSubprocessFn({
         command: 'bundle',
         args: ['check'],

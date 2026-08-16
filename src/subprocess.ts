@@ -17,6 +17,7 @@ import { stat, access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
+import { homedir } from 'node:os';
 
 /**
  * design.md §6 が定める既定タイムアウト。呼び出し側が用途に応じて選び、
@@ -182,7 +183,10 @@ export function runSubprocess(options: RunSubprocessOptions): Promise<RunSubproc
         // launchd 環境での原因調査を可能にするため)は診断に有用なので含める——
         // 各呼び出し元の argv には秘匿情報を含まない設計(FR-30 は「コマンドラインに
         // 秘匿情報を含めない」規約であり、出力内容の秘匿性はこの規約の対象外)。
-        const outputSummary = firstNonEmptyLine(result.stderr) ?? firstNonEmptyLine(result.stdout);
+        const rawOutputSummary =
+          firstNonEmptyLine(result.stderr) ?? firstNonEmptyLine(result.stdout);
+        const outputSummary =
+          rawOutputSummary !== undefined ? sanitizeOutputSummary(rawOutputSummary) : undefined;
         logger.warn({
           message:
             `subprocess failed (${result.classification}): exitCode=${String(result.exitCode)}, signal=${String(result.signal)}` +
@@ -259,6 +263,55 @@ export function firstNonEmptyLine(text: string): string | undefined {
     .split('\n')
     .map((line) => line.trim())
     .find((line) => line.length > 0);
+}
+
+/** ログ出力長の上限(文字数)。超過分は末尾を `…` に置き換えて切り詰める。 */
+const OUTPUT_SUMMARY_MAX_LENGTH = 200;
+
+/**
+ * ログに出す `firstNonEmptyLine` の結果を無害化する(issue #67 CodeRabbit フォローアップ)。
+ * `command` / `args` 自体には秘匿情報を含めない設計だが(FR-30)、これはあくまで
+ * コマンドライン組み立て側の規約であり、外部コマンドが stdout/stderr に何を出すかは
+ * 呼び出し元では制御できない。ここでは簡易な正規表現でよくある秘匿情報の形を
+ * マスクする多層防御(defense-in-depth)であり、完全な秘匿情報検出を保証するものではない。
+ *
+ * - 実行ユーザーのホームディレクトリ配下のパスは `~` に置き換え、ログにアカウント名が
+ *   残らないようにする。
+ * - GitHub トークン(`ghp_` / `gho_` / `ghs_` / `ghu_` / `github_pat_`)、Slack 風トークン
+ *   (`xoxb-` 等)、AWS アクセスキー ID(`AKIA...`)、`Bearer <token>`、および
+ *   `...token=` / `...key=` / `...secret=` / `...password=` 形式の `NAME=value` の値部分を
+ *   `***` に置き換える。
+ * - 200文字を超える場合は切り詰め、末尾に `…` を付与する。
+ *
+ * `homedirFn` はテスト用の注入点(既定は `node:os` の `homedir`)。
+ */
+export function sanitizeOutputSummary(line: string, homedirFn: () => string = homedir): string {
+  const home = homedirFn();
+  let sanitized = home.length > 0 ? line.split(home).join('~') : line;
+
+  const maskPatterns: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+    // GitHub トークン(ghp_ / gho_ / ghs_ / ghu_)。
+    { pattern: /\bgh[pous]_[A-Za-z0-9]{20,}\b/g, replacement: '***' },
+    // GitHub のファイングレインド PAT(github_pat_...)。
+    { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replacement: '***' },
+    // Slack 風トークン(xoxb- / xoxp- 等)。
+    { pattern: /\bxox[a-z]-[A-Za-z0-9-]+\b/g, replacement: '***' },
+    // AWS アクセスキー ID。
+    { pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: '***' },
+    // `Authorization: Bearer <token>` 等。
+    { pattern: /\bBearer\s+\S+/gi, replacement: 'Bearer ***' },
+    // NAME に token/key/secret/password を含む `NAME=value` 形式(値だけマスク)。
+    { pattern: /\b([\w-]*(?:token|key|secret|password)[\w-]*)=(\S+)/gi, replacement: '$1=***' },
+  ];
+  for (const { pattern, replacement } of maskPatterns) {
+    sanitized = sanitized.replace(pattern, replacement);
+  }
+
+  if (sanitized.length > OUTPUT_SUMMARY_MAX_LENGTH) {
+    sanitized = `${sanitized.slice(0, OUTPUT_SUMMARY_MAX_LENGTH)}…`;
+  }
+
+  return sanitized;
 }
 
 /**
