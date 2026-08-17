@@ -278,8 +278,6 @@ function resolveIncludedFolderIds(
   folderIndex: Map<number, FolderIndexEntry>,
   folderNames: readonly string[],
 ): Set<number> {
-  const targetNames = new Set(folderNames);
-
   const childrenByParent = new Map<number, number[]>();
   for (const entry of folderIndex.values()) {
     if (entry.parentId !== null) {
@@ -290,12 +288,7 @@ function resolveIncludedFolderIds(
   }
 
   const included = new Set<number>();
-  const queue: number[] = [];
-  for (const entry of folderIndex.values()) {
-    if (targetNames.has(entry.name)) {
-      queue.push(entry.id);
-    }
-  }
+  const queue: number[] = [...resolveMatchedFolderIds(folderIndex, folderNames)];
 
   while (queue.length > 0) {
     const id = queue.shift();
@@ -312,14 +305,43 @@ function resolveIncludedFolderIds(
 }
 
 /**
- * `folderId` から `parentId` を辿り、ルート(JSON トップレベルの `folders` に含まれる
- * マッチしたサブツリーの根。`resolveIncludedFolderIds` 参照)までのフォルダ名を
- * 葉→根の順に集めたうえで反転し、根→葉の順の配列として返す(Note#folderPath、
- * design.md §5.3。Zenn の `type` 判別、FR-24)。JSON トップレベルの `folders` には
- * マッチしたサブツリーの根しか含まれないため、この辿りは自然にそこで止まる。
- * 循環参照は本来あり得ないが、防御的に訪問済み ID の集合で無限ループを回避する。
+ * `folderNames`(設定 `source.folders`)のいずれかと名前が一致するフォルダ**自身**の
+ * `primary_key` 集合を返す(サブツリー展開はしない。それは `resolveIncludedFolderIds` の
+ * 責務)。`resolveIncludedFolderIds` の BFS の起点、および `buildFolderPath` の打ち切り
+ * 判定に共用する。
  */
-function buildFolderPath(folderIndex: Map<number, FolderIndexEntry>, folderId: number): string[] {
+function resolveMatchedFolderIds(
+  folderIndex: Map<number, FolderIndexEntry>,
+  folderNames: readonly string[],
+): Set<number> {
+  const targetNames = new Set(folderNames);
+  const matched = new Set<number>();
+  for (const entry of folderIndex.values()) {
+    if (targetNames.has(entry.name)) {
+      matched.add(entry.id);
+    }
+  }
+  return matched;
+}
+
+/**
+ * `folderId` から `parentId` を辿り、ルート(`source.folders` で一致したフォルダ =
+ * `matchedRootIds` の要素)までのフォルダ名を葉→根の順に集めたうえで反転し、根→葉の
+ * 順の配列として返す(Note#folderPath、design.md §5.3。Zenn の `type` 判別、FR-24)。
+ *
+ * 一致したフォルダより上の祖先は**含めない**(契約は「一致したフォルダから葉まで」)。
+ * 実運用では JSON トップレベルの `folders` に一致サブツリーの根しか含まれない
+ * (`ruby/note2web_export.rb` 側で選別済み)ためこの打ち切りは自然に成立するが、
+ * ここでも `matchedRootIds` で明示的に打ち切ることで、JSON に上位の祖先が含まれる
+ * 入力(手組みの fixture 等)でも契約どおりのパスを返す。一致フォルダが入れ子に
+ * なっている場合は葉に近い方を根として採用する。循環参照は本来あり得ないが、
+ * 防御的に訪問済み ID の集合で無限ループを回避する。
+ */
+function buildFolderPath(
+  folderIndex: Map<number, FolderIndexEntry>,
+  folderId: number,
+  matchedRootIds: ReadonlySet<number>,
+): string[] {
   const names: string[] = [];
   const visited = new Set<number>();
   let currentId: number | null = folderId;
@@ -330,6 +352,9 @@ function buildFolderPath(folderIndex: Map<number, FolderIndexEntry>, folderId: n
       break;
     }
     names.unshift(entry.name);
+    if (matchedRootIds.has(currentId)) {
+      break;
+    }
     currentId = entry.parentId;
   }
   return names;
@@ -596,6 +621,7 @@ async function runExport(params: {
 
   const folderIndex = buildFolderIndex(parsed.folders);
   const includedFolderIds = resolveIncludedFolderIds(folderIndex, config.source.folders);
+  const matchedRootIds = resolveMatchedFolderIds(folderIndex, config.source.folders);
   const htmlRoot = join(exportDir, 'html');
 
   const notes: Note[] = [];
@@ -631,7 +657,7 @@ async function runExport(params: {
     notes.push({
       uuid: noteJson.uuid,
       folder: noteJson.folder,
-      folderPath: buildFolderPath(folderIndex, folderId),
+      folderPath: buildFolderPath(folderIndex, folderId, matchedRootIds),
       // title / emoji はメタデータ抽出層(T-10)の担当(design.md §5.3)。
       title: '',
       emoji: null,

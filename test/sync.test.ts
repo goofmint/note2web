@@ -1069,8 +1069,9 @@ describe('runSync', () => {
 
     it('all notes valid ("tech"/"idea"): every note publishes via the real Zenn renderer', async () => {
       // Archive(primary_key 11)の下に "idea" 子フォルダ(primary_key 98)を新設し、
-      // Archive/🚀 Launch Notes(note key 204)をそこへ付け替える →
-      // folderPath [..., 'Archive', 'idea'] → type "idea"。
+      // Archive/🚀 Launch Notes(note key 204)をそこへ付け替える。source.folders は
+      // ['Archive'] なので folderPath は一致ルートの Archive から始まる ['Archive', 'idea']
+      // (未選択の祖先 'Tech' は含まれない)→ type "idea"。
       const { runner } = makeFixtureRunner(async (outDir) => {
         await addTypeSubfolder(outDir, {
           parentFolderPk: 11,

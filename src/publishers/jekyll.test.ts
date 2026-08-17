@@ -6,11 +6,21 @@ import type { NoteState } from '../state/store.js';
 import { computeContentHash } from '../transform/frontmatter.js';
 
 function buildNote(overrides: Partial<Note> = {}): Note {
-  const folder = overrides.folder ?? 'Tech';
+  // Note の不変条件「`folder` は `folderPath` の最終要素と一致する」(src/model/note.ts)を
+  // fixture でも維持する: `folderPath` だけが指定されたら `folder` を末尾要素から導出し、
+  // 両方指定されて食い違う場合はテストの書き誤りとして即座に失敗させる。
+  const folder = overrides.folder ?? overrides.folderPath?.at(-1) ?? 'Tech';
+  const folderPath = overrides.folderPath ?? [folder];
+  if (folderPath.at(-1) !== folder) {
+    throw new Error(
+      `buildNote: folder ${JSON.stringify(folder)} must equal the last element of ` +
+        `folderPath ${JSON.stringify(folderPath)}`,
+    );
+  }
   return {
     uuid: '5c1c2c3d-0000-0000-0000-000000000001',
     folder,
-    folderPath: [folder],
+    folderPath,
     title: 'Hello World',
     emoji: null,
     tags: [],
