@@ -191,9 +191,19 @@ interface Publisher {
 
 | | ファイルパス | frontmatter | 備考 |
 |---|---|---|---|
-| Zenn | `articles/<uuid小文字>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | slug = UUID 小文字化(FR-23)。`type` はフォルダ名。`tech` / `idea` 以外のフォルダ名なら設定不正としてそのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`(Zenn は emoji 必須のため) |
+| Zenn | `articles/<uuid小文字>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | slug = UUID 小文字化(FR-23)。`type` はフォルダ名。`tech` / `idea` 以外のフォルダ名なら設定不正としてそのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`(Zenn は emoji 必須のため)。`topics` の制約(最大5個、半角スペース含みタグは警告除外)は下記「Zenn の連携前提と topics/slug 制約」参照 |
 | Hugo | `<output_dir>/<uuid>.md` | `title` / `date`(作成日時)/ `lastmod`(更新日時)/ `categories: [フォルダ名]` / `tags` | `output_dir` は設定で指定(例 `content/posts`) |
 | Jekyll | `_posts/YYYY-MM-DD-<uuid>.md` | `title` / `date` / `categories` / `tags` | 日付は作成日。初回のファイル名を状態に記録し固定(§4) |
+
+#### Zenn の連携前提と topics/slug 制約(issue #76)
+
+- **GitHub リポジトリ連携のみ・zenn-cli は使わない**: Zenn との連携は `articles/` にファイルを置いて対象リポジトリへ push するだけで完結し(Zenn 側が push を検知して取り込む)、`zenn-cli`(`zenn init`/`zenn preview` 等)のインストール・実行は前提にしない。`src/dependencies.ts`・`src/doctor.ts`・`package.json`・README のいずれにも `zenn-cli` への依存記述は無い(GitRepoPublisher(`src/publishers/git-repo.ts`)が担う `git`/`gh` サブプロセスのみが前提)
+- **`topics` の制約**: Zenn 公式ガイド(https://zenn.dev/zenn/articles/zenn-cli-guide)は `topics` の**個数上限が最大5個**であることを明記する(issue #76 の調査コメントに基づく。当環境から `zenn.dev` へ直接到達できないため、公式ガイドの原文はこのプロジェクトの CodeRabbit issue plan の調査結果を典拠とする)。一方、**タグの文字種についての公式仕様は明記が無い**(同issue plan の Design Choice 1)ため、本実装は文字種を強制検証しない——利用者のタグを予期せず失わせないための判断であり、Qiita と同様に**確実に受け付けないと分かっている半角スペース含みタグのみ**警告つきで除外する。`resolveZennTopics`(`src/publishers/zenn.ts`)は Qiita の `resolveQiitaTags` と同じ処理順(先頭 `#` 除去 → 除去後に空になったタグを警告除外 → 半角スペース含みタグを警告除外 → 6個以上なら先頭5個に切り詰めて警告)で `topics` をサニタイズする。**Qiita と異なりサニタイズ後0個でも失敗にしない**——Zenn は `topics` の省略・空配列を許容するため、空配列 `[]` をそのまま出力する
+- **slug(ファイル名)の制約**: Zenn 公式ガイドの slug 制約は次のとおり(issue #76 のコメントに引用された原文。当環境から `zenn.dev` へ直接到達できないため、この issue コメントの引用を確認済みの一次情報として採用する):
+
+  > 2. slugは半角英小文字(`a-z`)、半角数字(`0-9`)、ハイフン(`-`)、アンダースコア(`_`)の12〜50字の組み合わせにする必要があります。
+
+  現行実装の `ZENN_SLUG_PATTERN = /^[a-z0-9_-]{12,50}$/`(`src/publishers/zenn.ts`)はこの制約と一致する。slug = ノート UUID の小文字化(ハイフン込み36文字)であり、パターンを満たさない場合は防御的に `InvalidZennSlugError` で当該ノートのみ失敗扱いにする(通常の Apple Notes UUID では発生しない)。slug はサイト全体でユニークである必要があるという制約も、UUID 由来のため他ユーザーとの衝突は実質的に起こらず、一度確定した slug はノートの UUID に紐づき不変(状態 JSON が `artifactPath` を記録し、再配信は常に同一 slug への更新)であるため、slug 不変性の制約とも整合する
 
 #### QiitaPublisher
 
