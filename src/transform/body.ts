@@ -20,10 +20,16 @@
  *   `remark-stringify` がインデントを自動で付ける(FR-12)
  * - 描画・添付への参照(`<a href="…"><img … data-apple-notes-zidentifier="UUID"></a>`
  *   または `data-apple-notes-zidentifier` を直接持つ `<a>`。design.md §13-2 で
- *   確認済みなのは前者の描画パターンのみ。後者は本モジュールが FR-14
- *   「添付は画像なら `![]()`、それ以外はリンク」を満たすために踏襲した拡張で、
- *   T-08 実機データでの確認は取れていない)→ `makeAssetPlaceholder` が返す
- *   プレースホルダ URL を使った `![](…)`(画像)または `[…](…)`(リンク)(FR-13/FR-14)
+ *   確認済みなのは前者の描画パターンのみ。後者は実機(Qiita 公開)で確認された、
+ *   img を伴わない添付参照の実際の HTML 形)→ `makeAssetPlaceholder` が返す
+ *   プレースホルダ URL を使った `![](…)`(画像)または `[…](…)`(リンク)(FR-13/FR-14)。
+ *   FR-14「添付は画像なら `![]()`、それ以外はリンク」の判定基準は **HTML の形
+ *   (img を伴うか)ではなく、参照先の添付の種別(拡張子が画像かどうか)**
+ *   である(実機で `<a data-apple-notes-zidentifier>` 直接参照の画像添付が
+ *   リンクとして誤変換される不具合を修正。`options.attachments` を
+ *   `Attachment.identifier` で引き、`isImageExtension`(`assets/uploader.ts`。
+ *   Content-Type 推定テーブルと共有)で拡張子判定する。識別子に対応する
+ *   `Attachment` が無ければ(未知の参照)、従来どおりリンクのままにする)
  * - 1行目(タイトル行。`html.ts` の「行」と同じ規則)は本文から除去する(タイトルは
  *   frontmatter へ。§5.6 Renderer の責務)
  * - ハッシュタグのみで構成される行(`metadata.ts` の `isHashtagOnlyLine`。文中の
@@ -36,8 +42,35 @@
  *   合成 `<p>` で包んで段落境界を保つ
  * - `<br>` で区切られたプレーンテキストの各連(`html.ts` の「行」の `kind: 'inline'`)は、
  *   それぞれ独立した段落として出力する(単一段落内の強制改行にはしない)
+ * - ノート本文中に地の文として書かれた ```` ``` ````(コードフェンス)の行に囲まれた区間を、
+ *   逐語(エスケープ無し)の Markdown コードブロック(`code` ノード)として認識する
+ *   (`recognizeCodeFences`。実機で ```` ```ruby ```` のようなフェンスが `\`\`\`ruby` と
+ *   エスケープされてしまう不具合の修正)。hast→mdast 変換後・`remark-stringify` 直列化前に
+ *   mdast ツリーへ後処理として適用する。**仕様(design.md §5.4 にも記載)**:
+ *   - mdast ルートの**トップレベルの子のみ**を対象にする(リスト・引用の内部は対象外。
+ *     ネストした構造の中まで探索すると「行」の境界が曖昧になるため、意図的に対象外とする)
+ *   - 「フェンス行」は段落(`paragraph`)1つの内容全体(`mdast-util-to-string` でテキスト化し
+ *     `trim` したもの)が `/^```([A-Za-z0-9_+#.-]*)$/`(開始。言語トークン任意)または
+ *     完全一致の ` ``` `(終端)と一致するものだけを指す。**フェンス行が他の行と同じ段落を
+ *     共有している場合は認識しない**(`html.ts`/本モジュールの行分割規則により、
+ *     `<br>` 区切りの各行は既定で独立した段落になるため、通常のノートではこの制約は
+ *     問題にならない)
+ *   - 開始フェンス行の次から、直後に見つかった終端フェンス行の手前までの各トップレベル
+ *     ノードのプレーンテキストを(`\n` で連結して)コードブロックの内容にする
+ *   - 開始フェンス行に対応する終端フェンス行が最後まで見つからない場合は、**何もしない**
+ *     (それ以前の通常のテキスト化・エスケープのまま。閉じフェンスの位置を推測しない)
+ *   - コードブロックの内容は完全に逐語(`remark-stringify` がバッククォートのエスケープを
+ *     一切行わない `code` ノードとして直列化するため。内容が ` ``` ` を含む場合は
+ *     `remark-stringify`(`mdast-util-to-markdown`)が自動的に外側のフェンスを
+ *     4連続以上のバッククォートに伸長する——本モジュールが意識する必要はない)
+ *   - フェンス区間内にアセット参照(添付・描画の `![]()`/`[]()`)が入っていた場合、
+ *     その mdast ノードもプレーンテキスト化(=リンクテキスト/alt のみ)されるため、
+ *     アセット自体への参照は失われる(**コードフェンス内の添付参照は非対応**。
+ *     `note2web-asset://` プレースホルダが本文に残らないため、AssetUploader
+ *     (T-13)の「未解決プレースホルダが残っていないこと」検証にも抵触しない)
  */
 
+import { extname } from 'node:path';
 import { unified } from 'unified';
 import rehypeRemark from 'rehype-remark';
 import remarkGfm from 'remark-gfm';
@@ -47,7 +80,16 @@ import type { Handle } from 'hast-util-to-mdast';
 import { toText } from 'hast-util-to-text';
 import rehypeParse from 'rehype-parse';
 import type { Element, ElementContent, Root, RootContent } from 'hast';
-import type { Image, Link } from 'mdast';
+import type {
+  Code as MdastCode,
+  Image,
+  Link,
+  Root as MdastRoot,
+  RootContent as MdastRootContent,
+} from 'mdast';
+import { toString as mdastToString } from 'mdast-util-to-string';
+import { isImageExtension } from '../assets/uploader.js';
+import type { Attachment } from '../model/note.js';
 import {
   groupContainerChildrenIntoLines,
   hasClassName,
@@ -104,6 +146,15 @@ export interface BodyTransformerLogger {
 export interface TransformBodyOptions {
   /** parser が出力した当該ノートの個別 HTML(design.md §5.2。`Note#bodyHtml` と同じもの)。 */
   bodyHtml: string;
+  /**
+   * 当該ノートの添付・描画一覧(`Note#attachments`。design.md §5.3)。
+   *
+   * `data-apple-notes-zidentifier` を直接持つ `<a>`(img を伴わない添付参照)が画像か
+   * どうか(FR-14「添付は画像なら `![]()`、それ以外はリンク」)を判定するために使う。
+   * 未指定(省略)の場合は常に「対応する添付が見つからない」として扱い、従来どおり
+   * リンクにする(呼び出し側が `attachments` を持たない場合の後方互換)。
+   */
+  attachments?: readonly Attachment[];
   /** 未対応要素のテキスト化を警告する先(任意注入)。未指定なら警告を出さない。 */
   logger?: BodyTransformerLogger;
   /** 警告ログでどのノートかを識別するための UUID(FR-09。`WarnPayload#noteUuid`)。 */
@@ -402,6 +453,27 @@ function checklistAwareLiHandler(): Handle {
   };
 }
 
+// ---------------------------------------------------------------------------
+// FR-14 の画像判定に使う `identifier → Attachment` 対応表(呼び出しごとに変わる)。
+// ---------------------------------------------------------------------------
+
+/**
+ * 現在処理中のノートの `identifier → Attachment` 対応表(モジュールスコープの可変状態)。
+ *
+ * `markdownProcessor`(直下で1回だけ構築し `.freeze()` する。ハンドラ自体はステートレスに
+ * 保つ設計)と、ノートごとに異なる `attachments`(`assetAwareAHandler` が FR-14 の画像判定に
+ * 要る)とを両立させるための橋渡し。`transformBody` は非同期処理を含まない同期関数であり
+ * (`markdownProcessor.runSync` 呼び出し中に他の JS コードが割り込むことは無い)、呼び出し
+ * 直前にセットし、直後(例外発生時含め)に空へ戻すことで、複数ノートを跨いだ状態の混入を
+ * 防ぐ(`transformBody` 本体の `try…finally` 参照)。
+ *
+ * 対応表の照合はキー(`identifier`)の完全一致(大文字小文字を区別する)。これは
+ * `AssetUploader`(`assets/uploader.ts` の `processNoteBody` が `Attachment.identifier` から
+ * 組み立てる `Map` )が行う照合と同じ規約であり、本モジュールもそれに合わせる
+ * (プレースホルダの `identifier` は両モジュールで同一の文字列がそのまま流れるため)。
+ */
+let currentAttachmentByIdentifier: ReadonlyMap<string, Attachment> = new Map();
+
 /**
  * `data-apple-notes-zidentifier` を持つ `<img>` をアセットプレースホルダ画像
  * (`![](note2web-asset://<identifier>)`)に変換する(FR-13 描画、FR-14 画像添付)。
@@ -429,10 +501,16 @@ function assetAwareImgHandler(): Handle {
  * 描画参照の形。前後の空白テキストは無視する)を、リンクで包まずアセットプレースホルダ
  * 画像そのものに展開する(`![](…)`。design.md §5.4「画像参照」)。
  *
- * `data-apple-notes-zidentifier` を `<a>` 自身が直接持つ場合(画像を伴わない添付への
- * 参照。parser の実出力での確認は取れていない拡張。モジュール先頭の JSDoc 参照)は、
- * アセットプレースホルダへのリンク(`[<リンクテキスト>](…)`)にする(FR-14「それ以外は
- * リンク」)。
+ * `data-apple-notes-zidentifier` を `<a>` 自身が直接持つ場合(img を伴わない添付参照。
+ * 実機(Qiita 公開)で確認された実際の HTML 形)は、`currentAttachmentByIdentifier` で
+ * 参照先の `Attachment` を引き、その拡張子(`attachment.path`)が画像かどうか
+ * (`isImageExtension`)で分岐する(FR-14「添付は画像なら `![]()`、それ以外はリンク」。
+ * **HTML の形(img を伴うか)ではなく添付の種別で決める**):
+ *   - 画像 → アセットプレースホルダ画像(`![](…)`)。alt はリンクテキスト(前後空白は
+ *     トリム。無ければ空文字。`assetAwareImgHandler` の `readAlt` の既定値と同じ)
+ *   - 画像以外、または `identifier` に対応する `Attachment` が見つからない(未知の参照。
+ *     `attachments` 未指定時を含む)→ 従来どおりアセットプレースホルダへのリンク
+ *     (`[<リンクテキスト>](…)`。リンクテキストが空なら識別子自体をラベルにする)
  *
  * どちらでもない通常の `<a>` は既定の挙動のまま。
  */
@@ -457,6 +535,16 @@ function assetAwareAHandler(): Handle {
     const directIdentifier = readZIdentifier(element);
     if (directIdentifier !== undefined) {
       const linkText = toText(element, { whitespace: 'normal' }).trim();
+      const attachment = currentAttachmentByIdentifier.get(directIdentifier);
+      if (attachment !== undefined && isImageExtension(extname(attachment.path))) {
+        const image: Image = {
+          type: 'image',
+          url: makeAssetPlaceholder(directIdentifier),
+          title: null,
+          alt: linkText,
+        };
+        return image;
+      }
       // リンクテキストが空(アイコンのみ等でテキストを持たない添付)だと `[](…)` になり、
       // 参照が目視できなくなる。その場合は識別子自体をラベルとして使い、
       // どのアセットへの参照かが Markdown 上でも読み取れるようにする。
@@ -472,6 +560,107 @@ function assetAwareAHandler(): Handle {
 
     return defaultA(state, element, parent);
   };
+}
+
+// ---------------------------------------------------------------------------
+// コードフェンス認識(design.md §5.4、モジュール先頭 JSDoc「地の文として書かれた ```
+// (コードフェンス)」を参照。hast→mdast 変換後・`remark-stringify` 直列化前の後処理)。
+// ---------------------------------------------------------------------------
+
+/** フェンス行(開始・言語トークン任意)のパターン。モジュール先頭 JSDoc の仕様を参照。 */
+const FENCE_LINE_PATTERN = /^```([A-Za-z0-9_+#.-]*)$/;
+
+/**
+ * mdast ノードのプレーンテキストを、`break`(`<br>` 由来)を `\n` として保持したまま
+ * 取り出す。`mdast-util-to-string` は `break` を(`value` も `children` も持たないため)
+ * 空文字列にしてしまう(`node_modules/mdast-util-to-string/lib/index.js` で確認済み)ため、
+ * フェンス内コンテンツが複数行の段落(`<br>` を含む)を含む場合に備えて本関数で代替する。
+ * `mdast-util-to-string` 自身と同じダックタイピングで、`value` を持つノード(`text`/`code`/
+ * `html` 等)はその値を、`children` を持つノードは子を連結した結果を返す。
+ */
+function textPreservingBreaks(node: unknown): string {
+  if (typeof node !== 'object' || node === null || !('type' in node)) {
+    return '';
+  }
+  const typed = node as { type: unknown; value?: unknown; children?: unknown };
+  if (typed.type === 'break') {
+    return '\n';
+  }
+  if (typeof typed.value === 'string') {
+    return typed.value;
+  }
+  if (Array.isArray(typed.children)) {
+    return typed.children.map((child) => textPreservingBreaks(child)).join('');
+  }
+  return '';
+}
+
+/**
+ * `node` が「開始フェンス行」(段落1つの内容全体が `FENCE_LINE_PATTERN` に一致)かどうかを
+ * 判定し、言語トークン(無ければ `''`)を返す。フェンス行でなければ `undefined`。
+ */
+function matchOpeningFenceLanguage(node: MdastRootContent): string | undefined {
+  if (node.type !== 'paragraph') {
+    return undefined;
+  }
+  const text = mdastToString(node).trim();
+  const match = FENCE_LINE_PATTERN.exec(text);
+  return match === null ? undefined : match[1];
+}
+
+/** `node` が「終端フェンス行」(段落1つの内容全体が言語トークン無しの ``` と完全一致)かどうか。 */
+function isClosingFenceLine(node: MdastRootContent): boolean {
+  return node.type === 'paragraph' && mdastToString(node).trim() === '```';
+}
+
+/**
+ * mdast ルートのトップレベルの子を走査し、開始フェンス行〜終端フェンス行の区間を
+ * 1つの `code` ノード(逐語。エスケープ無し)へ差し替える(design.md §5.4、モジュール
+ * 先頭 JSDoc の仕様を参照。破壊的に `root.children` を書き換える)。
+ *
+ * - 対象はトップレベルの子のみ(リスト・引用の内部までは探索しない)。
+ * - 開始フェンス行が見つかったら、その直後から探索し**最初に見つかった**終端フェンス行と
+ *   対応させる。区間内の各ノードのプレーンテキスト(`textPreservingBreaks`)を `\n` で
+ *   連結して `code` ノードの `value` にする(区間が空 = 開始の直後が終端 の場合は `''`)。
+ * - 終端フェンス行が最後まで見つからない場合は、その開始フェンス行を含め何も変更しない
+ *   (閉じ位置を推測しない。以降の走査は開始フェンス行の次のノードから続ける)。
+ */
+function recognizeCodeFences(root: MdastRoot): void {
+  const children = root.children;
+  const result: MdastRootContent[] = [];
+  let index = 0;
+  while (index < children.length) {
+    const node = children[index];
+    const lang = matchOpeningFenceLanguage(node);
+    if (lang === undefined) {
+      result.push(node);
+      index += 1;
+      continue;
+    }
+
+    let closingIndex = -1;
+    for (let cursor = index + 1; cursor < children.length; cursor += 1) {
+      if (isClosingFenceLine(children[cursor])) {
+        closingIndex = cursor;
+        break;
+      }
+    }
+
+    if (closingIndex === -1) {
+      result.push(node);
+      index += 1;
+      continue;
+    }
+
+    const value = children
+      .slice(index + 1, closingIndex)
+      .map((contentNode) => textPreservingBreaks(contentNode))
+      .join('\n');
+    const code: MdastCode = { type: 'code', lang: lang === '' ? null : lang, value };
+    result.push(code);
+    index = closingIndex + 1;
+  }
+  root.children = result;
 }
 
 // ---------------------------------------------------------------------------
@@ -520,15 +709,20 @@ const markdownProcessor = unified()
  *    なったもの(`kind: 'block'`)はその要素をそのまま、`<br>` 区切りのインライン蓄積
  *    (`kind: 'inline'`)は合成 `<p>` として、それぞれ独立した Markdown 段落 / ブロックに
  *    なるように木を組み直す。
- * 4. `rehype-remark`(チェックリスト・アセットプレースホルダのカスタムハンドラ付き)→
- *    `remark-gfm` → `remark-stringify` で Markdown 文字列に直列化する。
+ * 4. `rehype-remark`(チェックリスト・アセットプレースホルダのカスタムハンドラ付き)で
+ *    mdast に変換する。この間、`attachments` を `assetAwareAHandler` から参照できるよう
+ *    `currentAttachmentByIdentifier` に一時的にセットする(FR-14 の画像判定。手順末尾で
+ *    必ず戻す)。
+ * 5. 変換後の mdast に `recognizeCodeFences` を適用し、地の文として書かれたコードフェンス
+ *    (```` ``` ````)の区間を逐語の `code` ノードへ差し替える(モジュール先頭 JSDoc 参照)。
+ * 6. `remark-gfm` + `remark-stringify` で Markdown 文字列に直列化する。
  *
  * 空の `bodyHtml`、または本文コンテナにタイトル行以外の内容が無い場合は
  * `{ markdown: '' }` を返す(エラーにしない。タイトル・メタデータの抽出可否は
  * `metadata.ts` の責務)。
  */
 export function transformBody(options: TransformBodyOptions): TransformBodyResult {
-  const { bodyHtml, logger, noteUuid, title } = options;
+  const { bodyHtml, attachments = [], logger, noteUuid, title } = options;
 
   const tree = parseProcessor.parse(bodyHtml) as Root;
   const containerChildren = resolveContainerChildren(tree);
@@ -580,7 +774,21 @@ export function transformBody(options: TransformBodyOptions): TransformBodyResul
 
   const scopedRoot: Root = { type: 'root', children: blocks };
 
-  const mdast = markdownProcessor.runSync(scopedRoot);
+  // FR-14 の画像判定(`assetAwareAHandler`)向けに、この呼び出し分の対応表を一時的に
+  // セットする(`currentAttachmentByIdentifier` の JSDoc 参照)。`AssetUploader`
+  // (`assets/uploader.ts` の `processNoteBody`)と同じ、`identifier` の完全一致で照合する。
+  currentAttachmentByIdentifier = new Map(
+    attachments.map((attachment) => [attachment.identifier, attachment] as const),
+  );
+  let mdast: MdastRoot;
+  try {
+    mdast = markdownProcessor.runSync(scopedRoot) as MdastRoot;
+  } finally {
+    currentAttachmentByIdentifier = new Map();
+  }
+
+  recognizeCodeFences(mdast);
+
   const raw = String(markdownProcessor.stringify(mdast));
   const trimmed = raw.trim();
   const markdown = trimmed === '' ? '' : `${trimmed}\n`;
