@@ -236,6 +236,12 @@ function resolveZennEmoji(emoji: string | null): string {
   if (segments.length !== 1) {
     return ZENN_DEFAULT_EMOJI;
   }
+  // セグメント数が1でも 'a' のような非絵文字はあり得るため、`splitTitleAndEmoji`
+  // (`src/transform/metadata.ts`)と同じ `\p{Extended_Pictographic}` 判定で
+  // 「絵文字であること」も確認する(issue #76 CodeRabbit レビュー)。
+  if (!/\p{Extended_Pictographic}/u.test(emoji)) {
+    return ZENN_DEFAULT_EMOJI;
+  }
   return emoji;
 }
 

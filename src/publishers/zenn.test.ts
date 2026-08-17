@@ -156,6 +156,14 @@ describe('renderZennArticle emoji', () => {
     expect(article.artifact).toContain('emoji: "📝"');
   });
 
+  it('falls back to 📝 when note.emoji is a single non-emoji character like "a" (defensive)', () => {
+    // セグメント数は1だが絵文字ではない: \p{Extended_Pictographic} 判定で弾かれる
+    // (issue #76 CodeRabbit レビュー)。
+    const note = buildNote({ emoji: 'a' });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('emoji: "📝"');
+  });
+
   it('keeps a ZWJ-joined emoji sequence unchanged (single grapheme cluster despite multiple code points)', () => {
     const note = buildNote({ emoji: '👨‍👩‍👧‍👦' });
     const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
