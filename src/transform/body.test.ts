@@ -370,11 +370,10 @@ describe('transformBody', () => {
       );
       const { markdown } = transformBody({ bodyHtml });
 
-      // リスト内のフェンス行はコードブロックにならず、リスト項目のまま
-      // (バッククォートはエスケープされる)。
-      expect(markdown).not.toContain('```ruby\nputs 1\n```');
-      expect(markdown).toContain('- ');
-      expect(markdown).toContain('puts 1');
+      // リスト内のフェンス行はコードブロックにならず、各行がリスト項目のまま保持され、
+      // バッククォートはエスケープされる(シリアライザ出力の完全一致で検証し、
+      // フェンス行の削除・インラインコード化といった回帰も検出する)。
+      expect(markdown).toBe('- \\`\\`\\`ruby\n- puts 1\n- \\`\\`\\`\n');
     });
 
     it('leaves an unclosed fence untouched (escaped literal text, as before this fix)', () => {
