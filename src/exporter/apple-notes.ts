@@ -167,7 +167,14 @@ const embeddedObjectJsonSchema = z
 
 const noteJsonSchema = z
   .object({
-    uuid: z.string(),
+    // RFC 4122 形式(ハイフン区切りの16進数)であることを検証する(issue #73 CodeRabbit
+    // review Fix 3)。この値は後段で `html/<uuid>.html`(`resolveNoteHtml`)のパス組み立てに
+    // そのまま使われるため、`..` やパス区切り文字を含む異常な値をここで弾いておくことで、
+    // パストラバーサルにつながる可能性を構造的に排除する(Ruby 側の
+    // `Note2webExportCore.note_html_filename` の同種チェックと対になる、TS 側の
+    // defense-in-depth)。全 fixture(`test/fixtures/parser-output/`)の UUID がこの形式に
+    // 一致することを確認済み(`eeeeeeee-…`/`ffffffff-…` 含む)。
+    uuid: z.uuid(),
     // 数値、または整数として解釈できる文字列のみ受け付ける。"invalid" 等が
     // NaN に化けてフォルダフィルタで黙って除外される事故を防ぎ、スキーマ検証の
     // 段階で ExportError(parser JSON 不正)として顕在化させる。

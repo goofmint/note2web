@@ -42,7 +42,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
   bundle install
   ```
 
-  既定のインストール先は `~/tools/apple_cloud_notes_parser` です(設定 YAML の `exporter.parser_path` で変更可能)。**note2web は upstream の `notes_cloud_ripper.rb` を直接実行しません**——代わりに note2web に同梱される `ruby/note2web_export.rb` を実行し、そこから upstream の `lib/`(=上記 clone の `lib/` ディレクトリ)だけを読み込みます(issue #72)。これにより、設定 `source.folders` で指定した**フォルダのみが処理対象になり**、Apple Notes 内の他のフォルダ(「最近削除した項目」を含む)は一切読み込まれません。
+  既定のインストール先は `~/tools/apple_cloud_notes_parser` です(設定 YAML の `exporter.parser_path` で変更可能)。**note2web は upstream の `notes_cloud_ripper.rb` を直接実行しません**——代わりに note2web に同梱される `ruby/note2web_export.rb` を実行し、そこから upstream の `lib/`(=上記 clone の `lib/` ディレクトリ)だけを読み込みます(issue #72)。これにより、設定 `source.folders` で指定した**フォルダのみが JSON 生成・最終出力の対象として採用され**ます。upstream 内部では対象外のフォルダ・ノートも読み取り/一時的な処理の対象になることがありますが(upstream にはフォルダ単位の読み取りフィルタが無いため)、対象外のノートが原因で実行全体が失敗したり、出力に混入したりすることはもうありません(issue #72)。
 
 - **macOS のフルディスクアクセス権限**: Apple Notes のデータ(`~/Library/Group Containers/group.com.apple.notes`)を読み取るため、`note2web` を実行するプロセスに「フルディスクアクセス」を許可する必要があります。**対話シェルから実行する場合はターミナルアプリ(Terminal.app / iTerm2 等)**に、**launchd / cron から無人実行する場合は `node` 実行ファイル自身**に許可してください(詳細・理由は [cron / launchd での定期実行](#cron--launchd-での定期実行)節を参照)。
   1. 「システム設定」→「プライバシーとセキュリティ」→「フルディスクアクセス」を開く
@@ -114,7 +114,7 @@ node dist/cli.js doctor --config ~/.config/note2web/zenn.yaml
 service: zenn                  # zenn | hugo | jekyll | qiita | devto | note | hatena
 timezone: Asia/Tokyo           # frontmatter の日時に使う固定オフセット(既定 Asia/Tokyo。冪等性のため実行環境の TZ には依存しない)
 source:
-  folders: [tech, idea]        # 配信対象とする Apple Notes のフォルダ名(このフォルダ以外は一切処理しない)
+  folders: [tech, idea]        # 配信対象とする Apple Notes のフォルダ名(このフォルダ以外は生成・出力の対象にしない)
 exporter:
   parser_path: ~/tools/apple_cloud_notes_parser        # apple_cloud_notes_parser の clone 先(省略可、既定値どおりなら省略可)
   notes_container: ~/Library/Group Containers/group.com.apple.notes  # Apple Notes のコンテナ(省略可、既定値どおりなら省略可)
@@ -371,7 +371,7 @@ env ファイルの読み込みは CLI 自身が自動で行う(前述の [env �
 以前(issue #72 以前)は、Apple Notes ストア全体(設定 `source.folders` で指定していないフォルダ、および「最近削除した項目」= ゴミ箱を含む)のうちどこか1件でもタイトルが極端に長い/壊れたノート(例: 数千文字の URL がそのままタイトルになっているノート)があると、個別 HTML ファイルの書き込み時にファイル名がタイトル由来になるため `Errno::ENAMETOOLONG` でエクスポート全体が失敗していました。issue #72 以降、note2web 独自のエクスポートスクリプト(`ruby/note2web_export.rb`)は次の2点でこの問題を構造的に解消しています:
 
 - 個別 HTML のファイル名は常に `<uuid>.html`(UUID のみ)で組み立てられ、タイトルは一切ファイル名に使われません
-- 設定 `source.folders` で指定したフォルダ(とその配下)のみを生成・書き込みの対象にします。**「最近削除した項目」(ゴミ箱)は、設定でその名前を対象フォルダに指定していても常に除外されます**——ゴミ箱内にどのようなノートが残っていても、`sync` の実行結果には一切影響しません
+- 設定 `source.folders` で指定したフォルダ(とその配下)のみを JSON 生成・書き込みの対象として採用します。**「最近削除した項目」(ゴミ箱)は、設定でその名前を対象フォルダに指定していても、ゴミ箱フォルダ自身とその配下のサブフォルダごと常に除外されます**——upstream 内部でゴミ箱内のノートが一時的に読み取られることはあっても、それが原因で `sync` の実行が失敗したり、その内容が出力(HTML/JSON)に混ざったりすることはありません
 
 対象フォルダ内で個々のノートのデコード/生成に失敗した場合も、そのノート単体をスキップして処理を継続します(実行全体は中断しません)。
 

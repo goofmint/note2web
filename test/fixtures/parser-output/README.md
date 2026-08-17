@@ -91,8 +91,15 @@ issue #72 で note2web は自前の `ruby/note2web_export.rb` を実行するよ
 節)がそのまま根拠になる。添付・描画の実体(`files/`)のコピーは upstream の
 `AppleNotesEmbeddedThumbnail`/`AppleNotesEmbeddedDrawing` 等が**オブジェクト生成時点
 (=ノートのデコード時点)**で行う(`lib/AppleBackup.rb` `back_up_file`)ため、
-note2web 独自スクリプトの対象フォルダ絞り込みとは無関係にコピーされる
-(`ruby/note2web_export.rb` 冒頭コメント「既知の残存効果」参照)。
+本来は note2web 独自スクリプトの対象フォルダ絞り込みとは無関係に発生する。issue #73
+(CodeRabbit review Fix 6)以降は、`ruby/note2web_export.rb` が
+`Note2webExportCore.folder_in_scope?` を使う `Module#prepend` ガード
+(`AppleNotesEmbeddedObject#note=` でノートのフォルダ id を退避し、
+`AppleBackup#back_up_file` の実コピー直前でスコープ外なら早期 return する)を
+`note_store.rip_notes` の呼び出し前にインストールしており、対象外ノート・ゴミ箱
+サブツリー内ノートの添付コピーはこのガードで抑止される(フォルダ id が特定できない
+場合のみフェイルオープンでコピーを許可する。詳細は `ruby/note2web_export.rb` 冒頭コメント
+「既知の残存効果とその抑止」参照)。
 
 - `lib/AppleNote.rb` `title_as_filename`: `"#{unique_id(use_uuid)} - #{file_title}#{ext}"`
   (`file_title` は `title.tr('[\\/*"<>?|:]\'', '_')` でサニタイズ)——**note2web 独自

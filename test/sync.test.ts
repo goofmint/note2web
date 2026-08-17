@@ -606,7 +606,24 @@ describe('runSync', () => {
     // を1件ずつ持ち、Exporter はフォルダの絞り込みに関わらず両方に対して必ず
     // `logger.warn` を発行する(design.md §5.2「対象内ノートの1件の失敗で全体を中断しない」)。
     // これはこのシナリオ(zero-diff)の検証対象ではないため、その2件を除いた「その他の
-    // 予期しない warning が無い」ことだけを検証する。
+    // 予期しない warning が無い」ことだけを検証する。ただし CodeRabbit review(issue #73)
+    // の指摘どおり、除外する前に両方の UUID の warning が実際に存在することを明示的に
+    // 確認しておく(そうしないと、以下の `unexpectedWarnings` が空になる理由が
+    // 「両方とも期待どおり発行されたから」なのか「Exporter がそもそも何も warn していない
+    // だけ」なのかを区別できない)。
+    expect(
+      events.some(
+        (event) =>
+          event.startsWith('warn:') && event.includes('ffffffff-6666-4fff-8fff-ffffffffffff'),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.startsWith('warn:') && event.includes('12121212-7777-4121-8121-121212121212'),
+      ),
+    ).toBe(true);
+
     const unexpectedWarnings = events.filter(
       (event) =>
         event.startsWith('warn:') &&

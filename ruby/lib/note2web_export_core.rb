@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'pathname'
 require 'set'
 
 ##
@@ -42,26 +43,43 @@ module Note2webExportCore
   # (名前一致 → BFS で子孫へ展開)。
   def resolve_target_folder_ids(folders, target_names)
     target_set = target_names.to_set
+    root_ids = folders.select { |folder| target_set.include?(folder[:name]) }.map { |folder| folder[:id] }
 
+    expand_subtree_ids(folders, root_ids)
+  end
+
+  # `folders`(`resolve_target_folder_ids` と同じ Hash の Array)から、`parent_id => [子の id]`
+  # の隣接リストを組み立てる(BFS でサブツリーを展開する各関数の共通ヘルパー)。
+  def build_children_by_parent(folders)
     children_by_parent = Hash.new { |hash, key| hash[key] = [] }
     folders.each do |folder|
       parent_id = folder[:parent_id]
       children_by_parent[parent_id] << folder[:id] unless parent_id.nil?
     end
+    children_by_parent
+  end
+  private_class_method :build_children_by_parent
 
-    included = Set.new
-    queue = folders.select { |folder| target_set.include?(folder[:name]) }.map { |folder| folder[:id] }
+  # `root_ids`(Array/Set の Integer)それぞれについて、自身と配下(サブツリー)全体の `id`
+  # を BFS で展開して Set で返す(`resolve_target_folder_ids` / `expand_trash_descendant_ids`
+  # の共通ロジック)。
+  def expand_subtree_ids(folders, root_ids)
+    children_by_parent = build_children_by_parent(folders)
+
+    expanded = Set.new
+    queue = root_ids.to_a
 
     until queue.empty?
       id = queue.shift
-      next if included.include?(id)
+      next if expanded.include?(id)
 
-      included << id
+      expanded << id
       children_by_parent[id].each { |child_id| queue << child_id }
     end
 
-    included
+    expanded
   end
+  private_class_method :expand_subtree_ids
 
   # `resolve_target_folder_ids` が返す集合のうち、「一致したサブツリーの根」だけを返す
   # (名前が一致したフォルダ自身の祖先に、同じく名前が一致したフォルダが無いもの)。
@@ -102,6 +120,20 @@ module Note2webExportCore
     false
   end
 
+  # `trash_root_ids`(`trash_folder?` で判定済みのゴミ箱フォルダ自身の `id` の集合)に加え、
+  # その配下(サブツリー)全体の `id` を Set で返す(issue #73 CodeRabbit review Fix 4)。
+  #
+  # 以前は「ゴミ箱フォルダ自身」だけを除外集合に入れており、ゴミ箱の中にさらに
+  # 子フォルダがあった場合、その子フォルダに属するノートが除外対象から漏れていた
+  # (ゴミ箱フォルダの id 自体は `folder_key` として使われないので実害は無いが、
+  # ゴミ箱の子フォルダの id は通常のフォルダと同じ扱いで `in_scope_folder_ids` に
+  # 残ってしまい、`source.folders` にたまたま同名のフォルダが指定されていた場合などに
+  # ゴミ箱内のノートが出力に混ざり得た)。`resolve_target_folder_ids` と同じ BFS
+  # (`expand_subtree_ids`)で、ゴミ箱フォルダとその子孫をまとめて1つの除外集合にする。
+  def expand_trash_descendant_ids(folders, trash_root_ids)
+    expand_subtree_ids(folders, trash_root_ids)
+  end
+
   # ---------------------------------------------------------------------
   # 暗号化(パスワード保護)ノート判定。
   # ---------------------------------------------------------------------
@@ -114,6 +146,23 @@ module Note2webExportCore
   end
 
   # ---------------------------------------------------------------------
+  # 添付コピー抑止ガードのスコープ判定(design.md §5.2、issue #73 CodeRabbit review Fix 6)。
+  # ---------------------------------------------------------------------
+
+  # `folder_id` が `in_scope_folder_ids`(`resolve_target_folder_ids` の結果から
+  # `expand_trash_descendant_ids` 分をさらに除いたもの)に含まれるかどうかだけを判定する
+  # 純粋関数。`folder_id` が `nil`(フォルダを特定できない)場合は `false` を返す——
+  # ただし「判定不能ならコピーを許可する」というフェイルオープンの判断自体は、この関数の
+  # 責務ではなく呼び出し側(`ruby/note2web_export.rb` の Module#prepend ガード)が行う
+  # (`folder_id` が `nil` = 判定不能、`false` = 判定できた上で対象外、を呼び出し側が
+  # 区別できるようにするため、ここでは素直に `false` を返すだけにとどめる)。
+  def folder_in_scope?(folder_id, in_scope_folder_ids)
+    return false if folder_id.nil?
+
+    in_scope_folder_ids.include?(folder_id)
+  end
+
+  # ---------------------------------------------------------------------
   # UUID ベースのファイル名構築(design.md §5.2「ファイル/出力操作は一切タイトル由来の
   # 名前を使わない」issue #72 の根本修正)。
   # ---------------------------------------------------------------------
@@ -121,9 +170,26 @@ module Note2webExportCore
   # ノート個別 HTML のファイル名を UUID のみから組み立てる。タイトルは一切関与しない
   # (upstream の `AppleNote#title_as_filename` が原因の `Errno::ENAMETOOLONG` を
   # 構造的に排除する。issue #72 根本原因)。
+  #
+  # パストラバーサル対策(issue #73 CodeRabbit review Fix 3): `uuid` は本来
+  # `AppleNote#uuid`(ZICCLOUDSYNCINGOBJECT.ZIDENTIFIER)由来の RFC 4122 形式
+  # (ハイフン区切りの16進数)のみのはずだが、upstream 側の異常データや将来の実装変更で
+  # パス区切り文字や `..` を含む値が渡された場合に、`<出力先>/html/<uuid>.html` の
+  # 組み立て先が出力ディレクトリの外へ逸脱する(パストラバーサル)ことを構造的に防ぐ。
+  # ここで拒否すれば、呼び出し側(`ruby/note2web_export.rb`)は当該ノートを
+  # `skipped_errors` へ回して処理を継続できる(design.md §5.2 のノート単位 rescue と同じ経路)。
   def note_html_filename(uuid)
     normalized = uuid.to_s.strip
     raise ArgumentError, 'note_html_filename: uuid must not be blank' if normalized.empty?
+
+    if normalized.include?('..') || normalized.include?('/') || normalized.include?('\\')
+      raise ArgumentError,
+            "note_html_filename: uuid must not contain '..' or a path separator: #{normalized.inspect}"
+    end
+
+    if Pathname.new(normalized).absolute?
+      raise ArgumentError, "note_html_filename: uuid must not be an absolute path: #{normalized.inspect}"
+    end
 
     "#{normalized}.html"
   end

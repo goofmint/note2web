@@ -621,6 +621,30 @@ describe('exportAppleNotes', () => {
     ).rejects.toBeInstanceOf(ExportError);
   });
 
+  it('rejects a note uuid containing "../" as ExportError instead of joining it into the html/ path (issue #73, path traversal defense-in-depth)', async () => {
+    const { readFile: read, writeFile } = await import('node:fs/promises');
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const data = JSON.parse(await read(jsonPath, 'utf8')) as {
+        notes: Record<string, { uuid: unknown }>;
+      };
+      const firstNote = Object.values(data.notes)[0];
+      if (firstNote === undefined) {
+        throw new Error('test setup: fixture has no notes');
+      }
+      firstNote.uuid = '../../../../etc/passwd';
+      await writeFile(jsonPath, JSON.stringify(data));
+    });
+
+    await expect(
+      exportAppleNotes({
+        config: buildConfig({ source: { folders: ['Tech'] } }),
+        runner,
+        tmpDirFactory: async () => workDir,
+      }),
+    ).rejects.toBeInstanceOf(ExportError);
+  });
+
   it('does not call process.exit and does not mutate the fixture source directory', async () => {
     // このテストは「fixture を書き換えない」という制約の回帰チェック。実行前後で
     // fixture の json ファイルが変わっていないことを確認する。

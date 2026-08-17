@@ -51,15 +51,19 @@
 #      対象内ノートのデコード/生成失敗はここでさらに `begin/rescue` し、
 #      `skipped_errors` に記録して処理を継続する(hard guarantee (3))。
 #
-# 既知の残存効果(zero output 保証の限定的な例外): 埋め込みオブジェクト
+# 既知の残存効果とその抑止(issue #73 CodeRabbit review Fix 6 で解消): 埋め込みオブジェクト
 # (`AppleNotesEmbeddedDrawing`/`AppleNotesEmbeddedThumbnail` 等)は upstream の
-# デコード(`rip_notes`)の**オブジェクト生成時点**で `files/` へコピーされる
-# (`lib/AppleNotesEmbeddedThumbnail.rb` の `initialize` → `back_up_file`)。これは
-# ノートの対象内/対象外を問わず発生し、note2web 側では抑止できない(upstream の
-# クラス設計に組み込まれているため)。ただしこのコピーは UUID 由来のパスのみを使い
-# (タイトル不使用)、クラッシュを起こさず、対象外ノートの `files/` エントリは
-# note2web 側の JSON にも登場しないため参照されない(=公開されない。単に一時
-# エクスポートディレクトリ内に無害な余剰ファイルが残るだけ)。
+# デコード(`rip_notes`)の**オブジェクト生成時点**で、最終的に `AppleBackup#back_up_file`
+# 経由で `files/` へコピーされる。以前(issue #72 時点)はこれをノートの対象内/対象外を
+# 問わず発生する「実害の無い残存効果」として許容していた(コピー自体はクラッシュを起こさず、
+# 対象外ノートの `files/` エントリは note2web 側の JSON にも登場しないため参照されない
+# =公開されない。単に一時エクスポートディレクトリ内に無害な余剰ファイルが残るだけだった)。
+#
+# issue #73 では、`Note2webAttachmentScopeGuard`(下記。`Module#prepend` による
+# `AppleNotesEmbeddedObject#note=` / `AppleBackup#back_up_file` への差し込み)でこの残存
+# コピーを構造的に抑止するようにした——ノートのフォルダが対象外(またはゴミ箱の
+# サブツリー)だと判定できた場合のみ実ファイルコピーをスキップし、判定不能な場合は
+# 常にコピーを許可する(フェイルオープン)。詳細は下記ガード定義のコメントを参照。
 #
 # == 起動方法
 #
@@ -87,7 +91,8 @@
 #   <out_dir>/
 #     html/<uuid>.html      # ノートごとの個別 HTML。フォルダ階層は作らない(フラット)
 #     json/all_notes_1.json # { folders, notes, skipped_encrypted, skipped_errors, ... }
-#     files/...             # 添付・描画の実体(upstream がそのまま書き出す。UUID 由来パス)
+#     files/...             # 添付・描画の実体(upstream がそのまま書き出す。UUID 由来パス。
+#                           # 対象外ノート分は下記の添付コピー抑止ガードで書き出しを抑止する)
 
 require 'fileutils'
 require 'json'
@@ -196,6 +201,82 @@ require (parser_lib_dir + 'AppleNote.rb').to_s
 require (parser_lib_dir + 'AppleNoteStore.rb').to_s
 
 # ---------------------------------------------------------------------------
+# 添付・描画コピー抑止ガード(design.md §5.2「既知の残存効果」、issue #73 CodeRabbit
+# review Fix 6)。
+#
+# upstream は埋め込みオブジェクト(lib/AppleNotesEmbedded*.rb。Thumbnail/Drawing/
+# PublicObject/PublicJpeg/… の10クラス以上)の**オブジェクト生成時点**
+# (=ノートのデコード時点、後述の `note_store.rip_notes` 実行中)で、いずれも最終的に
+# `AppleBackup#back_up_file`(lib/AppleBackup.rb。`FileUtils.cp` で実コピーを行う唯一の
+# 箇所)を呼び出し、添付・描画の実体を `files/` へコピーする。この呼び出しはノートの
+# 対象内/対象外を問わず発生する——note2web 側の対象フォルダ絞り込みは生成・書き込み
+# 段階(下記 notes_json 組み立てループ)でしか効かないため(§ 冒頭「早期フィルタの
+# 到達レベル」参照)。以前(issue #72)はこれを「実害の無い残存効果」として許容していた
+# (対象外ノートの files/ エントリは JSON にも登場せず参照されないため公開はされない)が、
+# 一時エクスポートディレクトリに無駄なファイルが残ること自体は避けられるなら避けたい。
+#
+# 実装方針(upstream commit 4754a2b62686570cca46690d101079e80cf6ae66 の
+# lib/AppleNotesEmbeddedThumbnail.rb・lib/AppleNotesEmbeddedObject.rb・
+# lib/AppleBackup.rb を実際に読んで検証済み。フェイルオープンを最優先する):
+#   1. 全埋め込みオブジェクトの共通基底クラス AppleNotesEmbeddedObject#note=
+#      (setter)を Module#prepend で差し込み、直近に設定された note のフォルダ id を
+#      本モジュール自身に退避しておく。各埋め込みオブジェクトの initialize は
+#      super(...) 経由でこの note= を「実ファイルコピーより先に」必ず呼ぶ
+#      (全サブクラスのソースを確認済み)。
+#   2. AppleBackup#back_up_file(実際に FileUtils.cp を行う唯一の箇所であり、全埋め込み
+#      オブジェクトのクラスが最終的にここを呼ぶ)を Module#prepend で差し込み、直前に
+#      退避しておいたフォルダ id がスコープ外だと判定できた場合のみ、コピーを行わず
+#      nil を返す(upstream 自身もファイル不在等の理由でコピーをスキップする際は nil を
+#      返すだけなので、戻り値の契約は変えていない)。
+#   3. フォルダ id が特定できない(note が nil・folder が nil・想定外の例外)場合は
+#      「判定不能」として必ずコピーを許可する(フェイルオープン)。対象内ノートの添付を
+#      誤って壊すことは、対象外ノートの添付コピーが残ることより悪い。
+#   4. スコープ(in_scope_folder_ids)は note_store ごとに異なり得るため、
+#      `note_store.rip_notes` を呼ぶ直前にその store 用のスコープへ差し替える
+#      (処理は note_store ごとに逐次実行されるため競合しない。埋め込みオブジェクトの
+#      生成もノート単位で逐次実行され、スレッドや Fiber をまたがないため、
+#      この退避場所を単純なモジュール変数にしても安全)。
+module Note2webAttachmentScopeGuard
+  class << self
+    # 現在処理中の note_store のスコープ(`Set<Integer>`)。nil の間は判定不能として
+    # 常にコピーを許可する(フェイルオープン。ガード未インストール相当・rip_notes 呼び出し
+    # 前の状態に対応)。
+    attr_accessor :in_scope_folder_ids
+    # 直近に AppleNotesEmbeddedObject#note= で設定された note のフォルダ id。
+    attr_accessor :current_folder_id
+  end
+
+  module NoteSetter
+    def note=(note)
+      result = super
+      begin
+        Note2webAttachmentScopeGuard.current_folder_id = note&.folder&.primary_key
+      rescue StandardError
+        # フェイルオープン: フォルダ id の取得に失敗しても note= 自体は成功させ、
+        # 後続の back_up_file 側の判定を「判定不能」に倒す。
+        Note2webAttachmentScopeGuard.current_folder_id = nil
+      end
+      result
+    end
+  end
+
+  module BackupFileGuard
+    def back_up_file(*args)
+      in_scope_ids = Note2webAttachmentScopeGuard.in_scope_folder_ids
+      folder_id = Note2webAttachmentScopeGuard.current_folder_id
+      if in_scope_ids && !folder_id.nil? && !Note2webExportCore.folder_in_scope?(folder_id, in_scope_ids)
+        return nil # 対象外ノートの添付: コピーをスキップする(フェイルクローズはここだけ)。
+      end
+
+      super
+    end
+  end
+end
+
+AppleNotesEmbeddedObject.prepend(Note2webAttachmentScopeGuard::NoteSetter)
+AppleBackup.prepend(Note2webAttachmentScopeGuard::BackupFileGuard)
+
+# ---------------------------------------------------------------------------
 # upstream を使ってフォルダ・ノートを読み取る(§ 冒頭「早期フィルタの到達レベル」参照)。
 # ---------------------------------------------------------------------------
 
@@ -218,10 +299,20 @@ unless apple_backup.note_stores.first&.valid_notes?
   exit 1
 end
 
+# フォルダ・アカウントだけを先に読む(issue #73 Fix 6: 添付コピー抑止ガードのスコープを
+# `note_store.rip_notes`(ノート本体のデコード。埋め込みオブジェクト生成・添付コピーは
+# ここで発生する)より前に確定させる必要があるため、以前の `apple_backup.rip_notes`
+# 一括呼び出し(内部で accounts/folders/notes をまとめて読む `rip_all_objects`)を、
+# フォルダ・アカウント読み取りとノート本体読み取りの2段階に分けた)。
 begin
-  apple_backup.rip_notes
+  apple_backup.note_stores.each do |note_store|
+    note_store.retain_order = apple_backup.retain_order
+    note_store.open
+    note_store.rip_accounts
+    note_store.rip_folders
+  end
 rescue StandardError => e
-  warn "note2web_export: failed to read Apple Notes database: #{e.message}"
+  warn "note2web_export: failed to read Apple Notes folders: #{e.message}"
   exit 1
 end
 
@@ -263,15 +354,34 @@ apple_backup.note_stores.each do |note_store|
     end
   end
 
-  trash_ids = target_ids.select do |id|
+  # issue #73 CodeRabbit review Fix 4: 以前はここで「ゴミ箱フォルダ自身」だけを
+  # 除外集合に入れていたため、ゴミ箱の中にさらに子フォルダがあった場合、その子フォルダに
+  # 属するノートが除外対象から漏れる可能性があった。`trash_folder?` で判定した根
+  # (trash_root_ids)に加え、その配下(サブツリー)全体を `expand_trash_descendant_ids`
+  # で展開してから除外する。
+  trash_root_ids = target_ids.select do |id|
     folder = note_store.folders[id]
     Note2webExportCore.trash_folder?(
       folder_type: folder_types_by_id[id],
       server_record_bytes: folder&.server_record_data,
     )
   end.to_set
+  trash_ids = Note2webExportCore.expand_trash_descendant_ids(plain_folders, trash_root_ids)
 
   in_scope_folder_ids = target_ids - trash_ids
+
+  # issue #73 CodeRabbit review Fix 6: このストアのノート本体(rip_notes)を読む前に
+  # 添付コピー抑止ガードへスコープを反映する——rip_notes の実行中に埋め込みオブジェクトが
+  # 生成され、そのタイミングで upstream が添付・描画の実コピーを行うため(§ 冒頭コメント
+  # 参照)、ここで先に確定させておかないとガードが機能しない。
+  Note2webAttachmentScopeGuard.in_scope_folder_ids = in_scope_folder_ids
+
+  begin
+    note_store.rip_notes
+  rescue StandardError => e
+    warn "note2web_export: failed to read notes for note store #{backup_number}: #{e.message}"
+    exit 1
+  end
 
   # ---------------------------------------------------------------------
   # JSON `folders`(トップレベル。design.md §13-7)。一致したサブツリーの根のみを

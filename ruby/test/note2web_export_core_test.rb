@@ -117,6 +117,91 @@ class Note2webExportCoreTest < Minitest::Test
   end
 
   # ---------------------------------------------------------------------
+  # expand_trash_descendant_ids(issue #73 CodeRabbit review Fix 4)
+  # ---------------------------------------------------------------------
+
+  def folders_with_trash_child_fixture
+    [
+      { id: 10, name: 'Tech', parent_id: nil },
+      { id: 20, name: 'Recently Deleted', parent_id: nil },
+      { id: 21, name: 'Deleted Subfolder', parent_id: 20 },
+      { id: 22, name: 'Deleted Sub-subfolder', parent_id: 21 },
+    ]
+  end
+
+  def test_expand_trash_descendant_ids_includes_all_descendants_of_trash_folder
+    expanded = Note2webExportCore.expand_trash_descendant_ids(folders_with_trash_child_fixture, Set[20])
+    assert_equal Set[20, 21, 22], expanded
+  end
+
+  def test_expand_trash_descendant_ids_returns_only_root_when_it_has_no_children
+    expanded = Note2webExportCore.expand_trash_descendant_ids(folders_fixture, Set[14])
+    assert_equal Set[14], expanded
+  end
+
+  def test_expand_trash_descendant_ids_handles_multiple_roots_independently
+    folders = [
+      { id: 1, name: 'Trash A', parent_id: nil },
+      { id: 2, name: 'Child of A', parent_id: 1 },
+      { id: 3, name: 'Trash B', parent_id: nil },
+      { id: 4, name: 'Child of B', parent_id: 3 },
+      { id: 5, name: 'Unrelated', parent_id: nil },
+    ]
+    expanded = Note2webExportCore.expand_trash_descendant_ids(folders, Set[1, 3])
+    assert_equal Set[1, 2, 3, 4], expanded
+  end
+
+  def test_trash_subtree_end_to_end_excludes_notes_in_trash_child_folder
+    # issue #73 Fix 4 の再現: 以前はゴミ箱フォルダ自身(id 20)だけを除外しており、
+    # ゴミ箱の子フォルダ(id 21)・孫フォルダ(id 22)に属するノートが
+    # in_scope_folder_ids に残ってしまっていた。ここでは
+    # `ruby/note2web_export.rb` が実際に組み立てる手順(resolve_target_folder_ids →
+    # trash_folder? による根の判定 → expand_trash_descendant_ids → 差集合)を
+    # そのままなぞり、核となる集合演算(subtree/exclusion resolution)だけを検証する
+    # (実際の HTML/JSON 書き込みは ruby/note2web_export.rb 側の統合であり、
+    # note2web_export_core_test.rb の対象外)。
+    folders = folders_with_trash_child_fixture
+    target_ids = Note2webExportCore.resolve_target_folder_ids(folders, ['Tech', 'Recently Deleted'])
+    assert_equal Set[10, 20, 21, 22], target_ids # フォルダ読み取り自体は対象内(§5.2 早期フィルタの到達レベル)
+
+    trash_root_ids = target_ids.select do |id|
+      Note2webExportCore.trash_folder?(folder_type: id == 20 ? 1 : 0)
+    end.to_set
+    assert_equal Set[20], trash_root_ids
+
+    trash_ids = Note2webExportCore.expand_trash_descendant_ids(folders, trash_root_ids)
+    in_scope_folder_ids = target_ids - trash_ids
+
+    assert_equal Set[10], in_scope_folder_ids
+    refute in_scope_folder_ids.include?(20) # ゴミ箱フォルダ自身
+    refute in_scope_folder_ids.include?(21) # ゴミ箱の子フォルダ(Fix 4 の主眼)
+    refute in_scope_folder_ids.include?(22) # ゴミ箱の孫フォルダ
+
+    # ノートの folder_key がゴミ箱の子/孫フォルダを指していれば、
+    # folder_in_scope? も一貫して false を返す(生成・書き込み対象から外れる)。
+    refute Note2webExportCore.folder_in_scope?(21, in_scope_folder_ids)
+    refute Note2webExportCore.folder_in_scope?(22, in_scope_folder_ids)
+    assert Note2webExportCore.folder_in_scope?(10, in_scope_folder_ids)
+  end
+
+  # ---------------------------------------------------------------------
+  # folder_in_scope?(issue #73 CodeRabbit review Fix 6)
+  # ---------------------------------------------------------------------
+
+  def test_folder_in_scope_true_when_folder_id_is_included
+    assert Note2webExportCore.folder_in_scope?(10, Set[10, 11])
+  end
+
+  def test_folder_in_scope_false_when_folder_id_is_not_included
+    refute Note2webExportCore.folder_in_scope?(99, Set[10, 11])
+  end
+
+  def test_folder_in_scope_false_for_nil_folder_id
+    # フェイルオープンの判断自体は呼び出し側の責務(この関数は素直に false を返すだけ)。
+    refute Note2webExportCore.folder_in_scope?(nil, Set[10, 11])
+  end
+
+  # ---------------------------------------------------------------------
   # encrypted_note?
   # ---------------------------------------------------------------------
 
@@ -145,6 +230,31 @@ class Note2webExportCoreTest < Minitest::Test
     assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('') }
     assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('   ') }
     assert_raises(ArgumentError) { Note2webExportCore.note_html_filename(nil) }
+  end
+
+  # issue #73 CodeRabbit review Fix 3: パストラバーサル対策。
+  def test_note_html_filename_raises_for_dot_dot
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('..') }
+  end
+
+  def test_note_html_filename_raises_for_dot_dot_slash_traversal
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('../../etc/passwd') }
+  end
+
+  def test_note_html_filename_raises_for_embedded_dot_dot_segment
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('44444444-4444-4444-8444-444444444444/../../evil') }
+  end
+
+  def test_note_html_filename_raises_for_forward_slash
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('foo/bar') }
+  end
+
+  def test_note_html_filename_raises_for_backslash
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('foo\\bar') }
+  end
+
+  def test_note_html_filename_raises_for_absolute_path
+    assert_raises(ArgumentError) { Note2webExportCore.note_html_filename('/etc/passwd') }
   end
 
   def test_note_html_filename_is_immune_to_pathologically_long_titles
