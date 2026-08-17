@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../../src/config.js';
 import type { Logger, WarnPayload } from '../../src/logger.js';
-import { createGitRepoPublisher, type GitRepoRunner } from '../../src/publishers/git-repo.js';
+import {
+  createGitRepoPublisher,
+  GIT_CREDENTIAL_ARGS,
+  type GitRepoRunner,
+} from '../../src/publishers/git-repo.js';
 import type { RenderedArticle } from '../../src/publishers/types.js';
 import type { RunSubprocessOptions, RunSubprocessResult } from '../../src/subprocess.js';
 
@@ -97,8 +101,17 @@ function failure(stderr = 'boom'): RunSubprocessResult {
   };
 }
 
+/**
+ * `call.args` から、git 呼び出しに一律付与される credential-helper 強制の前置き
+ * (`GIT_CREDENTIAL_ARGS`、`src/publishers/git-repo.ts` 参照)を取り除いた「実質的な」引数列
+ * を返す。gh コマンドはそのまま返す(前置きは git 呼び出しにのみ付く)。
+ */
+function gitArgs(call: RecordedCall): string[] {
+  return call.command === 'git' ? call.args.slice(GIT_CREDENTIAL_ARGS.length) : call.args;
+}
+
 function joinArgs(call: RecordedCall): string {
-  return `${call.command} ${call.args.join(' ')}`;
+  return `${call.command} ${gitArgs(call).join(' ')}`;
 }
 
 function createFakeLogger(): { logger: Logger; warnings: WarnPayload[] } {
@@ -154,7 +167,7 @@ describe('createGitRepoPublisher', () => {
           'git checkout -b note2web/sync-20260811T090000Z origin/main',
         );
         // FR-19: ref 名に使えない ':' を含まない(args: ['checkout', '-b', <branch>, <start>])。
-        expect(calls[1]!.args[2]).not.toContain(':');
+        expect(gitArgs(calls[1]!)[2]).not.toContain(':');
       },
     );
 
@@ -173,7 +186,7 @@ describe('createGitRepoPublisher', () => {
 
     it('throws when "git fetch" fails, without attempting to create the branch', async () => {
       const { runner, calls } = makeMockRunner((call) =>
-        call.args.join(' ') === 'fetch origin' ? failure('network unreachable') : undefined,
+        gitArgs(call).join(' ') === 'fetch origin' ? failure('network unreachable') : undefined,
       );
       const publisher = createGitRepoPublisher({
         config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
@@ -312,7 +325,7 @@ describe('createGitRepoPublisher', () => {
     it('zero diff (git status --porcelain is empty despite pending notes): discards the branch, does not persist, warns', async () => {
       const { logger, warnings } = createFakeLogger();
       const { runner, calls } = makeMockRunner((call) =>
-        call.args[0] === 'status' ? success('') : undefined,
+        gitArgs(call)[0] === 'status' ? success('') : undefined,
       );
       const publisher = await prepareAndPublish(runner, { logger });
       calls.length = 0;
@@ -334,7 +347,7 @@ describe('createGitRepoPublisher', () => {
 
     it('diff exists, auto_merge false: adds/commits/pushes/creates a PR and persists (no merge attempted)', async () => {
       const { runner, calls } = makeMockRunner((call) =>
-        call.args[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+        gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
       );
       const publisher = await prepareAndPublish(runner, { autoMerge: false });
       calls.length = 0;
@@ -356,8 +369,8 @@ describe('createGitRepoPublisher', () => {
 
     it('throws when "git push" fails (does not persist; sync retries next run)', async () => {
       const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
-        if (call.args[0] === 'push') return failure('remote rejected');
+        if (gitArgs(call)[0] === 'status') return success(' M articles/uuid.md\n');
+        if (gitArgs(call)[0] === 'push') return failure('remote rejected');
         return undefined;
       });
       const publisher = await prepareAndPublish(runner);
@@ -369,7 +382,7 @@ describe('createGitRepoPublisher', () => {
 
     it('throws when "gh pr create" fails (does not persist; sync retries next run)', async () => {
       const { runner } = makeMockRunner((call) => {
-        if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
+        if (gitArgs(call)[0] === 'status') return success(' M articles/uuid.md\n');
         if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'create') {
           return failure('could not create pull request');
         }
@@ -384,7 +397,7 @@ describe('createGitRepoPublisher', () => {
 
     it('auto_merge: true and merge succeeds: issues "gh pr merge <PR URL> --merge --delete-branch" and persists', async () => {
       const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
+        if (gitArgs(call)[0] === 'status') return success(' M articles/uuid.md\n');
         if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'create') {
           // `gh pr create` は成功時、stdout の先頭行に作成した PR の URL を出す。
           return success(`${PR_URL}\n`);
@@ -410,7 +423,7 @@ describe('createGitRepoPublisher', () => {
 
     it('auto_merge: true and gh pr create has no usable stdout: falls back to implicit branch resolution (no URL arg)', async () => {
       const { runner, calls } = makeMockRunner((call) =>
-        call.args[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+        gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
       );
       const publisher = await prepareAndPublish(runner, { autoMerge: true });
       calls.length = 0;
@@ -425,7 +438,7 @@ describe('createGitRepoPublisher', () => {
 
     it('auto_merge: true and merge fails: persists (PR already created) but reports failure, leaving the PR open', async () => {
       const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'status') return success(' M articles/uuid.md\n');
+        if (gitArgs(call)[0] === 'status') return success(' M articles/uuid.md\n');
         if (call.command === 'gh' && call.args[0] === 'pr' && call.args[1] === 'create') {
           return success(`${PR_URL}\n`);
         }
@@ -452,7 +465,7 @@ describe('createGitRepoPublisher', () => {
 
     it('passes GH_TOKEN via env to gh commands (and git commands, for credential-helper pushes)', async () => {
       const { runner, calls } = makeMockRunner((call) =>
-        call.args[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+        gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
       );
       const publisher = createGitRepoPublisher({
         config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
@@ -468,9 +481,16 @@ describe('createGitRepoPublisher', () => {
       const ghCall = calls.find((call) => call.command === 'gh');
       expect(ghCall?.env).toEqual({ GH_TOKEN: 'secret-token' });
       expect(calls.every((call) => call.env?.GH_TOKEN === 'secret-token')).toBe(true);
+      // git 呼び出しには併せて GIT_TERMINAL_PROMPT=0 が付く(gh 呼び出しには付かない)。
+      expect(
+        calls
+          .filter((call) => call.command === 'git')
+          .every((call) => call.env?.GIT_TERMINAL_PROMPT === '0'),
+      ).toBe(true);
+      expect(ghCall?.env?.GIT_TERMINAL_PROMPT).toBeUndefined();
     });
 
-    it('commands receive no injected env when GH_TOKEN is absent from the injected env (CodeRabbit review, PR #49: this does not mean no commands run)', async () => {
+    it('commands receive no injected GH_TOKEN when absent from the injected env, but git commands still get GIT_TERMINAL_PROMPT=0 (CodeRabbit review, PR #49: this does not mean no commands run)', async () => {
       const { runner, calls } = makeMockRunner();
       const publisher = createGitRepoPublisher({
         config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
@@ -483,9 +503,70 @@ describe('createGitRepoPublisher', () => {
       // prepare() 自体は GH_TOKEN 無しでも git fetch/checkout を試みる(SSH 鍵等の他の認証
       // 手段があり得るため、GitRepoPublisher は GH_TOKEN の有無で git コマンドの実行有無を
       // 変えない)。ここで検証するのは、渡す `env` に GH_TOKEN が無ければ、コマンドへは
-      // 何も注入しない(`{ GH_TOKEN: ... }` を付けない)という一点のみ。
+      // GH_TOKEN を注入しないという一点。一方、git コマンドには GH_TOKEN の有無に関わらず
+      // 常に GIT_TERMINAL_PROMPT=0 が付く(対話フォールバック防止、NFR)。
       expect(calls.length).toBeGreaterThan(0);
-      expect(calls.every((call) => call.env === undefined)).toBe(true);
+      expect(calls.every((call) => call.env?.GH_TOKEN === undefined)).toBe(true);
+      const gitCalls = calls.filter((call) => call.command === 'git');
+      expect(gitCalls.length).toBeGreaterThan(0);
+      expect(gitCalls.every((call) => call.env?.GIT_TERMINAL_PROMPT === '0')).toBe(true);
+    });
+  });
+
+  describe('credential-helper forcing (Mac GCM ポップアップ / gh マルチアカウント対策)', () => {
+    it('prepends GIT_CREDENTIAL_ARGS to every git invocation, before the subcommand', async () => {
+      const { runner, calls } = makeMockRunner((call) =>
+        gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+      );
+      const publisher = createGitRepoPublisher({
+        config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
+        runner,
+        now: FIXED_NOW,
+      });
+      await publisher.prepare?.();
+      await publisher.publish(buildArticle(), null);
+      await publisher.finalize?.();
+
+      const gitCalls = calls.filter((call) => call.command === 'git');
+      // fetch / checkout / status / add / commit / push の6件全てで前置きが付く
+      // (design.md §5.7、`GIT_CREDENTIAL_ARGS` のコメント参照)。ローカル専用コマンドにも
+      // 一律で付与する設計(認証を伴わないので無害)。
+      expect(gitCalls.length).toBeGreaterThanOrEqual(6);
+      for (const call of gitCalls) {
+        expect(call.args.slice(0, GIT_CREDENTIAL_ARGS.length)).toEqual(GIT_CREDENTIAL_ARGS);
+      }
+      // gh コマンドには前置きが付かない。
+      const ghCalls = calls.filter((call) => call.command === 'gh');
+      expect(ghCalls.length).toBeGreaterThan(0);
+      for (const call of ghCalls) {
+        expect(call.args.slice(0, GIT_CREDENTIAL_ARGS.length)).not.toEqual(GIT_CREDENTIAL_ARGS);
+      }
+    });
+
+    it('the push invocation carries the credential-forcing prefix, GIT_TERMINAL_PROMPT=0 and GH_TOKEN in env, with no token value in argv', async () => {
+      const { runner, calls } = makeMockRunner((call) =>
+        gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
+      );
+      const publisher = createGitRepoPublisher({
+        config: buildConfig({ git: { ...buildConfig().git!, repo_path: repoPath } }),
+        runner,
+        now: FIXED_NOW,
+        env: { GH_TOKEN: 'super-secret-token' },
+      });
+      await publisher.prepare?.();
+      await publisher.publish(buildArticle(), null);
+      await publisher.finalize?.();
+
+      const pushCall = calls.find((call) => call.command === 'git' && gitArgs(call)[0] === 'push');
+      expect(pushCall).toBeDefined();
+      expect(pushCall?.args.slice(0, GIT_CREDENTIAL_ARGS.length)).toEqual(GIT_CREDENTIAL_ARGS);
+      expect(pushCall?.env).toMatchObject({
+        GIT_TERMINAL_PROMPT: '0',
+        GH_TOKEN: 'super-secret-token',
+      });
+      // argv 自体にはトークンの値が一切現れない(FR-30。gh auth git-credential が
+      // 実行時に環境変数から読むだけ)。
+      expect(pushCall?.args.some((arg) => arg.includes('super-secret-token'))).toBe(false);
     });
   });
 });

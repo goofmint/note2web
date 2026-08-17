@@ -63,6 +63,45 @@ export interface CreateGitRepoPublisherOptions {
 const BRANCH_PREFIX = 'note2web/sync-';
 
 /**
+ * 全ての `git` 呼び出しのサブコマンドの前に付与する引数(design.md §5.7「認証」節、
+ * NFR「launchd で対話なし」、issue: 実機 Mac での Git Credential Manager(GCM)ポップアップ)。
+ *
+ * **背景(実機で観測された問題)**: `git push` が HTTPS リモートに対して実行されると、git は
+ * `credential.helper` を **system → global → local の設定順にすべて** 呼び出す仕様になって
+ * いる。ユーザーの Mac では `gh auth setup-git` を実行済みでも、system レベルに Git
+ * Credential Manager(GCM)や `osxkeychain` の helper が既に登録されており、`gh` の helper
+ * より先にそちらが呼ばれてしまう。結果、launchd 経由の非対話実行中に GUI の認証ポップアップ
+ * が表示され、応答が無いまま停止する。さらにユーザーは `gh` に GitHub アカウントを2つ認証
+ * 済みで、`gh` 自身の「アクティブアカウント」解決に頼るとどちらが使われるか曖昧になる。
+ *
+ * **対策**: `git` を呼ぶたびに以下の2つの `-c credential.helper=...` をサブコマンドより前に
+ * 付与する(git の `-c` はそのプロセス実行中のみ有効な一度限りの上書きで、リポジトリや
+ * 環境のグローバルな git 設定は一切書き換えない):
+ *   1. `-c credential.helper=`(空値)— それまでに system/global/local で設定された
+ *      credential helper の連鎖を**すべてクリアする**(git の `credential.helper` は空文字列
+ *      を与えると「これより前の設定を無視する」という特別な意味を持つ)。
+ *   2. `-c credential.helper=!gh auth git-credential` — その上で `gh` の credential helper
+ *      **のみ**を有効にする。`gh auth git-credential` は環境変数 `GH_TOKEN` を `gh` 自身の
+ *      複数アカウント状態より優先して参照するため、note2web が渡す `GH_TOKEN`(下記
+ *      `runnerEnv`)がそのまま認証アカウントを決定的に決める(2アカウント問題を回避)。
+ *      これにより `gh auth setup-git` の実行は不要になる。
+ *
+ * トークンの値そのものは引数(argv)には一切現れない——`gh auth git-credential` が実行時に
+ * 環境変数から読むだけであり、コマンドラインには秘匿情報を含めないという規約(FR-30)と
+ * 整合する。
+ *
+ * `status`/`add`/`commit`/`checkout`/`branch -D` のようなローカル専用コマンド(認証を伴わない)
+ * にもこの前置きを一律で付ける。無害なので、認証が必要なコマンドかどうかで分岐を増やさず
+ * `run()` の実装を単純に保つ。
+ */
+export const GIT_CREDENTIAL_ARGS: readonly string[] = [
+  '-c',
+  'credential.helper=',
+  '-c',
+  'credential.helper=!gh auth git-credential',
+];
+
+/**
  * `date`(UTC)を `YYYYMMDDTHHMMSSZ` 形式へ整形する(design.md §5.7「時刻部分は
  * `YYYYMMDDTHHMMSSZ` 形式とし、Git の ref 名に使えない `:` 等を含めない」)。
  */
@@ -138,7 +177,9 @@ export function createGitRepoPublisher(options: CreateGitRepoPublisherOptions): 
   // GH_TOKEN は gh コマンドの認証に必須(design.md §5.7 NFR-03)。`git fetch`/`git push` も
   // HTTPS リモート + `gh` の git credential helper 経由で認証する構成では同じトークンを
   // 参照するため、git / gh いずれのコマンドにも渡す(issue #21 の要求は gh コマンドのみだが、
-  // push が実際に認証を通すにはここまで必要になる実運用上の理由による拡張)。
+  // push が実際に認証を通すにはここまで必要になる実運用上の理由による拡張)。`git` 呼び出し
+  // 側で credential helper を `gh auth git-credential` 一本に強制する仕組みは
+  // `GIT_CREDENTIAL_ARGS` のコメントを参照。
   const runnerEnv: Record<string, string> | undefined =
     ghToken !== undefined && ghToken !== '' ? { GH_TOKEN: ghToken } : undefined;
 
@@ -146,6 +187,23 @@ export function createGitRepoPublisher(options: CreateGitRepoPublisherOptions): 
   const pending: PendingEntry[] = [];
 
   async function run(command: string, args: string[]): Promise<RunSubprocessResult> {
+    if (command === 'git') {
+      // `GIT_CREDENTIAL_ARGS` をサブコマンドより前に付与し(詳細は同定数のコメント参照)、
+      // 加えて `GIT_TERMINAL_PROMPT=0` を渡す。credential helper の強制が何らかの理由で
+      // 効かず認証情報が見つからない場合でも、これにより git は対話プロンプトへ
+      // フォールバックせず即座にエラー終了する(NFR「launchd で対話なし」の最終防波堤)。
+      // `env` は常にオブジェクトを渡す(GH_TOKEN 未設定でも `{ GIT_TERMINAL_PROMPT: '0' }` は
+      // 渡る)—— `runSubprocess`(`src/subprocess.ts`)は `env` が渡されればマージ
+      // (`{ ...process.env, ...env }`)、未指定なら `process.env` をそのまま使うため、
+      // ここで空でないオブジェクトを渡しても既存の環境変数を破壊しない。
+      return runner({
+        command,
+        args: [...GIT_CREDENTIAL_ARGS, ...args],
+        cwd: repoPath,
+        env: { ...runnerEnv, GIT_TERMINAL_PROMPT: '0' },
+      });
+    }
+    // gh コマンドは変更なし(既に GH_TOKEN 環境変数で認証する。issue #21)。
     return runner({ command, args, cwd: repoPath, env: runnerEnv });
   }
 

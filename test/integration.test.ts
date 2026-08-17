@@ -67,7 +67,11 @@ import type { SubprocessRunner } from '../src/exporter/apple-notes.js';
 import type { Logger, WarnPayload } from '../src/logger.js';
 import type { PutObjectParams, UploaderClient } from '../src/assets/uploader.js';
 import { resolveRenderer } from '../src/publishers/factory.js';
-import { createGitRepoPublisher, type GitRepoRunner } from '../src/publishers/git-repo.js';
+import {
+  createGitRepoPublisher,
+  GIT_CREDENTIAL_ARGS,
+  type GitRepoRunner,
+} from '../src/publishers/git-repo.js';
 import { createQiitaPublisher, type QiitaRunner } from '../src/publishers/qiita.js';
 import {
   createDevtoPublisher,
@@ -248,6 +252,16 @@ const NOOP_CHECK_GIT_AUTH = async (): Promise<void> => {
 
 const FIXED_NOW = () => new Date('2026-08-11T00:00:00Z');
 
+/**
+ * `RunSubprocessOptions` の `args` から、git 呼び出しに一律付与される credential-helper
+ * 強制の前置き(`GIT_CREDENTIAL_ARGS`、`src/publishers/git-repo.ts` 参照)を取り除いた
+ * 「実質的な」引数列を返す。gh コマンドはそのまま返す(前置きは git 呼び出しにのみ付く)。
+ * zenn / hugo / jekyll の `makeGitRunner` いずれからも参照する。
+ */
+function gitArgs(options: { command: string; args: string[] }): string[] {
+  return options.command === 'git' ? options.args.slice(GIT_CREDENTIAL_ARGS.length) : options.args;
+}
+
 function readStateFile(statePath: string): StateFile {
   return JSON.parse(readFileSync(statePath, 'utf8')) as StateFile;
 }
@@ -350,7 +364,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
             stderr: '',
           };
         }
-        if (options.command === 'git' && options.args[0] === 'status') {
+        if (options.command === 'git' && gitArgs(options)[0] === 'status') {
           // `publish()` が実際にファイルを書き込んでいるため(design.md §5.7 手順2)、
           // `git status --porcelain` は本物の git であれば差分ありを報告する。fake
           // runner はコマンドを実際には実行しないため、finalize() の「差分ゼロなら
@@ -415,8 +429,10 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
 
       // git/gh の呼び出し(design.md §5.7 手順1・3・4): fetch → checkout -b → status →
       // add → commit → push → gh pr create → gh pr merge(auto_merge: true)。
+      // `gitArgs()` で git 呼び出しの credential-helper 強制の前置き(GIT_CREDENTIAL_ARGS)を
+      // 取り除いてから見る(gh 呼び出しには前置きが付かないのでそのまま)。
       const commands1 = git1.calls.map(
-        (call) => `${call.command} ${call.args.slice(0, 2).join(' ')}`,
+        (call) => `${call.command} ${gitArgs(call).slice(0, 2).join(' ')}`,
       );
       expect(commands1).toContain('git fetch origin');
       expect(commands1.some((c) => c.startsWith('git checkout -b'))).toBe(true);
@@ -494,7 +510,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       // publish() が呼ばれていない(=変更が無い)ため、finalize() は差分ゼロとしてブランチを
       // 破棄するのみ。add/commit/push/gh pr create は一切呼ばれない。
       const commands2 = git2.calls.map(
-        (call) => `${call.command} ${call.args.slice(0, 2).join(' ')}`,
+        (call) => `${call.command} ${gitArgs(call).slice(0, 2).join(' ')}`,
       );
       expect(commands2).not.toContain('git add');
       expect(commands2).not.toContain('git commit');
@@ -548,7 +564,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
             stderr: '',
           };
         }
-        if (options.command === 'git' && options.args[0] === 'status') {
+        if (options.command === 'git' && gitArgs(options)[0] === 'status') {
           // `zenn` の `makeGitRunner` と同じ理由(このファイル冒頭のコメント参照)。
           return {
             status: 'success',
@@ -638,7 +654,9 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       // git 書き込み(add/commit/push)と gh は一切呼ばれない(checkout / branch -D は
       // 後始末として許容)。
       for (const writeOp of ['add', 'commit', 'push']) {
-        expect(git2.calls.some((c) => c.command === 'git' && c.args[0] === writeOp)).toBe(false);
+        expect(git2.calls.some((c) => c.command === 'git' && gitArgs(c)[0] === writeOp)).toBe(
+          false,
+        );
       }
       expect(git2.calls.some((c) => c.command === 'gh')).toBe(false);
       expect(uploader2.putObjectCalls).toHaveLength(0);
@@ -684,7 +702,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
             stderr: '',
           };
         }
-        if (options.command === 'git' && options.args[0] === 'status') {
+        if (options.command === 'git' && gitArgs(options)[0] === 'status') {
           // `zenn` の `makeGitRunner` と同じ理由(このファイル冒頭のコメント参照)。
           return {
             status: 'success',
@@ -759,7 +777,9 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       }
       // 公開に関わる git 書き込み(add/commit/push)は再実行では発生しない。
       for (const writeOp of ['add', 'commit', 'push']) {
-        expect(git2.calls.some((c) => c.command === 'git' && c.args[0] === writeOp)).toBe(false);
+        expect(git2.calls.some((c) => c.command === 'git' && gitArgs(c)[0] === writeOp)).toBe(
+          false,
+        );
       }
       expect(git2.calls.some((c) => c.command === 'gh')).toBe(false);
       expect(uploader2.putObjectCalls).toHaveLength(0);

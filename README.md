@@ -187,7 +187,7 @@ hatena:
 ### Zenn / Hugo / Jekyll(Git 共通)
 
 - 出力先 Git リポジトリをあらかじめ clone してあること。認証は環境変数 `GH_TOKEN` で行います(`gh` は `GH_TOKEN` が設定されていれば対話ログイン不要。`sync` / `doctor` の冒頭で `gh auth status` と対象リポジトリへの権限が確認されます)
-- 認証は `GH_TOKEN` 環境変数(`gh` の認証。対話ログインには依存しません)
+- **credential helper の設定は不要です**: note2web は `git fetch` / `git push` を含む全ての `git` 呼び出しで、それより前に設定されている credential helper(macOS の Git Credential Manager や `osxkeychain` 等)を毎回クリアし、`gh auth git-credential` だけを一時的に使うようコマンドごとに強制します。これにより GUI の認証ポップアップは発生せず、`gh auth setup-git` を実行しておく必要もありません。`gh` に複数の GitHub アカウントを認証済みの環境でも、`GH_TOKEN` 環境変数の値が使われるアカウントを一意に決めるため安全です。万一この仕組みが効かず認証情報が見つからない場合も、`GIT_TERMINAL_PROMPT=0` により git は対話プロンプトへフォールバックせず即座にエラーで終了します(launchd / cron からの無人実行を維持)
 - 実行のたびに `base_branch` から作業ブランチ `note2web/sync-<UTC時刻>` を作成し、変更のあったノートをコミット、`gh pr create` で PR を作成します
 - **差分が無ければブランチを破棄し、空コミット・空 PR は作りません**
 - **`auto_merge: true` のときのみ** PR のマージ(`gh pr merge --merge --delete-branch`)まで自動実行します。ブランチ保護等でマージできない場合は PR を残したまま実行を失敗として報告します
