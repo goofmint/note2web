@@ -248,7 +248,10 @@ module Note2webAttachmentScopeGuard
 
   module NoteSetter
     def note=(note)
-      result = super
+      # フォルダ id は super の「前」に設定する。super(AppleNotesEmbeddedObject#note=)は
+      # 処理中に search_and_add_thumbnails → back_up_file を呼ぶため、後から設定すると
+      # BackupFileGuard が前のノートのフォルダ id で判定してしまう(CodeRabbit レビュー:
+      # 対象内添付のスキップ = 欠落や、対象外添付のコピーにつながる)。
       begin
         Note2webAttachmentScopeGuard.current_folder_id = note&.folder&.primary_key
       rescue StandardError
@@ -256,7 +259,7 @@ module Note2webAttachmentScopeGuard
         # 後続の back_up_file 側の判定を「判定不能」に倒す。
         Note2webAttachmentScopeGuard.current_folder_id = nil
       end
-      result
+      super
     end
   end
 

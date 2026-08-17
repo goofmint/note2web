@@ -53,8 +53,9 @@ function createFakeFs(
   // `fileExistsFn` で確認するようになったため。issue #73 レビュー Fix 5: 同様に
   // `collectDependencyWarnings` が note2web 自身のエクスポートスクリプトの実在も確認する
   // ようになったため、既定では「存在する」ことにしておき、欠如時の警告は専用テストで
-  // 個別に検証する)。個々のテストの `initialFiles` で明示的に上書き・削除はできない
-  // ——存在しないケースを検証したいテストは別の仕組みで実現する(下記専用テスト参照)。
+  // 個別に検証する)。`initialFiles` は既定エントリの後に展開されるため同じキーの値の
+  // 上書きはできるが、キーの削除はできない——存在しないケースを検証したいテストは
+  // `fileExistsFn` をラップする等の別の仕組みで実現する(下記専用テスト参照)。
   const files = new Map(
     Object.entries({
       [FAKE_CLI_ENTRYPOINT]: '',
