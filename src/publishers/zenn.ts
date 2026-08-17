@@ -21,18 +21,24 @@
  * 型検証はここ(Renderer)でのみ行う——CodeRabbit issue plan(issue #22 コメント)の
  * Phase 1 Task 2 と同じ結論。
  *
- * **topics の変換規約(design.md §5.7 が明記していない部分の決定)**: `Note#tags` は
- * 先頭 `#` を含めたまま保持される(design.md §5.3「差分」節、FR-07「そのまま」)。Zenn の
- * `topics` は `#` を含まないプレーンな語であるべきだが、design.md §5.7 の Zenn 行には
- * Qiita 行(§5.7 QiitaPublisher「半角スペースを含むタグは除外」「6個以上なら先頭5個に
- * 切り詰め」等)のような追加の切り詰め・文字種制約の明記が無い。したがって本実装は
- * 「各タグの先頭の `#` を1つだけ除去する」という最小限の変換のみを行い、個数・文字種の
- * 追加検証や切り詰めは行わない(design.md に明記の無い制約を勝手に作らない)。
+ * **topics の変換規約(design.md §5.7 Zenn 行、issue #76)**: `Note#tags` は先頭 `#` を
+ * 含めたまま保持される(design.md §5.3「差分」節、FR-07「そのまま」)。Zenn 公式ガイド
+ * (https://zenn.dev/zenn/articles/zenn-cli-guide、issue #76 のコメントに原文引用あり)は
+ * `topics` の個数上限を最大5個と明記するが、文字種については明記が無い(issue #76 の
+ * CodeRabbit issue plan Design Choice 1)。したがって `resolveZennTopics` は
+ * `src/publishers/qiita.ts` の `resolveQiitaTags` と同じ処理順で
+ * (1) 先頭の `#` を1つ除去 → (2) 除去後に空になったタグを警告して除外 →
+ * (3) 半角スペースを含むタグを警告して除外 → (4) 除外後6個以上なら先頭5個へ切り詰めて警告、
+ * の4段階のサニタイズのみを行い、文字種のさらなる検証(強制)は行わない(利用者のタグを
+ * 予期せず失わせないため。design.md §5.7 に根拠を記録)。**Qiita と異なりサニタイズ後
+ * 0個になっても失敗にしない**——Zenn は `topics` の省略・空配列を許容するため、そのまま
+ * 空配列 `[]` を返す(issue #76 CodeRabbit issue plan Design Choice 2)。
  * 重複除去は `completeNoteMetadata`(`src/transform/metadata.ts`)が `#` 付きの値に対して
  * 既に行っているため、ここでの再重複除去は行わない(CodeRabbit issue plan 同フェーズ
  * Task 1「重複除去は Note.tags で適用済みのため、追加の変換は最小限にする」)。
  */
 
+import type { Logger } from '../logger.js';
 import type { RenderNoteInput, NoteRenderer } from './render.js';
 import type { RenderedArticle } from './types.js';
 import {
@@ -130,10 +136,113 @@ function resolveZennSlug(noteUuid: string): string {
 /**
  * タグ先頭の `#` を1つだけ除去する(モジュール冒頭 JSDoc「topics の変換規約」参照)。
  * `#` を持たない値はそのまま返す(防御的。`Note#tags` の情報源である JSON `hashtags` は
- * 常に `#` 付きだが、型としては保証されないため)。
+ * 常に `#` 付きだが、型としては保証されないため)。`src/publishers/qiita.ts` の同名関数と
+ * 同じ規約をミラーする(重複実装。既存の Qiita 側もローカル定義のままであり、これに揃える)。
  */
 function stripLeadingHash(tag: string): string {
   return tag.startsWith('#') ? tag.slice(1) : tag;
+}
+
+/** Zenn 公式ガイドが明記する `topics` の個数上限(モジュール冒頭 JSDoc「topics の変換規約」)。 */
+const ZENN_MAX_TOPICS = 5;
+
+/** `resolveZennTopics` のパラメータ(`src/publishers/qiita.ts` の `ResolveQiitaTagsParams` と同形)。 */
+interface ResolveZennTopicsParams {
+  noteUuid: string;
+  title: string;
+  tags: readonly string[];
+  logger: Logger | undefined;
+}
+
+/**
+ * モジュール冒頭 JSDoc「topics の変換規約」の4段階を順に適用する(`resolveQiitaTags`
+ * (`src/publishers/qiita.ts`)を参照実装とする。処理順序: 先頭 `#` 除去 → 空タグ除外(警告)
+ * → 半角スペース含みタグ除外(警告) → 6個以上なら先頭5個へ切り詰め(警告)。Qiita と異なり
+ * サニタイズ後0個になっても例外を投げず、空配列 `[]` をそのまま返す(Zenn は `topics` の
+ * 省略・空配列を許容するため)。警告は `service`/`noteUuid`/`title` を伴う `logger.warn`
+ * イベントとして発行する(`src/logger.ts` `WarnPayload`)。`logger` 未注入時は no-op。
+ */
+function resolveZennTopics(params: ResolveZennTopicsParams): string[] {
+  const { noteUuid, title, tags, logger } = params;
+  const stripped = tags.map(stripLeadingHash);
+
+  // `#` 除去後に空文字列となったタグ(元が `#` のみ等)は Zenn の topics として成立しないため、
+  // スペース含みタグと同様に除外して警告する。
+  const empty = stripped.filter((tag) => tag.length === 0);
+  if (empty.length > 0) {
+    logger?.warn({
+      service: 'zenn',
+      noteUuid,
+      title,
+      message:
+        `dropped ${String(empty.length)} topic(s) that became empty after stripping the ` +
+        'leading "#" (design.md §5.7)',
+    });
+  }
+  const nonEmpty = stripped.filter((tag) => tag.length > 0);
+
+  const spaced = nonEmpty.filter((tag) => tag.includes(' '));
+  let remaining = nonEmpty.filter((tag) => !tag.includes(' '));
+  if (spaced.length > 0) {
+    logger?.warn({
+      service: 'zenn',
+      noteUuid,
+      title,
+      message:
+        `dropped ${String(spaced.length)} topic(s) containing a half-width space ` +
+        `(Zenn rejects topics with spaces, design.md §5.7): ${spaced.map((tag) => JSON.stringify(tag)).join(', ')}`,
+    });
+  }
+
+  if (remaining.length > ZENN_MAX_TOPICS) {
+    const kept = remaining.slice(0, ZENN_MAX_TOPICS);
+    logger?.warn({
+      service: 'zenn',
+      noteUuid,
+      title,
+      message:
+        `truncated topics from ${String(remaining.length)} to Zenn's limit of ` +
+        `${String(ZENN_MAX_TOPICS)} (design.md §5.7): kept ${kept.map((tag) => JSON.stringify(tag)).join(', ')}`,
+    });
+    remaining = kept;
+  }
+
+  // Qiita の `resolveQiitaTags` と異なり、0個になっても例外を投げない(design.md §5.7、
+  // issue #76 CodeRabbit issue plan Design Choice 2「Zenn は topics 未指定を許容する」)。
+  return remaining;
+}
+
+/**
+ * grapheme cluster 単位の分割器(`src/transform/metadata.ts` の `graphemeSegmenter` と
+ * 同じ設定)。`resolveZennEmoji` の防御的チェック専用。
+ */
+const zennEmojiSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * `note.emoji` を Zenn の `emoji` frontmatter 値として確定する(design.md §5.7「絵文字が
+ * 無いノートは既定値 `📝`」)。`note.emoji` が `null` なら既定値。非 `null` の場合、
+ * `splitTitleAndEmoji`(`src/transform/metadata.ts`)が単一 grapheme cluster であることを
+ * 既に保証しているため、本来は素通しでよい。ここでの `Intl.Segmenter` によるセグメント数
+ * 確認は**あくまで防御的**なもの(issue #76 CodeRabbit issue plan Phase 2 Task 1)——万一
+ * 何らかの経路で複数 grapheme(例 '😸😸')や非絵文字文字列(例 'ab')が紛れ込んでも、
+ * Zenn が要求する「絵文字1文字だけ」に違反したまま出力してしまわないよう、例外を投げずに
+ * 既定値へフォールバックする。
+ */
+function resolveZennEmoji(emoji: string | null): string {
+  if (emoji === null) {
+    return ZENN_DEFAULT_EMOJI;
+  }
+  const segments = [...zennEmojiSegmenter.segment(emoji)];
+  if (segments.length !== 1) {
+    return ZENN_DEFAULT_EMOJI;
+  }
+  // セグメント数が1でも 'a' のような非絵文字はあり得るため、`splitTitleAndEmoji`
+  // (`src/transform/metadata.ts`)と同じ `\p{Extended_Pictographic}` 判定で
+  // 「絵文字であること」も確認する(issue #76 CodeRabbit レビュー)。
+  if (!/\p{Extended_Pictographic}/u.test(emoji)) {
+    return ZENN_DEFAULT_EMOJI;
+  }
+  return emoji;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,11 +261,17 @@ function stripLeadingHash(tag: string): string {
 export const renderZennArticle: NoteRenderer = ({
   note,
   markdown,
+  logger,
 }: RenderNoteInput): RenderedArticle => {
   const type = resolveZennType(note.uuid, note.folder);
   const slug = resolveZennSlug(note.uuid);
-  const emoji = note.emoji ?? ZENN_DEFAULT_EMOJI;
-  const topics = note.tags.map(stripLeadingHash);
+  const emoji = resolveZennEmoji(note.emoji);
+  const topics = resolveZennTopics({
+    noteUuid: note.uuid,
+    title: note.title,
+    tags: note.tags,
+    logger,
+  });
 
   // ZENN_FRONTMATTER_KEY_ORDER の並び(title/emoji/type/topics/published)どおりに組み立てる。
   const entries: FrontmatterEntry[] = [

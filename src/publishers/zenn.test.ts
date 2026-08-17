@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { InvalidZennSlugError, InvalidZennTypeError, renderZennArticle } from './zenn.js';
 import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
+import type { Logger, WarnPayload } from '../logger.js';
 import { computeContentHash } from '../transform/frontmatter.js';
 
 function buildNote(overrides: Partial<Note> = {}): Note {
@@ -30,6 +31,24 @@ const CONFIG = {
     auto_merge: true,
   },
 } as Config;
+
+// `src/publishers/qiita.test.ts` の同名ヘルパーと同形(§5.7 タグ検証テストの参照実装)。
+function createFakeLogger(): { logger: Logger; warnings: WarnPayload[] } {
+  const warnings: WarnPayload[] = [];
+  const logger: Logger = {
+    runStart: () => {},
+    runEnd: () => {},
+    exportDone: () => {},
+    notePublished: () => {},
+    noteSkipped: () => {},
+    noteFailed: () => {},
+    assetUploaded: () => {},
+    warn: (payload) => {
+      warnings.push(payload);
+    },
+  };
+  return { logger, warnings };
+}
 
 // ---------------------------------------------------------------------------
 // golden test: frontmatter の確定的な直列化(design.md §5.7 Zenn 行、issue #22 受け入れ条件)。
@@ -121,6 +140,35 @@ describe('renderZennArticle emoji', () => {
     const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('emoji: "📝"');
   });
+
+  // 防御的フォールバック(issue #76 CodeRabbit issue plan Phase 2 Task 1): `note.emoji` は
+  // `splitTitleAndEmoji` により実運用では常に単一 grapheme cluster だが、万一そうでない値が
+  // 来ても例外を投げず既定値へフォールバックすることを確認する。
+  it('falls back to 📝 when note.emoji is multiple grapheme clusters (defensive)', () => {
+    const note = buildNote({ emoji: '😸😸' });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('emoji: "📝"');
+  });
+
+  it('falls back to 📝 when note.emoji is plain non-emoji text (defensive)', () => {
+    const note = buildNote({ emoji: 'ab' });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('emoji: "📝"');
+  });
+
+  it('falls back to 📝 when note.emoji is a single non-emoji character like "a" (defensive)', () => {
+    // セグメント数は1だが絵文字ではない: \p{Extended_Pictographic} 判定で弾かれる
+    // (issue #76 CodeRabbit レビュー)。
+    const note = buildNote({ emoji: 'a' });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('emoji: "📝"');
+  });
+
+  it('keeps a ZWJ-joined emoji sequence unchanged (single grapheme cluster despite multiple code points)', () => {
+    const note = buildNote({ emoji: '👨‍👩‍👧‍👦' });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('emoji: "👨‍👩‍👧‍👦"');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -144,6 +192,133 @@ describe('renderZennArticle topics', () => {
     const note = buildNote({ tags: ['already-plain'] });
     const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
     expect(article.artifact).toContain('topics: ["already-plain"]');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// topics サニタイズ(design.md §5.7 Zenn 行、issue #76。`resolveQiitaTags` のテストを
+// 参照実装とする)。
+// ---------------------------------------------------------------------------
+
+describe('renderZennArticle topics sanitization (issue #76)', () => {
+  it('drops tags that become empty after stripping the leading "#" and logs a warning', () => {
+    const note = buildNote({
+      uuid: 'note-under-test',
+      title: 'Empty Topic Test',
+      tags: ['#', '#typescript'],
+    });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('topics: ["typescript"]');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      service: 'zenn',
+      noteUuid: 'note-under-test',
+      title: 'Empty Topic Test',
+    });
+    expect(warnings[0]?.message).toContain('empty');
+  });
+
+  it('drops tags containing a half-width space and logs a warning with service/noteUuid/title', () => {
+    const note = buildNote({
+      uuid: 'note-under-test',
+      title: 'Space Test',
+      tags: ['#good-tag', '#has space', '#another good'],
+    });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('topics: ["good-tag"]');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      service: 'zenn',
+      noteUuid: 'note-under-test',
+      title: 'Space Test',
+    });
+    expect(warnings[0]?.message).toContain('has space');
+    expect(warnings[0]?.message).toContain('another good');
+  });
+
+  it('truncates to the first 5 topics when more than 5 remain, and logs a warning', () => {
+    const note = buildNote({
+      uuid: 'note-under-test',
+      title: 'Truncate Test',
+      tags: ['#a', '#b', '#c', '#d', '#e', '#f', '#g'],
+    });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('topics: ["a","b","c","d","e"]');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      service: 'zenn',
+      noteUuid: 'note-under-test',
+      title: 'Truncate Test',
+    });
+    expect(warnings[0]?.message).toMatch(/truncated/i);
+  });
+
+  it('applies the space-drop before the 5-topic truncation (design.md §5.7 order)', () => {
+    // 7 topics total; 2 contain spaces. After dropping spaces: 5 remain (exactly the limit,
+    // so no truncation warning should fire).
+    const note = buildNote({
+      tags: ['#a', '#b c', '#c', '#d', '#e', '#f g', '#g'],
+    });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('topics: ["a","c","d","e","g"]');
+    expect(warnings).toHaveLength(1); // only the space-drop warning, no truncation warning
+    expect(warnings[0]?.message).toMatch(/space/i);
+  });
+
+  it('produces an empty topics array (no throw) when 0 topics remain after sanitization', () => {
+    const note = buildNote({ uuid: 'no-topics-note', tags: ['#has space', '#also has space'] });
+    const { logger, warnings } = createFakeLogger();
+    const article = renderZennArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      logger,
+    });
+
+    expect(article.artifact).toContain('topics: []');
+    // Both spaced tags dropped in one warning; no "no topics remaining" error is thrown
+    // (Zenn allows empty topics, unlike Qiita's QiitaNoTagsRemainingError).
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('does not throw when logger is not provided but a warning would otherwise fire', () => {
+    const note = buildNote({ tags: ['#ok', '#has space'] });
+    expect(() =>
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null }),
+    ).not.toThrow();
   });
 });
 

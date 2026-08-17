@@ -203,6 +203,12 @@ hatena:
 | Hugo | `<output_dir>/<uuid>.md` | `title` / `date` / `lastmod` / `categories: [フォルダ名]` / `tags` | `output_dir` は任意(例 `content/posts`) |
 | Jekyll | `_posts/YYYY-MM-DD-<uuid>.md` | `title` / `date` / `categories` / `tags` | 日付は作成日。初回配信時のファイル名を状態ファイルに記録し、以後は作成日が変わっても記録済みのファイル名を使い続けます(URL の安定性を優先) |
 
+#### Zenn
+
+- Zenn との連携は **GitHub リポジトリ連携のみ**を前提にしています。`articles/` にファイルを置いて対象リポジトリへ push すれば Zenn 側が取り込むため、`zenn-cli` のインストール・実行は一切不要です(依存にも含めていません)
+- `topics` は Apple Notes のハッシュタグ由来で、Zenn 公式ガイド([zenn-cli-guide](https://zenn.dev/zenn/articles/zenn-cli-guide))の制約に合わせてサニタイズします: 先頭の `#` を除去し、除去後に空になったタグ・半角スペースを含むタグは警告つきで除外し、6個以上残る場合は先頭5個に切り詰めます(公式ガイドが明記する上限)。サニタイズ後に0個になっても失敗にはせず、`topics: []` を出力します(Zenn は `topics` の省略・空配列を許容するため)
+- slug(ファイル名)はノート UUID を小文字化した値で、Zenn 公式ガイドの制約(半角英小文字・数字・ハイフン・アンダースコアの12〜50字)に適合していることを検証済みです
+
 ### Qiita
 
 - 認証は `qiita.token_env` が指す環境変数(サンプルは `QIITA_TOKEN`)から読み、`@qiita/qiita-cli` の子プロセスへは **常に `QIITA_TOKEN` という固定名**で渡します(qiita-cli 自身がこの名前でしか環境変数を見ないため)
