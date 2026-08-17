@@ -933,38 +933,103 @@ describe('runSync', () => {
   // (FR-24)。cli.ts が config.service === 'zenn' のとき自動的に選ぶ Renderer
   // (`src/publishers/factory.ts` の `resolveRenderer`)を、ここでは明示的に `renderNote` へ
   // 注入して runSync レベルで検証する。fixture のフォルダ名(Tech/Archive/Dev/Ops: Log)は
-  // どれも Zenn の type 制約(厳密に tech/idea)を満たさないため、対象ノートの `folder`
-  // フィールドだけを JSON 上で書き換えて「有効な type」と「無効な type」を混在させる
-  // (folder_key はそのままなので source.folders によるフィルタ対象からは外れない)。
+  // どれも Zenn の type 制約(フォルダパスを葉から根へ遡り、最初に一致した tech/idea を採用)
+  // を満たさないため、対象ノート1件だけを JSON 上で新設した `tech`/`idea` 子フォルダへ
+  // 付け替えて(`folder_key`/`folder` の両方を更新)「有効な type」と「無効な type」を
+  // 混在させる。新フォルダは元の親フォルダのサブツリー内にあるため、`source.folders` による
+  // 対象ノートの絞り込み結果は変わらない(実際の運用——親フォルダの下に `tech`/`idea`
+  // サブフォルダを作る——をそのまま模した経路)。
   // ---------------------------------------------------------------------------
 
   describe('with the real Zenn renderer (T-17)', () => {
     /**
-     * コピー済み fixture の `json/all_notes_1.json` を読み、指定した note key(JSON トップ
-     * レベルの `notes` のキー。UUID ではない)の `folder` フィールドだけを書き換える。
-     * `folder_key`(フォルダ階層によるフィルタに使われる)には触れないため、
-     * `source.folders` による対象ノートの絞り込み結果は変わらない。
+     * fixture JSON の `folders` ツリーの1エントリの最小形(`addTypeSubfolder` が使うフィールド
+     * のみ)。`account` は `src/exporter/apple-notes.ts` の `folderJsonSchema` が必須とするため、
+     * 新設フォルダにも必ず含める。
      */
-    async function rewriteNoteFolder(
+    interface FixtureFolderJson {
+      primary_key: number;
+      name: string;
+      account: string;
+      parent_folder_id: number | null;
+      child_folders: Record<string, FixtureFolderJson>;
+    }
+
+    /** `folders` ツリーを再帰的に辿り、`primary_key` が一致するフォルダを探す。 */
+    function findFolderByPk(
+      folders: Record<string, FixtureFolderJson>,
+      pk: number,
+    ): FixtureFolderJson | undefined {
+      for (const folder of Object.values(folders)) {
+        if (folder.primary_key === pk) {
+          return folder;
+        }
+        const found = findFolderByPk(folder.child_folders, pk);
+        if (found !== undefined) {
+          return found;
+        }
+      }
+      return undefined;
+    }
+
+    /**
+     * コピー済み fixture の `json/all_notes_1.json` を読み、`parentFolderPk` の下に
+     * `newFolderName`(`tech`/`idea`)という名前の子フォルダ(primary_key `newFolderPk`)を
+     * 追加したうえで、指定した note key(JSON トップレベルの `notes` のキー。UUID ではない)
+     * をその新フォルダへ付け替える(`folder_key`/`folder` の両方を更新)。新フォルダは
+     * `parentFolderPk` のサブツリーの内側にあるため、`source.folders` による対象ノートの
+     * 絞り込み結果は変わらない。
+     */
+    async function addTypeSubfolder(
       outDir: string,
-      noteKey: string,
-      folder: string,
+      params: {
+        parentFolderPk: number;
+        newFolderPk: number;
+        newFolderName: 'tech' | 'idea';
+        noteKey: string;
+      },
     ): Promise<void> {
       const jsonPath = join(outDir, 'json', 'all_notes_1.json');
       const raw = JSON.parse(await readFile(jsonPath, 'utf8')) as {
-        notes: Record<string, { folder: string }>;
+        folders: Record<string, FixtureFolderJson>;
+        notes: Record<string, { folder: string; folder_key: number | string }>;
       };
-      const note = raw.notes[noteKey];
-      if (note === undefined) {
-        throw new Error(`test fixture: note key "${noteKey}" not found in ${jsonPath}`);
+      const parentFolder = findFolderByPk(raw.folders, params.parentFolderPk);
+      if (parentFolder === undefined) {
+        throw new Error(
+          `test fixture: folder primary_key ${String(params.parentFolderPk)} not found in ${jsonPath}`,
+        );
       }
-      note.folder = folder;
+      parentFolder.child_folders[String(params.newFolderPk)] = {
+        primary_key: params.newFolderPk,
+        name: params.newFolderName,
+        account: parentFolder.account,
+        parent_folder_id: params.parentFolderPk,
+        child_folders: {},
+      };
+
+      const note = raw.notes[params.noteKey];
+      if (note === undefined) {
+        throw new Error(`test fixture: note key "${params.noteKey}" not found in ${jsonPath}`);
+      }
+      note.folder_key = params.newFolderPk;
+      note.folder = params.newFolderName;
+
       await writeFile(jsonPath, JSON.stringify(raw), 'utf8');
     }
 
-    it('isolates the invalid-type note: 1 note with folder rewritten to "tech" publishes, the other 3 (Tech/Tech/Archive) fail with InvalidZennTypeError, exit 1', async () => {
+    it('isolates the invalid-type note: 1 note moved into a new "tech" subfolder publishes, the other 3 (Tech/Tech/Archive) fail with InvalidZennTypeError, exit 1', async () => {
       // fixture note key "201" == uuid TECH_SALES_TABLE_UUID(folder "Tech" in the raw JSON).
-      const { runner } = makeFixtureRunner((outDir) => rewriteNoteFolder(outDir, '201', 'tech'));
+      // Tech(primary_key 10)の下に "tech" 子フォルダ(primary_key 99)を新設し、201 を
+      // そこへ付け替える → folderPath ['Tech', 'tech'] → type "tech"。
+      const { runner } = makeFixtureRunner((outDir) =>
+        addTypeSubfolder(outDir, {
+          parentFolderPk: 10,
+          newFolderPk: 99,
+          newFolderName: 'tech',
+          noteKey: '201',
+        }),
+      );
       const { logger, events } = createFakeLogger();
       const mock = createMockPublisher({ withPrepare: true, withFinalize: true });
 
@@ -975,8 +1040,8 @@ describe('runSync', () => {
         ...baseOptions({ runner, tmpDirFactory: async () => exportWorkDir, logger }),
       });
 
-      // Tech ルート3件(201 tech に書き換え済み/202 Tech のまま/203 Tech のまま)
-      // + Archive(Tech 配下)1件(204 Archive のまま)= 4件、うち folder "tech" の1件のみ成功。
+      // Tech ルート3件(201 は新設した Tech/tech へ付け替え済み/202 Tech のまま/203 Tech のまま)
+      // + Archive(Tech 配下)1件(204 Archive のまま)= 4件、うち type "tech" の1件のみ成功。
       expect(result).toMatchObject({
         exitCode: PARTIAL_FAILURE,
         published: 1,
@@ -1003,8 +1068,17 @@ describe('runSync', () => {
     });
 
     it('all notes valid ("tech"/"idea"): every note publishes via the real Zenn renderer', async () => {
+      // Archive(primary_key 11)の下に "idea" 子フォルダ(primary_key 98)を新設し、
+      // Archive/🚀 Launch Notes(note key 204)をそこへ付け替える。source.folders は
+      // ['Archive'] なので folderPath は一致ルートの Archive から始まる ['Archive', 'idea']
+      // (未選択の祖先 'Tech' は含まれない)→ type "idea"。
       const { runner } = makeFixtureRunner(async (outDir) => {
-        await rewriteNoteFolder(outDir, '204', 'idea'); // Archive/🚀 Launch Notes → idea
+        await addTypeSubfolder(outDir, {
+          parentFolderPk: 11,
+          newFolderPk: 98,
+          newFolderName: 'idea',
+          noteKey: '204',
+        });
       });
       const { logger } = createFakeLogger();
       const mock = createMockPublisher({ withPrepare: true, withFinalize: true });

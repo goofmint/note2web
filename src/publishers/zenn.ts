@@ -10,8 +10,20 @@
  *
  * design.md §5.7 Zenn 行:
  * `articles/<uuid小文字>.md` / `title`・`emoji`・`type`・`topics`・`published: true` /
- * 「slug = UUID 小文字化(FR-23)。`type` はフォルダ名。`tech`/`idea` 以外のフォルダ名なら
- * 設定不正としてそのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`」。
+ * 「slug = UUID 小文字化(FR-23)。`type` はノートのフォルダパス(`Note#folderPath`。
+ * ルート=`source.folders` で一致したフォルダから葉まで)を葉から根へ遡り、最初に
+ * `tech`/`idea` と完全一致したフォルダ名を採用する。どの祖先も一致しなければ設定不正として
+ * そのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`」。
+ *
+ * **フォルダパスベースの `type` 判別(2026-08-17 利用者リクエスト、サブフォルダ経由の
+ * type 判別)**: 当初(FR-24 初版)は葉フォルダ名(`Note#folder`)が `tech`/`idea` そのもので
+ * あることを要求していた。利用者が Apple Notes 側で親フォルダ(例 `Zenn`)の下に
+ * `tech`/`idea` サブフォルダを作り、記事ノートをその下に置く運用(`source.folders: [Zenn]`
+ * のように親フォルダだけを指定し、サブツリー全体をエクスポート対象にする)を求めたため、
+ * 葉フォルダ名だけでなく祖先フォルダ名も許容するよう拡張した。葉に最も近い一致を優先する
+ * ことで、`Zenn/idea/tech` のようなネストでも直感通り `tech` が採用される。
+ * `folders: [tech, idea]` と直接指定する従来構成(`folderPath` が `['tech']` 等の単一要素に
+ * なる)は後方互換のまま動く。
  *
  * **`type` 不正エラーはレンダリング段で投げ、`prepare()` では投げない**: `src/sync.ts` の
  * `processNote` は `renderNote(...)` 呼び出しを独立した `try/catch` で囲んでおり、ここで
@@ -57,25 +69,29 @@ const ZENN_ALLOWED_TYPES = ['tech', 'idea'] as const;
 type ZennType = (typeof ZENN_ALLOWED_TYPES)[number];
 
 /**
- * ノートのフォルダ名が Zenn の `type` として許可された値(`tech`/`idea`)以外だったことを
- * 表す(design.md §5.7「`tech`/`idea` 以外のフォルダ名なら設定不正としてそのノートを
- * 失敗扱い」、FR-24)。`src/sync.ts` の `processNote` がこの例外を捕捉し、当該ノートのみ
- * `'failed'` として隔離する(他ノートは継続。NFR-06)。
+ * ノートのフォルダパス(`Note#folderPath`)を葉から根まで遡っても、どの要素も Zenn の
+ * `type` として許可された値(`tech`/`idea`)と完全一致しなかったことを表す(design.md
+ * §5.7「フォルダパスを葉から根へ遡り、最初に一致した `tech`/`idea` を `type` に採用。
+ * 一致しなければ設定不正としてそのノートを失敗扱い」、FR-24)。`src/sync.ts` の
+ * `processNote` がこの例外を捕捉し、当該ノートのみ `'failed'` として隔離する
+ * (他ノートは継続。NFR-06)。
  */
 export class InvalidZennTypeError extends Error {
   /** 検証に失敗したノートの UUID(ログでどのノートかを特定するため)。 */
   readonly noteUuid: string;
-  /** 実際のフォルダ名(許可値でなかったもの)。 */
-  readonly folder: string;
+  /** 実際のフォルダパス(根から葉の順。どの要素も許可値でなかったもの)。 */
+  readonly folderPath: readonly string[];
 
-  constructor(noteUuid: string, folder: string) {
+  constructor(noteUuid: string, folderPath: readonly string[]) {
     super(
-      `Zenn requires a note's folder to be exactly "tech" or "idea" to use as \`type\` ` +
-        `(design.md §5.7, FR-24); note "${noteUuid}" has folder ${JSON.stringify(folder)}`,
+      `Zenn requires the note's folder or one of its ancestor folders to be named exactly "tech" ` +
+        `or "idea" to use as \`type\` (design.md §5.7, FR-24); note "${noteUuid}" is in folder ` +
+        `path "${folderPath.join('/')}" — create a "tech" or "idea" subfolder in Apple Notes ` +
+        `(e.g. "Zenn/tech") and move the note into it`,
     );
     this.name = 'InvalidZennTypeError';
     this.noteUuid = noteUuid;
-    this.folder = folder;
+    this.folderPath = folderPath;
   }
 }
 
@@ -116,12 +132,19 @@ const ZENN_DEFAULT_EMOJI = '📝';
 /** Zenn のファイルパスは `output_dir` 設定に関わらず常にこの固定ディレクトリ(design.md §7「zenn は articles 固定」)。 */
 const ZENN_ARTICLES_DIR = 'articles';
 
-/** `note.folder` を Zenn の `type` として検証する(FR-24)。不正なら `InvalidZennTypeError`。 */
-function resolveZennType(noteUuid: string, folder: string): ZennType {
-  if ((ZENN_ALLOWED_TYPES as readonly string[]).includes(folder)) {
-    return folder as ZennType;
+/**
+ * `note.folderPath` を葉から根へ遡り、最初に一致した `tech`/`idea`(大文字小文字を区別する
+ * 完全一致)を Zenn の `type` として採用する(FR-24)。どの要素も一致しなければ
+ * `InvalidZennTypeError`。
+ */
+function resolveZennType(noteUuid: string, folderPath: readonly string[]): ZennType {
+  for (let i = folderPath.length - 1; i >= 0; i -= 1) {
+    const name = folderPath[i];
+    if ((ZENN_ALLOWED_TYPES as readonly string[]).includes(name)) {
+      return name as ZennType;
+    }
   }
-  throw new InvalidZennTypeError(noteUuid, folder);
+  throw new InvalidZennTypeError(noteUuid, folderPath);
 }
 
 /** `note.uuid` を小文字化して slug を求め、Zenn の制約を検証する(FR-23)。 */
@@ -263,7 +286,7 @@ export const renderZennArticle: NoteRenderer = ({
   markdown,
   logger,
 }: RenderNoteInput): RenderedArticle => {
-  const type = resolveZennType(note.uuid, note.folder);
+  const type = resolveZennType(note.uuid, note.folderPath);
   const slug = resolveZennSlug(note.uuid);
   const emoji = resolveZennEmoji(note.emoji);
   const topics = resolveZennTopics({

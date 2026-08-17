@@ -6,9 +6,21 @@ import type { Logger, WarnPayload } from '../logger.js';
 import { computeContentHash } from '../transform/frontmatter.js';
 
 function buildNote(overrides: Partial<Note> = {}): Note {
+  // Note の不変条件「`folder` は `folderPath` の最終要素と一致する」(src/model/note.ts)を
+  // fixture でも維持する: `folderPath` だけが指定されたら `folder` を末尾要素から導出し、
+  // 両方指定されて食い違う場合はテストの書き誤りとして即座に失敗させる。
+  const folder = overrides.folder ?? overrides.folderPath?.at(-1) ?? 'tech';
+  const folderPath = overrides.folderPath ?? [folder];
+  if (folderPath.at(-1) !== folder) {
+    throw new Error(
+      `buildNote: folder ${JSON.stringify(folder)} must equal the last element of ` +
+        `folderPath ${JSON.stringify(folderPath)}`,
+    );
+  }
   return {
     uuid: '5c1c2c3d-0000-0000-0000-000000000001',
-    folder: 'tech',
+    folder,
+    folderPath,
     title: 'Hello World',
     emoji: null,
     tags: [],
@@ -323,7 +335,8 @@ describe('renderZennArticle topics sanitization (issue #76)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// type 検証(design.md §5.7「tech/idea 以外のフォルダ名なら…そのノートを失敗扱い」、FR-24)。
+// type 検証(design.md §5.7「フォルダパスを葉から根へ遡り、最初に一致した tech/idea を
+// type に採用。一致が無ければそのノートを失敗扱い」、FR-24)。
 // ---------------------------------------------------------------------------
 
 describe('renderZennArticle type validation (FR-24)', () => {
@@ -341,6 +354,30 @@ describe('renderZennArticle type validation (FR-24)', () => {
     ).not.toThrow();
   });
 
+  it('resolves type "tech" from a nested folderPath (e.g. Zenn/tech)', () => {
+    const note = buildNote({ folder: 'tech', folderPath: ['Zenn', 'tech'] });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('type: "tech"');
+  });
+
+  it('resolves type "idea" from a nested folderPath (e.g. Zenn/idea)', () => {
+    const note = buildNote({ folder: 'idea', folderPath: ['Zenn', 'idea'] });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('type: "idea"');
+  });
+
+  it('picks the nearest ancestor "tech" when the leaf is a non-matching subfolder (Zenn/tech/drafts)', () => {
+    const note = buildNote({ folder: 'drafts', folderPath: ['Zenn', 'tech', 'drafts'] });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('type: "tech"');
+  });
+
+  it('prefers the leaf-nearest match when multiple ancestors match (Zenn/idea/tech → tech)', () => {
+    const note = buildNote({ folder: 'tech', folderPath: ['Zenn', 'idea', 'tech'] });
+    const article = renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifact).toContain('type: "tech"');
+  });
+
   it.each(['Archive', 'Tech', 'Dev/Ops: Log', ''])(
     'throws InvalidZennTypeError for folder %j (not exactly tech/idea)',
     (folder) => {
@@ -351,7 +388,27 @@ describe('renderZennArticle type validation (FR-24)', () => {
     },
   );
 
-  it('includes the offending folder and noteUuid in the thrown error', () => {
+  it('throws InvalidZennTypeError when no folder in the path matches (Zenn only, no tech/idea subfolder)', () => {
+    const note = buildNote({ folder: 'Zenn', folderPath: ['Zenn'] });
+    try {
+      renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+      expect.unreachable('renderZennArticle should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidZennTypeError);
+      const typedError = error as InvalidZennTypeError;
+      expect(typedError.message).toContain('Zenn');
+      expect(typedError.message).toContain('create a "tech" or "idea" subfolder');
+    }
+  });
+
+  it('is case-sensitive: "Tech" in the path does not match (exact match only)', () => {
+    const note = buildNote({ folder: 'Tech', folderPath: ['Tech'] });
+    expect(() => renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null })).toThrow(
+      InvalidZennTypeError,
+    );
+  });
+
+  it('includes the offending folder path and noteUuid in the thrown error', () => {
     const note = buildNote({ uuid: 'note-uuid-under-test', folder: 'Archive' });
     try {
       renderZennArticle({ note, markdown: 'body', config: CONFIG, prev: null });
@@ -359,10 +416,11 @@ describe('renderZennArticle type validation (FR-24)', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(InvalidZennTypeError);
       const typedError = error as InvalidZennTypeError;
-      expect(typedError.folder).toBe('Archive');
+      expect(typedError.folderPath).toEqual(['Archive']);
       expect(typedError.noteUuid).toBe('note-uuid-under-test');
       expect(typedError.message).toContain('Archive');
       expect(typedError.message).toContain('note-uuid-under-test');
+      expect(typedError.message).toContain('create a "tech" or "idea" subfolder');
     }
   });
 });

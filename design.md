@@ -104,7 +104,8 @@ note2web 独自の Ruby ドライバ(`ruby/note2web_export.rb` + `ruby/lib/note2
 ```ts
 interface Note {
   uuid: string;          // Apple Notes の UUID（FR-09）
-  folder: string;        // フォルダ名（FR-06）
+  folder: string;        // フォルダ名（FR-06）。folderPath の最終要素と常に一致
+  folderPath: string[];  // ルート(source.folders で一致したフォルダ)から葉までのフォルダ名の配列。Zenn の type 判別（FR-24）に使う
   title: string;         // 1行目から先頭絵文字を除去（FR-04）
   emoji: string | null;  // 1行目の1文字目（grapheme cluster、絵文字の場合のみ）（FR-05）
   tags: string[];        // ノート内ハッシュタグ（FR-07）
@@ -115,7 +116,7 @@ interface Note {
 }
 ```
 
-- **JSON フィールドとの対応(§13-7 で確定)**: `uuid` ← JSON ノートオブジェクトの `uuid`、`folder` ← 同 `folder`(フォルダ名の文字列。フォルダ階層自体が必要な場合は JSON トップレベルの `folders`(`parent_folder_id` / `child_folders` で表現される入れ子構造)を別途辿る)、`createdAt` ← `creation_time`、`updatedAt` ← `modify_time`(いずれも `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列。固定書式のため専用パーサ不要)、`bodyHtml` ← 個別 HTML ファイル(JSON の `html` フィールドではない。§5.2 参照)
+- **JSON フィールドとの対応(§13-7 で確定)**: `uuid` ← JSON ノートオブジェクトの `uuid`、`folder` ← 同 `folder`(フォルダ名の文字列)、`folderPath` ← JSON トップレベルの `folders`(`parent_folder_id` / `child_folders` で表現される入れ子構造)を `folder_key` から親へ辿って組み立てる(Exporter が `buildFolderPath` で解決。§5.2)、`createdAt` ← `creation_time`、`updatedAt` ← `modify_time`(いずれも `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列。固定書式のため専用パーサ不要)、`bodyHtml` ← 個別 HTML ファイル(JSON の `html` フィールドではない。§5.2 参照)
   - **差分(調査により判明)**: 当初想定していなかったが、JSON のノートオブジェクトは `hashtags`(例 `["#タグ"]`)フィールドを**パーサ自身が抽出済み**の形で持つ(`lib/AppleNote.rb` `prepare_json`。埋め込みオブジェクト中の `AppleNotesEmbeddedInlineHashtag` を機械的に収集したもの)。したがって `tags` は本文 HTML の正規表現走査ではなく、この JSON の `hashtags` を第一の情報源とする方が頑健(絵文字や記号を含むタグの誤検出を避けられる)。ただし JSON の `hashtags` は「本文中のインラインタグ」と「タグ置き場として末尾に置かれた行のタグ」を区別しない一覧に過ぎず、**本文からタグのみの行を除去するかどうかの判定(下記)は引き続き HTML 側のテキスト解析が必要**であるため、`tags` の値の取得元だけを JSON に置き換え、本文除去ロジックは変更しない
 - **1行目**: HTML 中の最初のブロック要素のテキストとする
 - **絵文字判定**: `Intl.Segmenter` で先頭 grapheme を取得し、`\p{Extended_Pictographic}` にマッチする場合のみ絵文字として扱う。絵文字だった場合、タイトルは先頭 grapheme と直後の空白を除去した残り
@@ -193,7 +194,7 @@ interface Publisher {
 
 | | ファイルパス | frontmatter | 備考 |
 |---|---|---|---|
-| Zenn | `articles/<uuid小文字>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | slug = UUID 小文字化(FR-23)。`type` はフォルダ名。`tech` / `idea` 以外のフォルダ名なら設定不正としてそのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`(Zenn は emoji 必須のため)。`topics` の制約(最大5個、半角スペース含みタグは警告除外)は下記「Zenn の連携前提と topics/slug 制約」参照 |
+| Zenn | `articles/<uuid小文字>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | slug = UUID 小文字化(FR-23)。`type` はフォルダパス(`Note#folderPath`)を葉から遡って最初に一致した `tech` / `idea`。例として `source.folders: [Zenn]` + `Zenn/tech` サブフォルダ。どの祖先も一致しなければそのノートを失敗扱い(FR-24)。絵文字が無いノートは既定値 `📝`(Zenn は emoji 必須のため)。`topics` の制約(最大5個、半角スペース含みタグは警告除外)は下記「Zenn の連携前提と topics/slug 制約」参照 |
 | Hugo | `<output_dir>/<uuid>.md` | `title` / `date`(作成日時)/ `lastmod`(更新日時)/ `categories: [フォルダ名]` / `tags` | `output_dir` は設定で指定(例 `content/posts`) |
 | Jekyll | `_posts/YYYY-MM-DD-<uuid>.md` | `title` / `date` / `categories` / `tags` | 日付は作成日。初回のファイル名を状態に記録し固定(§4) |
 
@@ -311,7 +312,7 @@ sync:
 service: zenn                  # zenn | hugo | jekyll | qiita | devto | note | hatena
 timezone: Asia/Tokyo           # frontmatter 日時の固定オフセット（ハッシュ安定化のため。既定 Asia/Tokyo）
 source:
-  folders: [tech, idea]        # 配信対象フォルダ（FR-02）。Zenn ではフォルダ名が type になる
+  folders: [tech, idea]        # 配信対象フォルダ（FR-02）。Zenn ではフォルダパスを葉から遡って一致した tech/idea が type になる（§5.7、FR-24）
 exporter:
   parser_path: ~/tools/apple_cloud_notes_parser   # clone 先
   notes_container: ~/Library/Group Containers/group.com.apple.notes  # 既定値

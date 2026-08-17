@@ -1,4 +1,4 @@
-import { cp, rm } from 'node:fs/promises';
+import { cp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -244,6 +244,90 @@ describe('exportAppleNotes', () => {
     const opsLog = byUuid.get('eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee');
     expect(opsLog?.folder).toBe('Dev/Ops: Log');
     expect(opsLog?.bodyHtml).toContain('id="note_eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee"');
+  });
+
+  it('populates folderPath with the ancestor chain from the matched root folder to the leaf (Note#folderPath, FR-24)', async () => {
+    const { runner } = makeFixtureRunner();
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech', 'Dev/Ops: Log'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    const byUuid = new Map(result.notes.map((note) => [note.uuid, note]));
+
+    // Tech(primary_key 10、ルート)直下のノート → folderPath は葉のみの単一要素。
+    const salesTable = byUuid.get('44444444-4444-4444-8444-444444444444');
+    expect(salesTable?.folderPath).toEqual(['Tech']);
+
+    // Tech/Archive(primary_key 11、Tech の子)配下のノート → folderPath は根から葉まで。
+    const launch = byUuid.get('77777777-7777-4777-8777-777777777777');
+    expect(launch?.folderPath).toEqual(['Tech', 'Archive']);
+
+    // `folder`(葉フォルダ名)は常に folderPath の最終要素と一致する。
+    expect(salesTable?.folderPath.at(-1)).toBe(salesTable?.folder);
+    expect(launch?.folderPath.at(-1)).toBe(launch?.folder);
+  });
+
+  it('starts folderPath at the matched root, excluding unselected ancestors (nested source.folders selection)', async () => {
+    // 一致したフォルダが JSON ツリーのトップレベルにない(=選択したフォルダの上に未選択の
+    // 祖先がいる)ケースの回帰テスト(PR #79 CodeRabbit レビュー)。契約(src/model/note.ts)は
+    // 「folderPath は `source.folders` で一致したフォルダから葉まで」であり、未選択の祖先を
+    // 含めてはならない。fixture の Tech(pk 10)/Archive(pk 11)ツリーに対し、Archive の下へ
+    // `tech` 子フォルダ(pk 99)を新設してノート 204 を付け替え、`folders: ['Archive']` で
+    // 選択する → folderPath は ['Archive', 'tech'](祖先 'Tech' は含まれない)。
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const raw = JSON.parse(await readFile(jsonPath, 'utf8')) as {
+        folders: Record<
+          string,
+          {
+            primary_key: number;
+            name: string;
+            account: string;
+            parent_folder_id: number | null;
+            child_folders: Record<string, unknown>;
+          }
+        >;
+        notes: Record<string, { folder: string; folder_key: number | string }>;
+      };
+      const techRoot = raw.folders['10'];
+      if (techRoot === undefined) {
+        throw new Error(`test fixture: folder key "10" not found in ${jsonPath}`);
+      }
+      const archive = techRoot.child_folders['11'] as (typeof raw.folders)[string] | undefined;
+      if (archive === undefined) {
+        throw new Error(`test fixture: child folder key "11" not found in ${jsonPath}`);
+      }
+      archive.child_folders['99'] = {
+        primary_key: 99,
+        name: 'tech',
+        account: archive.account,
+        parent_folder_id: 11,
+        child_folders: {},
+      };
+      const launchNote = raw.notes['204'];
+      if (launchNote === undefined) {
+        throw new Error(`test fixture: note key "204" not found in ${jsonPath}`);
+      }
+      launchNote.folder_key = 99;
+      launchNote.folder = 'tech';
+      await writeFile(jsonPath, JSON.stringify(raw), 'utf8');
+    });
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Archive'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    // Archive サブツリーに属するのはノート 204(付け替え後は Archive/tech 配下)のみ。
+    expect(result.notes).toHaveLength(1);
+    const launch = result.notes[0];
+    expect(launch?.uuid).toBe('77777777-7777-4777-8777-777777777777');
+    expect(launch?.folderPath).toEqual(['Archive', 'tech']);
+    expect(launch?.folder).toBe('tech');
   });
 
   it('applies source.folders as a subtree filter (FR-02, defense-in-depth) restricted to one root folder', async () => {
