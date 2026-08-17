@@ -267,8 +267,12 @@ module Note2webAttachmentScopeGuard
     def back_up_file(*args)
       in_scope_ids = Note2webAttachmentScopeGuard.in_scope_folder_ids
       folder_id = Note2webAttachmentScopeGuard.current_folder_id
-      if in_scope_ids && !folder_id.nil? && !Note2webExportCore.folder_in_scope?(folder_id, in_scope_ids)
-        return nil # 対象外ノートの添付: コピーをスキップする(フェイルクローズはここだけ)。
+      # スコープ設定後(in_scope_ids が非 nil)は、フォルダ id が取得できなかった
+      # (nil の)場合も対象外として扱いコピーしない(フェイルクローズ)。対象フォルダ
+      # 限定の要件を優先する(CodeRabbit レビュー)。フェイルオープンはスコープ未設定
+      # (rip_folders 前)の場合のみ。folder_in_scope? は nil に対して false を返す。
+      if in_scope_ids && !Note2webExportCore.folder_in_scope?(folder_id, in_scope_ids)
+        return nil # 対象外ノートの添付: コピーをスキップする。
       end
 
       super

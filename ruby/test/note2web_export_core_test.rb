@@ -197,7 +197,8 @@ class Note2webExportCoreTest < Minitest::Test
   end
 
   def test_folder_in_scope_false_for_nil_folder_id
-    # フェイルオープンの判断自体は呼び出し側の責務(この関数は素直に false を返すだけ)。
+    # スコープ設定後にフォルダ id が取得できなかった(nil の)添付は対象外として扱う
+    # (BackupFileGuard はこの false を受けてコピーをスキップする = フェイルクローズ)。
     refute Note2webExportCore.folder_in_scope?(nil, Set[10, 11])
   end
 
