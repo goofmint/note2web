@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, type Mock } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { NOTE2WEB_EXPORT_SCRIPT_PATH } from './exporter/apple-notes.js';
 import { InitError, runInit, type InitPromptFn, type RunInitOptions } from './init.js';
 
 /**
@@ -47,11 +48,21 @@ function createFakeFs(
   mkdirFn: (path: string) => Promise<void>;
   chmodFn: (path: string, mode: number) => Promise<void>;
 } {
-  // FAKE_CLI_ENTRYPOINT を既定で「存在するファイル」として含める(issue #71 レビュー:
-  // `runInit` が `resolveCliEntrypointFn()` の返すパスの実在を `fileExistsFn` で確認する
-  // ようになったため。個々のテストの `initialFiles` で明示的に上書き・削除はできない
-  // ——存在しないケースを検証したいテストは `resolveCliEntrypointFn` 側で別のパスを返す)。
-  const files = new Map(Object.entries({ [FAKE_CLI_ENTRYPOINT]: '', ...initialFiles }));
+  // FAKE_CLI_ENTRYPOINT / NOTE2WEB_EXPORT_SCRIPT_PATH を既定で「存在するファイル」として
+  // 含める(issue #71 レビュー: `runInit` が `resolveCliEntrypointFn()` の返すパスの実在を
+  // `fileExistsFn` で確認するようになったため。issue #73 レビュー Fix 5: 同様に
+  // `collectDependencyWarnings` が note2web 自身のエクスポートスクリプトの実在も確認する
+  // ようになったため、既定では「存在する」ことにしておき、欠如時の警告は専用テストで
+  // 個別に検証する)。`initialFiles` は既定エントリの後に展開されるため同じキーの値の
+  // 上書きはできるが、キーの削除はできない——存在しないケースを検証したいテストは
+  // `fileExistsFn` をラップする等の別の仕組みで実現する(下記専用テスト参照)。
+  const files = new Map(
+    Object.entries({
+      [FAKE_CLI_ENTRYPOINT]: '',
+      [NOTE2WEB_EXPORT_SCRIPT_PATH]: '',
+      ...initialFiles,
+    }),
+  );
   const dirs = new Set(initialDirs);
   const modes = new Map<string, number>();
   return {
@@ -414,6 +425,32 @@ describe('runInit', () => {
     expect(summary).toMatch(/git/);
     expect(summary).toMatch(/gh/);
     expect(summary).toMatch(/GH_TOKEN/);
+  });
+
+  it("warns when note2web's own bundled export script is missing (issue #73 Fix 5, parity with checkDependencies)", async () => {
+    // `src/dependencies.ts` の `checkDependencies` は `NOTE2WEB_EXPORT_SCRIPT_PATH` の実在を
+    // 既に検証している(`src/dependencies.test.ts` 参照)。`init` の依存案内
+    // (`collectDependencyWarnings`)も同じ入力を使って同じチェックを行うべき、というのが
+    // このテストの主張(以前は `init` 側だけこのチェックが漏れていた)。
+    const promptFn = makePromptFn(SERVICE_ANSWERS.zenn);
+    const fs = createFakeFs();
+    // NOTE2WEB_EXPORT_SCRIPT_PATH だけを「存在しない」ことにする(createFakeFs は既定で
+    // 「存在する」扱いにしているため、このテスト専用に fileExistsFn をラップする)。
+    const fileExistsFnWithoutExportScript = (path: string): Promise<boolean> =>
+      path === NOTE2WEB_EXPORT_SCRIPT_PATH ? Promise.resolve(false) : fs.fileExistsFn(path);
+    const result = await runInit(
+      buildOptions({
+        promptFn,
+        fileExistsFn: fileExistsFnWithoutExportScript,
+        readFileFn: fs.readFileFn,
+        writeFileFn: fs.writeFileFn,
+        env: {},
+      }),
+    );
+
+    const summary = result.summary.join('\n');
+    expect(summary).toContain(NOTE2WEB_EXPORT_SCRIPT_PATH);
+    expect(summary).toMatch(/\[依存\]/);
   });
 
   it('reports the noet dependency instructions for the note service without failing', async () => {

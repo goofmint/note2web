@@ -3,12 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { makeAssetPlaceholder, transformBody } from './body.js';
 
 /**
- * T-08(GitHub issue #13)のフィクスチャ(`test/fixtures/parser-output/html/`)を
- * そのまま入力に使う(design.md §5.4・issue #16 の要求どおり)。個別 HTML ファイルは
- * `<div class="note-content">` の外側にメタデータヘッダ(`Note <uuid>` / `Account:` /
- * `Folder:` / `Title:` / `Created:` / `Modified:`)を持つ、実際の parser 出力の構造。
+ * T-08(GitHub issue #13)のフィクスチャ(`test/fixtures/parser-output/html/`。issue #72
+ * で `html/<uuid>.html` のフラット構成へ更新)をそのまま入力に使う(design.md §5.4・
+ * issue #16 の要求どおり)。個別 HTML ファイルは `<div class="note-content">` の外側に
+ * メタデータヘッダ(`Note <uuid>` / `Account:` / `Folder:` / `Title:` / `Created:` /
+ * `Modified:`)を持つ、実際の note2web 独自スクリプトの出力構造。
  */
-const FIXTURES_DIR = 'test/fixtures/parser-output/html/note_store1';
+const FIXTURES_DIR = 'test/fixtures/parser-output/html';
 
 function readFixture(relativePath: string): string {
   return readFileSync(`${FIXTURES_DIR}/${relativePath}`, 'utf8');
@@ -58,9 +59,7 @@ describe('transformBody', () => {
 
   // (a) 表 → GFM の表(FR-11)。
   it('converts <table> to a GFM table, with the first (<td>-only) row promoted to the header', () => {
-    const bodyHtml = readFixture(
-      'Sample Notes-Tech/44444444-4444-4444-8444-444444444444 - Q3 Sales Table.html',
-    );
+    const bodyHtml = readFixture('44444444-4444-4444-8444-444444444444.html');
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe(
@@ -78,9 +77,7 @@ describe('transformBody', () => {
 
   // (b) チェックリスト(ネスト・checked/unchecked 混在)→ `- [x]` / `- [ ]`(FR-12)。
   it('converts a checklist (incl. nested, checked/unchecked) to GFM task list items', () => {
-    const bodyHtml = readFixture(
-      'Sample Notes-Tech/55555555-5555-4555-8555-555555555555 - Grocery Checklist.html',
-    );
+    const bodyHtml = readFixture('55555555-5555-4555-8555-555555555555.html');
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe(
@@ -98,9 +95,7 @@ describe('transformBody', () => {
 
   // (c) 添付・描画参照 → プレースホルダ(FR-13/FR-14)。
   it('converts a drawing reference (<a><img data-apple-notes-zidentifier>) to a bare image placeholder, not a linked image', () => {
-    const bodyHtml = readFixture(
-      'Sample Notes-Tech/66666666-6666-4666-8666-666666666666 - Whiteboard Sketch.html',
-    );
+    const bodyHtml = readFixture('66666666-6666-4666-8666-666666666666.html');
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe('![](note2web-asset://88888888-8888-4888-8888-888888888888)\n');
@@ -139,9 +134,7 @@ describe('transformBody', () => {
 
   // (d) タイトル行の除去(FR-04 との関係。タイトルは frontmatter へ)。
   it('removes the title line (first line) from the body', () => {
-    const bodyHtml = readFixture(
-      'Sample Notes-Dev_Ops_ Log/eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee - Ops Log.html',
-    );
+    const bodyHtml = readFixture('eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee.html');
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe('Deployed version 1.2.3 to production.\n');
@@ -150,9 +143,7 @@ describe('transformBody', () => {
 
   // (e) ハッシュタグのみの行の除去。文中のインラインなハッシュタグは残す(design.md §5.3)。
   it('removes a trailing hashtag-only line while keeping an inline hashtag inside prose', () => {
-    const bodyHtml = readFixture(
-      'Sample Notes-Tech/Archive/77777777-7777-4777-8777-777777777777 - 🚀 Launch Notes.html',
-    );
+    const bodyHtml = readFixture('77777777-7777-4777-8777-777777777777.html');
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe('We need better #planning this week before the launch.\n');

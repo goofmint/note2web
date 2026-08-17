@@ -8,15 +8,17 @@ import {
   DEFAULT_PARSER_PATH,
   ExportError,
   exportAppleNotes,
+  NOTE2WEB_EXPORT_SCRIPT_PATH,
   type SubprocessRunner,
 } from '../src/exporter/apple-notes.js';
 import type { Config } from '../src/config.js';
-import type { Logger } from '../src/logger.js';
+import type { Logger, WarnPayload } from '../src/logger.js';
 import { DEFAULT_TIMEOUTS, type RunSubprocessOptions } from '../src/subprocess.js';
 
 /**
- * T-08(GitHub issue #13)の成果物。読み取り専用として扱い、決してこのディレクトリ配下を
- * 書き換えない(コピー先の一時ディレクトリのみを操作する)。
+ * T-08(GitHub issue #13)の成果物、issue #72 で note2web 独自スクリプト
+ * (`ruby/note2web_export.rb`)の出力契約に合わせて構造更新。読み取り専用として扱い、
+ * 決してこのディレクトリ配下を書き換えない(コピー先の一時ディレクトリのみを操作する)。
  */
 const FIXTURE_ROOT = fileURLToPath(new URL('./fixtures/parser-output/', import.meta.url));
 
@@ -46,7 +48,7 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-/** `Logger` の全メソッドを `vi.fn()` にしたフェイク(`noteFailed` / `exportDone` を主に検証する)。 */
+/** `Logger` の全メソッドを `vi.fn()` にしたフェイク(`noteFailed` / `exportDone` / `warn` を主に検証する)。 */
 function createFakeLogger(): Logger {
   return {
     runStart: vi.fn(),
@@ -62,8 +64,8 @@ function createFakeLogger(): Logger {
 
 /**
  * T-05 のランナー契約(`RunSubprocessOptions` → `Promise<RunSubprocessResult>`)を満たす
- * フェイク。呼ばれると `-o` 引数が指す出力先ディレクトリへ T-08 の fixture ツリーを
- * 再帰コピーし(fixture 自体は書き換えない)、成功結果を返す。
+ * フェイク。呼ばれると `-o` 引数が指す出力先ディレクトリへ T-08/issue #72 の fixture
+ * ツリーを再帰コピーし(fixture 自体は書き換えない)、成功結果を返す。
  * `afterCopy` を渡すと、コピー完了後・結果を返す前に呼ばれる(HTML 欠落等の変異に使う)。
  */
 function makeFixtureRunner(afterCopy?: (outDir: string) => Promise<void>): {
@@ -100,12 +102,12 @@ describe('exportAppleNotes', () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it('sends the documented parser command shape (bundle exec ruby, the default launcher) and timeout to the runner', async () => {
+  it('sends the documented note2web_export.rb command shape (bundle exec ruby, the default launcher) and timeout to the runner', async () => {
     const { runner, calls } = makeFixtureRunner();
 
     const result = await exportAppleNotes({
       config: buildConfig({
-        source: { folders: ['Tech'] },
+        source: { folders: ['Tech', 'Dev/Ops: Log'] },
         exporter: {
           parser_path: '/opt/apple_cloud_notes_parser',
           notes_container: '/mnt/notes-container',
@@ -122,13 +124,17 @@ describe('exportAppleNotes', () => {
     expect(call?.args).toEqual([
       'exec',
       'ruby',
-      'notes_cloud_ripper.rb',
+      NOTE2WEB_EXPORT_SCRIPT_PATH,
       '-m',
       '/mnt/notes-container',
       '-o',
       workDir,
-      '--individual-files',
-      '--uuid',
+      '--parser-lib',
+      join('/opt/apple_cloud_notes_parser', 'lib'),
+      '--folder',
+      'Tech',
+      '--folder',
+      'Dev/Ops: Log',
     ]);
     expect(call?.cwd).toBe('/opt/apple_cloud_notes_parser');
     expect(call?.timeoutMs).toBe(DEFAULT_TIMEOUTS.parser);
@@ -155,13 +161,15 @@ describe('exportAppleNotes', () => {
     const call = calls[0];
     expect(call?.command).toBe('ruby');
     expect(call?.args).toEqual([
-      'notes_cloud_ripper.rb',
+      NOTE2WEB_EXPORT_SCRIPT_PATH,
       '-m',
       '/mnt/notes-container',
       '-o',
       workDir,
-      '--individual-files',
-      '--uuid',
+      '--parser-lib',
+      join('/opt/apple_cloud_notes_parser', 'lib'),
+      '--folder',
+      'Tech',
     ]);
     expect(call?.cwd).toBe('/opt/apple_cloud_notes_parser');
   });
@@ -185,7 +193,7 @@ describe('exportAppleNotes', () => {
     expect(call?.args[outIndex + 1]).toBe(join(homedir(), DEFAULT_NOTES_CONTAINER.slice(2)));
   });
 
-  it('resolves individual HTML uniquely for every note in configured folders (incl. symbol-named folder)', async () => {
+  it('resolves individual HTML directly by uuid (html/<uuid>.html, no folder-path resolution) for every note in configured folders', async () => {
     const { runner } = makeFixtureRunner();
 
     const result = await exportAppleNotes({
@@ -238,7 +246,7 @@ describe('exportAppleNotes', () => {
     expect(opsLog?.bodyHtml).toContain('id="note_eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee"');
   });
 
-  it('applies source.folders as a subtree filter (FR-02) restricted to one root folder', async () => {
+  it('applies source.folders as a subtree filter (FR-02, defense-in-depth) restricted to one root folder', async () => {
     const { runner } = makeFixtureRunner();
 
     const result = await exportAppleNotes({
@@ -260,7 +268,7 @@ describe('exportAppleNotes', () => {
     expect(result.failed).toEqual([]);
   });
 
-  it('applies source.folders as a subtree filter (FR-02) restricted to a nested child folder', async () => {
+  it('applies source.folders as a subtree filter (FR-02, defense-in-depth) restricted to a nested child folder', async () => {
     const { runner } = makeFixtureRunner();
 
     const result = await exportAppleNotes({
@@ -288,12 +296,7 @@ describe('exportAppleNotes', () => {
   });
 
   it('routes a note with an unresolvable individual HTML file to failed, logs noteFailed, and continues', async () => {
-    const missingHtmlRelativePath = join(
-      'html',
-      'note_store1',
-      'Sample Notes-Tech',
-      '55555555-5555-4555-8555-555555555555 - Grocery Checklist.html',
-    );
+    const missingHtmlRelativePath = join('html', '55555555-5555-4555-8555-555555555555.html');
     const { runner } = makeFixtureRunner(async (outDir) => {
       await rm(join(outDir, missingHtmlRelativePath), { force: true });
     });
@@ -334,6 +337,122 @@ describe('exportAppleNotes', () => {
     expect(logger.exportDone).toHaveBeenCalledWith({ noteCount: 3 });
   });
 
+  it('a long-title note resolves fine as long as its uuid-named HTML file exists (title only ever appears in JSON, never in the filename)', async () => {
+    const longTitle = 'x'.repeat(5000);
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const { readFile: read, writeFile } = await import('node:fs/promises');
+      const data = JSON.parse(await read(jsonPath, 'utf8')) as {
+        notes: Record<string, { title: string }>;
+      };
+      const note = data.notes['201'];
+      if (note === undefined) {
+        throw new Error('test setup: fixture note 201 not found');
+      }
+      note.title = longTitle;
+      await writeFile(jsonPath, JSON.stringify(data));
+    });
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    expect(result.failed).toEqual([]);
+    const salesTable = result.notes.find(
+      (note) => note.uuid === '44444444-4444-4444-8444-444444444444',
+    );
+    expect(salesTable).toBeDefined();
+  });
+
+  it('reports skipped_encrypted entries via logger.warn without adding them to notes or failed', async () => {
+    const logger = createFakeLogger();
+    const { runner } = makeFixtureRunner();
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech', 'Dev/Ops: Log'] } }),
+      runner,
+      logger,
+      tmpDirFactory: async () => workDir,
+    });
+
+    expect(result.notes.some((note) => note.uuid === 'ffffffff-6666-4fff-8fff-ffffffffffff')).toBe(
+      false,
+    );
+    expect(result.failed.some((note) => note.uuid === 'ffffffff-6666-4fff-8fff-ffffffffffff')).toBe(
+      false,
+    );
+
+    const warnCalls = vi.mocked(logger.warn).mock.calls.map(([payload]) => payload as WarnPayload);
+    const encryptedWarning = warnCalls.find(
+      (payload) => payload.noteUuid === 'ffffffff-6666-4fff-8fff-ffffffffffff',
+    );
+    expect(encryptedWarning).toBeDefined();
+    expect(encryptedWarning?.message).toMatch(/encrypt/i);
+    expect(encryptedWarning?.service).toBe('zenn');
+  });
+
+  it('reports skipped_errors entries via logger.warn without adding them to notes or failed', async () => {
+    const logger = createFakeLogger();
+    const { runner } = makeFixtureRunner();
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech', 'Dev/Ops: Log'] } }),
+      runner,
+      logger,
+      tmpDirFactory: async () => workDir,
+    });
+
+    expect(result.notes.some((note) => note.uuid === '12121212-7777-4121-8121-121212121212')).toBe(
+      false,
+    );
+    expect(result.failed.some((note) => note.uuid === '12121212-7777-4121-8121-121212121212')).toBe(
+      false,
+    );
+
+    const warnCalls = vi.mocked(logger.warn).mock.calls.map(([payload]) => payload as WarnPayload);
+    const errorWarning = warnCalls.find(
+      (payload) => payload.noteUuid === '12121212-7777-4121-8121-121212121212',
+    );
+    expect(errorWarning).toBeDefined();
+    expect(errorWarning?.service).toBe('zenn');
+  });
+
+  it('truncates long titles/errors to ~80 chars in the skipped_encrypted/skipped_errors warn message text', async () => {
+    const longTitle = 'A'.repeat(500);
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const { readFile: read, writeFile } = await import('node:fs/promises');
+      const data = JSON.parse(await read(jsonPath, 'utf8')) as {
+        skipped_encrypted: { uuid: string; title: string }[];
+      };
+      const entry = data.skipped_encrypted[0];
+      if (entry === undefined) {
+        throw new Error('test setup: fixture skipped_encrypted[0] not found');
+      }
+      entry.title = longTitle;
+      await writeFile(jsonPath, JSON.stringify(data));
+    });
+    const logger = createFakeLogger();
+
+    await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech', 'Dev/Ops: Log'] } }),
+      runner,
+      logger,
+      tmpDirFactory: async () => workDir,
+    });
+
+    const warnCalls = vi.mocked(logger.warn).mock.calls.map(([payload]) => payload as WarnPayload);
+    const encryptedWarning = warnCalls.find(
+      (payload) => payload.noteUuid === 'ffffffff-6666-4fff-8fff-ffffffffffff',
+    );
+    expect(encryptedWarning).toBeDefined();
+    // メッセージ本文中は切り詰められる(JSON の title 自体は切り詰めない。payload.title 参照)。
+    expect(encryptedWarning?.message.length).toBeLessThan(longTitle.length);
+    expect(encryptedWarning?.title).toBe(longTitle);
+  });
+
   it('throws a typed ExportError with the subprocess failure classification and the stderr first line (issue #67)', async () => {
     const runner: SubprocessRunner = async () => ({
       status: 'failure',
@@ -356,7 +475,7 @@ describe('exportAppleNotes', () => {
     // parser のプロジェクト名・スクリプト名の両方がメッセージに含まれること。
     await expect(promise).rejects.toThrow(/boom/);
     await expect(promise).rejects.toThrow(
-      /apple_cloud_notes_parser \(notes_cloud_ripper\.rb\) failed/,
+      /apple_cloud_notes_parser \(note2web_export\.rb\) failed/,
     );
   });
 
@@ -490,6 +609,30 @@ describe('exportAppleNotes', () => {
         throw new Error('test setup: fixture has no notes');
       }
       firstNote.folder_key = 'invalid';
+      await writeFile(jsonPath, JSON.stringify(data));
+    });
+
+    await expect(
+      exportAppleNotes({
+        config: buildConfig({ source: { folders: ['Tech'] } }),
+        runner,
+        tmpDirFactory: async () => workDir,
+      }),
+    ).rejects.toBeInstanceOf(ExportError);
+  });
+
+  it('rejects a note uuid containing "../" as ExportError instead of joining it into the html/ path (issue #73, path traversal defense-in-depth)', async () => {
+    const { readFile: read, writeFile } = await import('node:fs/promises');
+    const { runner } = makeFixtureRunner(async (outDir) => {
+      const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+      const data = JSON.parse(await read(jsonPath, 'utf8')) as {
+        notes: Record<string, { uuid: unknown }>;
+      };
+      const firstNote = Object.values(data.notes)[0];
+      if (firstNote === undefined) {
+        throw new Error('test setup: fixture has no notes');
+      }
+      firstNote.uuid = '../../../../etc/passwd';
       await writeFile(jsonPath, JSON.stringify(data));
     });
 

@@ -39,7 +39,7 @@ import {
   type Config,
   type ServiceName,
 } from './config.js';
-import { DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
+import { DEFAULT_PARSER_PATH, NOTE2WEB_EXPORT_SCRIPT_PATH } from './exporter/apple-notes.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
 import { expandHome } from './paths.js';
 import { isGitModeService } from './publishers/mode.js';
@@ -640,7 +640,7 @@ async function collectHatenaBlock(
  */
 async function collectDependencyWarnings(
   service: ServiceName,
-  parserEntryPoint: string,
+  parserLibEntryPoint: string,
   requiredEnvNames: readonly string[],
   options: {
     commandExistsFn: (command: string) => Promise<boolean>;
@@ -658,12 +658,24 @@ async function collectDependencyWarnings(
         'https://www.ruby-lang.org/ の手順に従ってインストールしてください。',
     );
   }
-  if (!(await fileExistsFn(parserEntryPoint))) {
+  if (!(await fileExistsFn(parserLibEntryPoint))) {
     warnings.push(
-      `[依存] apple_cloud_notes_parser が見つかりません(${parserEntryPoint})。` +
+      `[依存] apple_cloud_notes_parser が見つかりません(${parserLibEntryPoint})。` +
         '以下の手順で導入してください:\n' +
         '    git clone https://github.com/threeplanetssoftware/apple_cloud_notes_parser ~/tools/apple_cloud_notes_parser\n' +
         '    cd ~/tools/apple_cloud_notes_parser && bundle install',
+    );
+  }
+  // issue #73 CodeRabbit review Fix 5: `src/dependencies.ts` の `checkDependencies` が
+  // 検証している「note2web 自身の同梱スクリプト(`ruby/note2web_export.rb`)が実在するか」を
+  // ここでも同じ入力(`NOTE2WEB_EXPORT_SCRIPT_PATH`、`src/exporter/apple-notes.ts` で定義された
+  // 唯一の定数)を使って検証する。以前はこのチェックが `init`/`doctor` 相当の案内から漏れており、
+  // upstream の parser は正しく導入済みなのに note2web 自身のインストールが壊れている
+  // (`ruby/` が欠けた npm パッケージ等)ケースを `init` の依存案内だけでは検出できなかった。
+  if (!(await fileExistsFn(NOTE2WEB_EXPORT_SCRIPT_PATH))) {
+    warnings.push(
+      `[依存] note2web 自身のエクスポートスクリプトが見つかりません(${NOTE2WEB_EXPORT_SCRIPT_PATH})。` +
+        'note2web のインストールが壊れているか不完全である可能性があります(設定の問題ではありません)。',
     );
   }
 
@@ -1047,10 +1059,13 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     }
 
     // --- 6. 依存 CLI・環境の案内(CORRECTION B: 失敗させず警告のみ) -------------------
-    const parserEntryPoint = join(expandHome(DEFAULT_PARSER_PATH), 'notes_cloud_ripper.rb');
+    // issue #72: 実在チェックの対象が upstream の `lib/AppleNoteStore.rb` に変わった
+    // (以前は `notes_cloud_ripper.rb` エントリポイント自体を見ていた。
+    // `src/dependencies.ts` の同種チェックと同じ変更)。
+    const parserLibEntryPoint = join(expandHome(DEFAULT_PARSER_PATH), 'lib', 'AppleNoteStore.rb');
     const dependencyWarnings = await collectDependencyWarnings(
       service,
-      parserEntryPoint,
+      parserLibEntryPoint,
       requiredEnvNames,
       { commandExistsFn, fileExistsFn, qiitaCliResolvableFn, env },
     );

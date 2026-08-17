@@ -95,8 +95,10 @@ describe('checkDependencies', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'note2web-dependencies-test-'));
     parserPath = join(dir, 'parser');
-    mkdirSync(parserPath, { recursive: true });
-    writeFileSync(join(parserPath, 'notes_cloud_ripper.rb'), '# fixture stub\n');
+    // issue #72: 実在チェックの対象が upstream の `lib/AppleNoteStore.rb` に変わった
+    // (以前は `notes_cloud_ripper.rb` エントリポイント自体を見ていた)。
+    mkdirSync(join(parserPath, 'lib'), { recursive: true });
+    writeFileSync(join(parserPath, 'lib', 'AppleNoteStore.rb'), '# fixture stub\n');
   });
 
   afterEach(() => {
@@ -130,7 +132,7 @@ describe('checkDependencies', () => {
     const messages = error.problems.map((problem) => problem.message).join('\n');
     expect(messages).toMatch(/"ruby"/);
     expect(messages).toMatch(/"bundle"/);
-    expect(messages).toMatch(/apple_cloud_notes_parser entry point not found/);
+    expect(messages).toMatch(/apple_cloud_notes_parser lib\/ not found/);
     // git mode の git/gh も同時に不足として報告される(1件見つけて打ち切らない)。
     expect(error.problems.length).toBeGreaterThanOrEqual(5);
   });
@@ -338,12 +340,12 @@ describe('checkDependencies', () => {
     expect(error.problems.map((problem) => problem.message).join('\n')).toMatch(/"noet"/);
   });
 
-  it('expands a leading ~ in exporter.parser_path when locating notes_cloud_ripper.rb', async () => {
+  it('expands a leading ~ in exporter.parser_path when locating upstream lib/AppleNoteStore.rb', async () => {
     // 実ファイルシステムに依存せず、fileExistsFn へ渡された実際のパスを記録して検証する
     // (CodeRabbit review, PR #47: ホスト環境の実在有無に依存させない)。`fileExistsFn` は
-    // parser 本体の実在確認だけでなく、issue #69 で追加した Notes コンテナディレクトリの
-    // 実在確認にも使われるため、ここでは2回(parser entry point → notes container の順)
-    // 呼ばれる。
+    // parser 本体(lib/)の実在確認・note2web 自身のスクリプトの実在確認・issue #69 で
+    // 追加した Notes コンテナディレクトリの実在確認に使われるため、ここでは3回
+    // (parser lib/ → note2web スクリプト → notes container の順)呼ばれる(issue #72)。
     const commands = new Set(['ruby', 'bundle', 'git', 'gh']);
     const checkedPaths: string[] = [];
     const error = await expectDependencyError(buildConfig(), {
@@ -356,7 +358,7 @@ describe('checkDependencies', () => {
       runSubprocessFn: fakeRubyBundleSubprocess(),
     });
 
-    expect(checkedPaths).toHaveLength(2);
+    expect(checkedPaths).toHaveLength(3);
     const checkedPath = checkedPaths[0];
     if (checkedPath === undefined) {
       throw new Error('test setup: fileExistsFn was not called');
@@ -364,10 +366,17 @@ describe('checkDependencies', () => {
     // `~` が展開され、絶対パス(`~/` を含まない)になっていること。
     expect(checkedPath).not.toContain('~/');
     expect(checkedPath).toMatch(/^\//);
-    expect(checkedPath.endsWith('notes_cloud_ripper.rb')).toBe(true);
+    expect(checkedPath.endsWith(join('lib', 'AppleNoteStore.rb'))).toBe(true);
 
-    // 2件目(Notes コンテナディレクトリ)も同じく `~` が展開されていること。
-    const containerCheckedPath = checkedPaths[1];
+    // 2件目は note2web 自身のスクリプト(parser_path に依存しない絶対パス)。
+    const scriptCheckedPath = checkedPaths[1];
+    if (scriptCheckedPath === undefined) {
+      throw new Error('test setup: fileExistsFn was not called for the note2web script');
+    }
+    expect(scriptCheckedPath.endsWith(join('ruby', 'note2web_export.rb'))).toBe(true);
+
+    // 3件目(Notes コンテナディレクトリ)も同じく `~` が展開されていること。
+    const containerCheckedPath = checkedPaths[2];
     if (containerCheckedPath === undefined) {
       throw new Error('test setup: fileExistsFn was not called for the notes container');
     }
@@ -566,7 +575,7 @@ describe('checkDependencies', () => {
       expect(calls).toEqual(['ruby']);
 
       const messages = error.problems.map((problem) => problem.message).join('\n');
-      expect(messages).toMatch(/apple_cloud_notes_parser entry point not found/);
+      expect(messages).toMatch(/apple_cloud_notes_parser lib\/ not found/);
       expect(messages).not.toMatch(/bundle install/);
     });
 

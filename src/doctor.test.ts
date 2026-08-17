@@ -87,8 +87,10 @@ describe('runDoctorChecks', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'note2web-doctor-test-'));
     parserPath = join(dir, 'parser');
-    mkdirSync(parserPath, { recursive: true });
-    writeFileSync(join(parserPath, 'notes_cloud_ripper.rb'), '# fixture stub\n');
+    // issue #72: 実在チェックの対象が upstream の `lib/AppleNoteStore.rb` に変わった
+    // (以前は `notes_cloud_ripper.rb` エントリポイント自体を見ていた)。
+    mkdirSync(join(parserPath, 'lib'), { recursive: true });
+    writeFileSync(join(parserPath, 'lib', 'AppleNoteStore.rb'), '# fixture stub\n');
   });
 
   afterEach(() => {
@@ -399,7 +401,7 @@ describe('runDoctorChecks', () => {
     });
 
     const messages = error.problems.map((problem) => problem.message).join('\n');
-    expect(messages).toMatch(/apple_cloud_notes_parser entry point not found/);
-    expect(messages).toContain('notes_cloud_ripper.rb');
+    expect(messages).toMatch(/apple_cloud_notes_parser lib\/ not found/);
+    expect(messages).toContain(join('lib', 'AppleNoteStore.rb'));
   });
 });

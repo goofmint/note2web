@@ -24,3 +24,53 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # CodeRabbit review (PR #73) nitpick: guard the npm package contents in CI so a
+      # future change to package.json's "files" list (or an accidental removal of one of
+      # these paths) fails the build instead of silently shipping a broken/incomplete
+      # package. Checks that the required Ruby driver + NOTICE are packed, and that the
+      # ruby/test/ fixtures never leak into the published tarball.
+      - run: npm run verify:pack
+
+  # issue #72: `ruby/lib/note2web_export_core.rb` is pure note2web logic with no
+  # dependency on an `apple_cloud_notes_parser` clone (see ruby/test/ correction C).
+  # Deliberately NOT cloning/bundle-installing the upstream parser here — the
+  # correctness-critical, testable-in-CI logic lives entirely in that core file, and
+  # `ruby/note2web_export.rb` (the thin entry point that requires the upstream lib/)
+  # is covered by `ruby -c` syntax checks only, keeping this job hermetic (no external
+  # clone, no network access, no Bundler/Gemfile from a third-party repo in CI).
+  ruby-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      - run: ruby -c ruby/note2web_export.rb
+      - run: ruby -c ruby/lib/note2web_export_core.rb
+
+      # CodeRabbit review (PR #73) nitpick: this used to run only the single known
+      # test file directly, which would silently skip any `*_test.rb` file added later
+      # under ruby/test/. Use the same recursive discovery as `npm run test:ruby`
+      # (package.json) instead, via a plain `find` loop — this job intentionally has no
+      # Node.js setup step (see the "issue #72" comment above), so we can't just invoke
+      # the npm script itself; this keeps the job hermetic (no external clone, no
+      # network access, no Bundler/Gemfile from a third-party repo in CI) while matching
+      # its file-discovery behavior.
+      - name: Run all ruby/test/**/*_test.rb files (same discovery as npm run test:ruby)
+        run: |
+          set -e
+          mapfile -t test_files < <(find ruby/test -name '*_test.rb' | sort)
+          if [ "${#test_files[@]}" -eq 0 ]; then
+            echo "no ruby test files found under ruby/test/" >&2
+            exit 1
+          fi
+          for f in "${test_files[@]}"; do
+            echo "# $f"
+            ruby -c "$f"
+            ruby -Iruby/lib "$f"
+          done

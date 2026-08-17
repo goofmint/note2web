@@ -1,0 +1,79 @@
+note2web — Third-Party Notices
+===============================
+
+note2web's Apple Notes export path (`ruby/note2web_export.rb`) is a driver
+script that, at runtime, requires (via Ruby `require`) library files from an
+external clone of the following third-party project. note2web does NOT vendor
+or redistribute that project's source code in this repository or in the npm
+package; the user is expected to `git clone` it separately and point
+`exporter.parser_path` at the clone (see README.md "Setup").
+
+Project:     apple_cloud_notes_parser
+Repository:  https://github.com/threeplanetssoftware/apple_cloud_notes_parser
+License:     MIT License
+Copyright:   Copyright (c) 2019 Three Planets Software
+
+Commits consulted while implementing note2web's driver
+--------------------------------------------------------
+
+- Spike commit (T-08, GitHub issue #13, 2026-07-25):
+  `4754a2b62686570cca46690d101079e80cf6ae66`
+- Current `master` as of 2026-08-17 (issue #72 implementation date):
+  `4754a2b62686570cca46690d101079e80cf6ae66`
+
+Both are the same commit — `git ls-remote
+https://github.com/threeplanetssoftware/apple_cloud_notes_parser.git master`
+returned this SHA on 2026-08-17, confirming upstream had not moved since the
+T-08 spike. `ruby/note2web_export.rb` requires (directly or transitively) the
+following files from that commit: `lib/KeyedArchive.rb`,
+`lib/AppleDecrypter.rb`, `lib/AppleBackup.rb`, `lib/AppleBackupMac.rb`,
+`lib/AppleNote.rb`, `lib/AppleNoteStore.rb`, `lib/AppleNotesFolder.rb`,
+`lib/AppleNotesAccount.rb`, `lib/AppleCloudKitRecord.rb`, and the
+`AppleNotesEmbeddedObject` subclasses they transitively require.
+
+How note2web uses it (usage form)
+----------------------------------
+
+1. The user clones `apple_cloud_notes_parser` to a local directory (external
+   to note2web) and runs `bundle install` there, per that project's own
+   README (see this repository's README.md "Setup" section).
+2. note2web's own `ruby/note2web_export.rb` is executed with
+   `--parser-lib <clone>/lib` and, at runtime, `require`s specific files
+   from that directory. `cwd` is set to the clone's root so that
+   `bundle exec` can find its `Gemfile`.
+3. note2web's script does not modify, copy, or redistribute any file from
+   the clone. It only calls documented instance methods on the classes it
+   loads (e.g. `AppleNote#generate_html`, `AppleNote#prepare_json`,
+   `AppleNotesFolder#name`) to read already-decoded note/folder data, and
+   writes its own output files under a note2web-controlled output directory.
+
+Full license text (MIT)
+-------------------------
+
+MIT License
+
+Copyright (c) 2019 Three Planets Software
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+note2web itself is licensed under the MIT License — see LICENSE at the
+repository root (Copyright (c) 2026 Atsushi Nakatsugawa). This NOTICE file
+covers only the third-party project referenced above.

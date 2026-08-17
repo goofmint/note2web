@@ -13,7 +13,11 @@
  * 本モジュールが追加でチェックするのは、config スキーマに現れない依存
  * (コマンドの実在・`GH_TOKEN` のような固定名の環境変数・parser 本体の実在)のみ:
  *   - 共通: `ruby` コマンド・そのバージョン(`ruby -v` を実行し >= 3.0 を要求)、
- *     `exporter.parser_path` 配下の `notes_cloud_ripper.rb`。加えて issue #67 で、
+ *     `exporter.parser_path` 配下の upstream `lib/`(issue #72。note2web は自前の
+ *     `ruby/note2web_export.rb` を起動し、そこから upstream の `lib/` だけを require
+ *     するため、以前チェックしていた `notes_cloud_ripper.rb` エントリポイントの代わりに
+ *     `lib/AppleNoteStore.rb` の実在を見る)・note2web 自身の `ruby/note2web_export.rb`
+ *     が同梱されていること。加えて issue #67 で、
  *     `exporter.launcher`(既定 `'bundle'`)が `'bundle'` のときのみ `bundle` コマンドと
  *     gem の準備状況(`bundle check` を `parser_path` で実行)を検証する——launchd の
  *     最小限の環境では `bundle exec ruby` の前提(Bundler・gem のインストール)が
@@ -53,7 +57,11 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
-import { DEFAULT_NOTES_CONTAINER, DEFAULT_PARSER_PATH } from './exporter/apple-notes.js';
+import {
+  DEFAULT_NOTES_CONTAINER,
+  DEFAULT_PARSER_PATH,
+  NOTE2WEB_EXPORT_SCRIPT_PATH,
+} from './exporter/apple-notes.js';
 import { expandHome } from './paths.js';
 import {
   commandExists,
@@ -308,21 +316,42 @@ export async function checkDependencies(
     problems.push({
       message:
         'required command "ruby" was not found on PATH ' +
-        '(required by apple_cloud_notes_parser / notes_cloud_ripper.rb, design.md §5.2)',
+        '(required by note2web_export.rb / apple_cloud_notes_parser, design.md §5.2)',
     });
   }
 
+  // parser 本体の実在チェック(issue #72): 以前は upstream の `notes_cloud_ripper.rb`
+  // (エントリポイント)自体の実在を確認していたが、note2web は自前の
+  // `ruby/note2web_export.rb` を起動し、そこから upstream の `lib/` だけを requireするため
+  // (`src/exporter/apple-notes.ts` runExport)、確認すべき対象も変わった:
+  //   (a) `exporter.parser_path` 配下に upstream の `lib/` ディレクトリ(の代表として
+  //       `lib/AppleNoteStore.rb`)が存在すること
+  //   (b) note2web に同梱される `ruby/note2web_export.rb` 自体が実在すること
+  //       (npm パッケージとして正しく配布されていることの確認も兼ねる)
   const parserPath = expandHome(config.exporter?.parser_path ?? DEFAULT_PARSER_PATH);
-  const parserEntryPoint = join(parserPath, 'notes_cloud_ripper.rb');
+  const parserLibEntryPoint = join(parserPath, 'lib', 'AppleNoteStore.rb');
   // parser 本体の実在チェックの結果を保持しておく。存在しない場合は後段の
   // `bundle check`(下記)を実行しない — parser_path が誤っている状態で
   // `bundle check` を parserPath 配下で実行しても意味のある結果にならず、
   // 本来の原因(parser_path 設定)を覆い隠す「bundle install してください」という
   // 誤誘導のメッセージを追加してしまうため。
-  const parserEntryPointExists = await fileExistsFn(parserEntryPoint);
+  const parserEntryPointExists = await fileExistsFn(parserLibEntryPoint);
   if (!parserEntryPointExists) {
     problems.push({
-      message: `apple_cloud_notes_parser entry point not found: ${parserEntryPoint} (check exporter.parser_path)`,
+      message:
+        `apple_cloud_notes_parser lib/ not found: ${parserLibEntryPoint} ` +
+        '(check exporter.parser_path; expected an external clone of ' +
+        'https://github.com/threeplanetssoftware/apple_cloud_notes_parser with its Ruby ' +
+        'dependencies already set up there)',
+    });
+  }
+
+  const note2webScriptExists = await fileExistsFn(NOTE2WEB_EXPORT_SCRIPT_PATH);
+  if (!note2webScriptExists) {
+    problems.push({
+      message:
+        `note2web's own export script not found: ${NOTE2WEB_EXPORT_SCRIPT_PATH} ` +
+        '(this indicates a broken/incomplete note2web installation, not a user configuration issue)',
     });
   }
 
