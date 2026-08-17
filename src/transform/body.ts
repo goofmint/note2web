@@ -126,8 +126,14 @@ import { isHashtagOnlyLine } from './metadata.js';
  *   (`public_base_url` + キー)に差し替える(FR-14)。
  */
 export function makeAssetPlaceholder(identifier: string): string {
-  return `note2web-asset://${identifier}`;
+  return `${ASSET_PLACEHOLDER_PREFIX}${identifier}`;
 }
+
+/**
+ * アセットプレースホルダ URL のプレフィックス(`makeAssetPlaceholder` の JSDoc の契約)。
+ * `unwrapAutolinks` がアセット参照リンクを展開対象から除外する判定にも使う。
+ */
+const ASSET_PLACEHOLDER_PREFIX = 'note2web-asset://';
 
 // ---------------------------------------------------------------------------
 // ロガー(design.md §9 の `Logger['warn']` と構造的に互換。`subprocess.ts` の
@@ -685,8 +691,12 @@ function recognizeCodeFences(root: MdastRoot): void {
  * 差し替え先は `text` ノードではなく `html` ノードにする: `text` だと
  * `remark-stringify` が URL 中の `_` 等を `\_` にエスケープし得るのに対し、`html`
  * ノードの `value` は逐語で出力されるため、URL がそのままの字面で本文に残る。
- * リンクテキストが URL と異なる通常のリンク(`[テキスト](URL)`)や、`title` 付き・
- * アセットプレースホルダへの参照(ラベル ≠ URL)は対象外のまま変更しない。
+ * リンクテキストが URL と異なる通常のリンク(`[テキスト](URL)`)や `title` 付きリンクは
+ * 対象外のまま変更しない。アセットプレースホルダ(`ASSET_PLACEHOLDER_PREFIX`)への参照も
+ * **URL 前置一致で明示的に除外**する——通常はラベル ≠ URL(リンクテキストまたは識別子)
+ * なので条件に掛からないが、万一ラベルがプレースホルダ URL と一致しても、
+ * `makeAssetPlaceholder` の契約「プレースホルダは Markdown のリンク/画像 URL の位置に
+ * のみ現れる」を守るためリンクのまま維持する(PR #80 CodeRabbit レビュー)。
  * mdast ツリー全体(段落・リスト・表・引用の内部を含む)を再帰的に走査する。
  */
 function unwrapAutolinks(node: unknown): void {
@@ -706,6 +716,7 @@ function unwrapAutolinks(node: unknown): void {
     if (
       typed.type === 'link' &&
       (typed.title === null || typed.title === undefined) &&
+      !typed.url.startsWith(ASSET_PLACEHOLDER_PREFIX) &&
       typed.children.length === 1 &&
       typed.children[0]?.type === 'text' &&
       typed.children[0].value === typed.url

@@ -480,5 +480,29 @@ describe('transformBody', () => {
 
       expect(markdown).toBe('詳細は https://example.com/doc を参照。\n');
     });
+
+    it('keeps a link whose title attribute is present even when the link text equals the URL', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="https://example.com/" title="Example">https://example.com/</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('[https://example.com/](https://example.com/ "Example")\n');
+    });
+
+    it('keeps an asset placeholder link even if its label happens to equal the placeholder URL', () => {
+      // アセット参照のラベルは通常「リンクテキストまたは識別子」なのでプレースホルダ URL
+      // とは一致しないが、万一ノート本文のリンクテキストがプレースホルダ URL と同じ字面
+      // だった場合でも、`note2web-asset://` へのリンクは展開せずリンクのまま維持する
+      // (makeAssetPlaceholder の契約: プレースホルダはリンク/画像 URL の位置にのみ現れる)。
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="../files/report.pdf" data-apple-notes-zidentifier="attach-3333-4333-8333-333333333333">note2web-asset://attach-3333-4333-8333-333333333333</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe(
+        '[note2web-asset://attach-3333-4333-8333-333333333333](note2web-asset://attach-3333-4333-8333-333333333333)\n',
+      );
+    });
   });
 });
