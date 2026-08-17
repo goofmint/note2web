@@ -15,6 +15,12 @@ export interface Note {
   uuid: string;
   /** フォルダ名(FR-06)。JSON ノートオブジェクトの `folder` フィールド(葉フォルダ名の文字列)。 */
   folder: string;
+  /**
+   * ルート(`source.folders` で一致したフォルダ)から葉(ノートが直接属するフォルダ)までの
+   * フォルダ名の配列。`folder` は常にこの配列の最終要素と一致する。Zenn の `type` 判別
+   * (design.md §5.7、FR-24)に使う。
+   */
+  folderPath: string[];
   /** 1行目から先頭絵文字を除去したタイトル(FR-04)。メタデータ抽出層(T-10)が埋める。 */
   title: string;
   /** 1行目の先頭 grapheme(絵文字の場合のみ)(FR-05)。メタデータ抽出層(T-10)が埋める。 */

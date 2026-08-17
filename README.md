@@ -199,13 +199,14 @@ hatena:
 
 | サービス | 出力パス | frontmatter | 備考 |
 |---|---|---|---|
-| Zenn | `articles/<uuid を小文字化した slug>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | `type` はフォルダ名。`tech` / `idea` 以外のフォルダのノートは設定不正としてそのノートのみ失敗扱いになります。絵文字が本文1行目に無いノートには既定値 `📝` を使います(Zenn は emoji 必須のため) |
+| Zenn | `articles/<uuid を小文字化した slug>.md` | `title` / `emoji` / `type` / `topics` / `published: true` | `type` はノートのフォルダパスを葉から遡り、最初に `tech` / `idea` と完全一致したフォルダ名を採用します。どの祖先フォルダも一致しない場合は設定不正としてそのノートのみ失敗扱いになります(詳細は下記「Zenn」参照)。絵文字が本文1行目に無いノートには既定値 `📝` を使います(Zenn は emoji 必須のため) |
 | Hugo | `<output_dir>/<uuid>.md` | `title` / `date` / `lastmod` / `categories: [フォルダ名]` / `tags` | `output_dir` は任意(例 `content/posts`) |
 | Jekyll | `_posts/YYYY-MM-DD-<uuid>.md` | `title` / `date` / `categories` / `tags` | 日付は作成日。初回配信時のファイル名を状態ファイルに記録し、以後は作成日が変わっても記録済みのファイル名を使い続けます(URL の安定性を優先) |
 
 #### Zenn
 
 - Zenn との連携は **GitHub リポジトリ連携のみ**を前提にしています。`articles/` にファイルを置いて対象リポジトリへ push すれば Zenn 側が取り込むため、`zenn-cli` のインストール・実行は一切不要です(依存にも含めていません)
+- **`type`(tech / idea)はフォルダ構成で決めます**: Apple Notes 側で対象フォルダ(例 `Zenn`)の下に `tech` / `idea` サブフォルダを作り、記事ノートをその下に置いてください。設定では `source.folders: [Zenn]` のように親フォルダだけを指定すれば、サブフォルダ配下のノートも自動的に配信対象へ含まれます(サブツリー全体がエクスポート対象になるため)。判定はノートのフォルダパスを葉(直属フォルダ)から根へ遡り、最初に `tech` / `idea` と完全一致したフォルダ名を採用します——`Zenn/tech` 配下なら `tech`、さらにその下の `Zenn/tech/drafts` のようなネストでも直近の祖先 `tech` が使われます。`tech` / `idea` をパスに含まないノート(親フォルダ直下に置いたノート等)は Zenn では失敗扱いになります。従来どおり `source.folders: [tech, idea]` と `tech`/`idea` フォルダを直接指定する構成もそのまま有効です
 - `topics` は Apple Notes のハッシュタグ由来で、Zenn 公式ガイド([zenn-cli-guide](https://zenn.dev/zenn/articles/zenn-cli-guide))の制約に合わせてサニタイズします: 先頭の `#` を除去し、除去後に空になったタグ・半角スペースを含むタグは警告つきで除外し、6個以上残る場合は先頭5個に切り詰めます(公式ガイドが明記する上限)。サニタイズ後に0個になっても失敗にはせず、`topics: []` を出力します(Zenn は `topics` の省略・空配列を許容するため)
 - slug(ファイル名)はノート UUID を小文字化した値で、Zenn 公式ガイドの制約(半角英小文字・数字・ハイフン・アンダースコアの12〜50字)に適合していることを検証済みです
 

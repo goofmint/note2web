@@ -311,6 +311,30 @@ function resolveIncludedFolderIds(
   return included;
 }
 
+/**
+ * `folderId` から `parentId` を辿り、ルート(JSON トップレベルの `folders` に含まれる
+ * マッチしたサブツリーの根。`resolveIncludedFolderIds` 参照)までのフォルダ名を
+ * 葉→根の順に集めたうえで反転し、根→葉の順の配列として返す(Note#folderPath、
+ * design.md §5.3。Zenn の `type` 判別、FR-24)。JSON トップレベルの `folders` には
+ * マッチしたサブツリーの根しか含まれないため、この辿りは自然にそこで止まる。
+ * 循環参照は本来あり得ないが、防御的に訪問済み ID の集合で無限ループを回避する。
+ */
+function buildFolderPath(folderIndex: Map<number, FolderIndexEntry>, folderId: number): string[] {
+  const names: string[] = [];
+  const visited = new Set<number>();
+  let currentId: number | null = folderId;
+  while (currentId !== null && !visited.has(currentId)) {
+    visited.add(currentId);
+    const entry = folderIndex.get(currentId);
+    if (entry === undefined) {
+      break;
+    }
+    names.unshift(entry.name);
+    currentId = entry.parentId;
+  }
+  return names;
+}
+
 // ---------------------------------------------------------------------------
 // UUID → 個別 HTML の解決(design.md §5.2、issue #72で `html/<uuid>.html` 直接解決に
 // 単純化)。
@@ -607,6 +631,7 @@ async function runExport(params: {
     notes.push({
       uuid: noteJson.uuid,
       folder: noteJson.folder,
+      folderPath: buildFolderPath(folderIndex, folderId),
       // title / emoji はメタデータ抽出層(T-10)の担当(design.md §5.3)。
       title: '',
       emoji: null,

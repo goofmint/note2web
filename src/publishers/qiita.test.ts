@@ -7,9 +7,11 @@ import type { NoteState } from '../state/store.js';
 import { computeContentHash } from '../transform/frontmatter.js';
 
 function buildNote(overrides: Partial<Note> = {}): Note {
+  const folder = overrides.folder ?? 'tech';
   return {
     uuid: '5c1c2c3d-0000-0000-0000-000000000001',
-    folder: 'tech',
+    folder,
+    folderPath: [folder],
     title: 'Hello World',
     emoji: null,
     tags: ['#typescript'],

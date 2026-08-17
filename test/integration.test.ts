@@ -37,16 +37,21 @@
  * これは新しい seam の追加ではなく、各 Publisher モジュールが単体テスト用に既に公開している
  * 注入点をそのまま使うだけ)。
  *
- * **fixture の folder 名と Zenn の type 制約(design.md §5.7「tech/idea 以外… 失敗扱い」・
- * FR-24)**: fixture のフォルダ名は `Tech`/`Archive`/`Dev/Ops: Log` であり、Zenn が要求する
- * 厳密な `tech`/`idea` と一致しない。`test/sync.test.ts`(「with the real Zenn renderer」
- * ブロック)が確立した手法をそのまま踏襲し、コピー後の fixture JSON の対象ノート1件だけ
- * `folder` フィールドを `"tech"` に書き換える(`folder_key` には触れないため
- * `source.folders` によるノート選択自体は変わらない)。残り4件は実際のフォルダ名のまま
- * (=Zenn的には不正)残し、FR-24 の「不正な type のノートは failed」という実際の Publisher
- * 挙動をそのまま検証材料にする——これは「境界のモック化」ではなく、既存 fixture が
- * Zenn 固有の制約を最初から満たさないことへの最小限の適応であり、HTML・添付・
- * ハッシュタグ等コンテンツ本体は一切改変しない。
+ * **fixture の folder 名と Zenn の type 制約(design.md §5.7「フォルダパスを葉から根へ遡り、
+ * 最初に一致した tech/idea を type に採用。一致が無ければ失敗扱い」・FR-24)**: fixture の
+ * フォルダ名は `Tech`/`Archive`/`Dev/Ops: Log` であり、いずれも Zenn が要求する厳密な
+ * `tech`/`idea` と一致しない。`test/sync.test.ts`(「with the real Zenn renderer」ブロック)が
+ * 確立した手法をそのまま踏襲し、コピー後の fixture JSON に `tech` という名前の子フォルダを
+ * 1つ追加したうえで(`Tech`(primary_key 10)の子として)、対象ノート1件だけをその新フォルダへ
+ * 付け替える(`folder_key` を新フォルダの primary_key に、`folder` フィールドも `"tech"` に
+ * 書き換える)。新フォルダは `Tech` サブツリーの内側にあるため `source.folders` によるノート
+ * 選択自体は変わらない。対象ノートは `folderPath: ['Tech', 'tech']` となり、葉から遡って
+ * `tech` が採用される——実際の運用(親フォルダの下に `tech`/`idea` サブフォルダを作る)を
+ * そのまま模した経路で新ロジックを検証する。残り4件は実際のフォルダ名のまま(=Zenn的には
+ * 不正)残し、FR-24 の「不正な type のノートは failed」という実際の Publisher 挙動をそのまま
+ * 検証材料にする——これは「境界のモック化」ではなく、既存 fixture が Zenn 固有の制約を
+ * 最初から満たさないことへの最小限の適応であり、HTML・添付・ハッシュタグ等コンテンツ本体は
+ * 一切改変しない。
  *
  * **Qiita のタグ必須制約(design.md §5.7「除外後0個ならそのノートは失敗扱い」)** と
  * **note.com の画像非対応(design.md §13-6、`NoteImagesUnsupportedError`)** は、
@@ -99,7 +104,7 @@ import type { RunSubprocessOptions } from '../src/subprocess.js';
 
 const FIXTURE_ROOT = fileURLToPath(new URL('./fixtures/parser-output/', import.meta.url));
 
-/** JSON トップレベル `notes` のキー(UUID ではない)。`rewriteNoteFolder` で使う。 */
+/** JSON トップレベル `notes` のキー(UUID ではない)。`patchForZenn` で使う。 */
 const NOTE_KEY = {
   salesTable: '201',
   groceryChecklist: '202',
@@ -216,28 +221,51 @@ function makeFixtureRunner(afterCopy?: (outDir: string) => Promise<void>): {
 }
 
 /**
- * コピー済み fixture の `json/all_notes_1.json` を読み、指定した note key(`NOTE_KEY`。
- * UUID ではない)の `folder` フィールドだけを書き換える(`test/sync.test.ts` の
- * `rewriteNoteFolder` と同一パターン)。`folder_key`(フォルダ階層によるフィルタに使われる)
- * には触れないため、`source.folders` による対象ノートの絞り込み結果は変わらない
- * ——このファイル冒頭 JSDoc「fixture の folder 名と Zenn の type 制約」参照。
+ * fixture JSON の `folders` ツリーの1エントリの最小形(`patchForZenn` が使うフィールドのみ)。
+ * `account` は `src/exporter/apple-notes.ts` の `folderJsonSchema` が必須とするため、
+ * 新設フォルダにも必ず含める。
  */
-async function rewriteNoteFolder(outDir: string, noteKey: string, folder: string): Promise<void> {
-  const jsonPath = join(outDir, 'json', 'all_notes_1.json');
-  const raw = JSON.parse(await readFile(jsonPath, 'utf8')) as {
-    notes: Record<string, { folder: string }>;
-  };
-  const note = raw.notes[noteKey];
-  if (note === undefined) {
-    throw new Error(`test fixture: note key "${noteKey}" not found in ${jsonPath}`);
-  }
-  note.folder = folder;
-  await writeFile(jsonPath, JSON.stringify(raw), 'utf8');
+interface FixtureFolderJson {
+  primary_key: number;
+  name: string;
+  account: string;
+  parent_folder_id: number | null;
+  child_folders: Record<string, FixtureFolderJson>;
 }
 
-/** Zenn 用: `NOTE_KEY.salesTable` のみ `folder: "tech"` へ書き換える(モジュール冒頭 JSDoc)。 */
-function patchForZenn(outDir: string): Promise<void> {
-  return rewriteNoteFolder(outDir, NOTE_KEY.salesTable, 'tech');
+/**
+ * コピー済み fixture の `json/all_notes_1.json` を読み、`Tech`(primary_key 10)の下に
+ * `tech` という名前の子フォルダ(primary_key 99)を追加したうえで、`NOTE_KEY.salesTable`
+ * をその新フォルダへ付け替える(`folder_key`/`folder` の両方を更新)。新フォルダは `Tech`
+ * サブツリーの内側にあるため、`source.folders` による対象ノートの絞り込み結果は変わらない
+ * ——このファイル冒頭 JSDoc「fixture の folder 名と Zenn の type 制約」参照。
+ */
+async function patchForZenn(outDir: string): Promise<void> {
+  const jsonPath = join(outDir, 'json', 'all_notes_1.json');
+  const raw = JSON.parse(await readFile(jsonPath, 'utf8')) as {
+    folders: Record<string, FixtureFolderJson>;
+    notes: Record<string, { folder: string; folder_key: number | string }>;
+  };
+  const techFolder = raw.folders['10'];
+  if (techFolder === undefined) {
+    throw new Error(`test fixture: folder primary_key 10 ("Tech") not found in ${jsonPath}`);
+  }
+  techFolder.child_folders['99'] = {
+    primary_key: 99,
+    name: 'tech',
+    account: techFolder.account,
+    parent_folder_id: 10,
+    child_folders: {},
+  };
+
+  const note = raw.notes[NOTE_KEY.salesTable];
+  if (note === undefined) {
+    throw new Error(`test fixture: note key "${NOTE_KEY.salesTable}" not found in ${jsonPath}`);
+  }
+  note.folder_key = 99;
+  note.folder = 'tech';
+
+  await writeFile(jsonPath, JSON.stringify(raw), 'utf8');
 }
 
 const NOOP_CHECK_DEPENDENCIES = async (): Promise<void> => {

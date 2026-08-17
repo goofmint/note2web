@@ -4,9 +4,11 @@ import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
 
 function buildNote(overrides: Partial<Note> = {}): Note {
+  const folder = overrides.folder ?? 'Tech';
   return {
     uuid: '5c1c2c3d-0000-0000-0000-000000000001',
-    folder: 'Tech',
+    folder,
+    folderPath: [folder],
     title: 'Hello World',
     emoji: null,
     tags: ['#hello'],

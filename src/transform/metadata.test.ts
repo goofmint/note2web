@@ -27,9 +27,11 @@ ${contentHtml}
 
 /** テスト用の最小限の `Note`(骨格 + Exporter が埋める `tags`)。 */
 function buildNote(overrides: Partial<Note> = {}): Note {
+  const folder = overrides.folder ?? 'Tech';
   return {
     uuid: 'uuid-1',
-    folder: 'Tech',
+    folder,
+    folderPath: [folder],
     title: '',
     emoji: null,
     tags: [],
@@ -180,6 +182,7 @@ describe('completeNoteMetadata', () => {
     const result = completeNoteMetadata(note);
     expect(result.uuid).toBe('note-42');
     expect(result.folder).toBe('Archive');
+    expect(result.folderPath).toEqual(['Archive']);
     expect(result.createdAt).toBe(note.createdAt);
     expect(result.updatedAt).toBe(note.updatedAt);
     expect(result.attachments).toBe(note.attachments);

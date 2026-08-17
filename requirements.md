@@ -81,7 +81,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 - **FR-21**: 設定で自動マージが有効な場合は、PR のマージまで実行する。
 - **FR-22**: 差分が無い場合はブランチを破棄し、空コミット・空 PR を作らない。
 - **FR-23**: Zenn の場合、Apple Notes の UUID（36文字）を小文字化したものを slug として用いる（Zenn の slug 制約 `a-z0-9`・ハイフン・アンダースコアの12〜50字を満たす）。
-- **FR-24**: Zenn の type には `tech` または `idea` のみを設定する。
+- **FR-24**: Zenn の type には `tech` または `idea` のみを設定する。ノートのフォルダパス（`source.folders` で一致したフォルダから葉まで)を葉から遡り、最初に `tech` / `idea` と完全一致したフォルダ名を type に採用する（例: `Zenn/tech` 配下のノートは `tech`)。一致が無ければそのノートは失敗扱いとする。
 
 ### API / 外部 CLI 配信モード
 

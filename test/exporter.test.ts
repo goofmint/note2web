@@ -246,6 +246,30 @@ describe('exportAppleNotes', () => {
     expect(opsLog?.bodyHtml).toContain('id="note_eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee"');
   });
 
+  it('populates folderPath with the ancestor chain from the matched root folder to the leaf (Note#folderPath, FR-24)', async () => {
+    const { runner } = makeFixtureRunner();
+
+    const result = await exportAppleNotes({
+      config: buildConfig({ source: { folders: ['Tech', 'Dev/Ops: Log'] } }),
+      runner,
+      tmpDirFactory: async () => workDir,
+    });
+
+    const byUuid = new Map(result.notes.map((note) => [note.uuid, note]));
+
+    // Tech(primary_key 10、ルート)直下のノート → folderPath は葉のみの単一要素。
+    const salesTable = byUuid.get('44444444-4444-4444-8444-444444444444');
+    expect(salesTable?.folderPath).toEqual(['Tech']);
+
+    // Tech/Archive(primary_key 11、Tech の子)配下のノート → folderPath は根から葉まで。
+    const launch = byUuid.get('77777777-7777-4777-8777-777777777777');
+    expect(launch?.folderPath).toEqual(['Tech', 'Archive']);
+
+    // `folder`(葉フォルダ名)は常に folderPath の最終要素と一致する。
+    expect(salesTable?.folderPath.at(-1)).toBe(salesTable?.folder);
+    expect(launch?.folderPath.at(-1)).toBe(launch?.folder);
+  });
+
   it('applies source.folders as a subtree filter (FR-02, defense-in-depth) restricted to one root folder', async () => {
     const { runner } = makeFixtureRunner();
 
