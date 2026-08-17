@@ -30,6 +30,10 @@
  *   `Attachment.identifier` で引き、`isImageExtension`(`assets/uploader.ts`。
  *   Content-Type 推定テーブルと共有)で拡張子判定する。識別子に対応する
  *   `Attachment` が無ければ(未知の参照)、従来どおりリンクのままにする)
+ * - リンクテキストが URL そのものと一致するリンク(Apple Notes で URL を貼り付けた
+ *   `<a href="URL">URL</a>`)は、オートリンク `<URL>` ではなく**素の URL テキスト**として
+ *   出力する(`unwrapAutolinks`。Zenn のリンクカードは行全体が素の URL のときにのみ
+ *   発動するため。リンクテキストが URL と異なる通常のリンクは `[テキスト](URL)` のまま)
  * - 1行目(タイトル行。`html.ts` の「行」と同じ規則)は本文から除去する(タイトルは
  *   frontmatter へ。§5.6 Renderer の責務)
  * - ハッシュタグのみで構成される行(`metadata.ts` の `isHashtagOnlyLine`。文中の
@@ -664,6 +668,56 @@ function recognizeCodeFences(root: MdastRoot): void {
 }
 
 // ---------------------------------------------------------------------------
+// オートリンクの素の URL への展開(design.md §5.4。hast→mdast 変換後・
+// `remark-stringify` 直列化前の後処理)。
+// ---------------------------------------------------------------------------
+
+/**
+ * リンクテキストが URL そのものと完全一致する `link` ノード(Apple Notes で URL を
+ * 貼り付けたときの `<a href="URL">URL</a>` が該当)を、素の URL テキストへ展開する。
+ *
+ * `remark-stringify`(`mdast-util-to-markdown`)は「単一の text 子が `url` と一致し
+ * `title` を持たない `link`」をオートリンク `<URL>` として直列化するが、Zenn は
+ * `<URL>` 形式をリンクカードとして扱わず、行全体が素の URL である場合にのみカード化する
+ * (Qiita 等でも素の URL のオートリンク化で十分)。そのためこの形のリンクは
+ * Markdown 上で素の URL テキストとして出力する(利用者リクエスト 2026-08-17)。
+ *
+ * 差し替え先は `text` ノードではなく `html` ノードにする: `text` だと
+ * `remark-stringify` が URL 中の `_` 等を `\_` にエスケープし得るのに対し、`html`
+ * ノードの `value` は逐語で出力されるため、URL がそのままの字面で本文に残る。
+ * リンクテキストが URL と異なる通常のリンク(`[テキスト](URL)`)や、`title` 付き・
+ * アセットプレースホルダへの参照(ラベル ≠ URL)は対象外のまま変更しない。
+ * mdast ツリー全体(段落・リスト・表・引用の内部を含む)を再帰的に走査する。
+ */
+function unwrapAutolinks(node: unknown): void {
+  if (typeof node !== 'object' || node === null || !('children' in node)) {
+    return;
+  }
+  const children = (node as { children: unknown }).children;
+  if (!Array.isArray(children)) {
+    return;
+  }
+  for (let index = 0; index < children.length; index += 1) {
+    const child: unknown = children[index];
+    if (typeof child !== 'object' || child === null) {
+      continue;
+    }
+    const typed = child as Link;
+    if (
+      typed.type === 'link' &&
+      (typed.title === null || typed.title === undefined) &&
+      typed.children.length === 1 &&
+      typed.children[0]?.type === 'text' &&
+      typed.children[0].value === typed.url
+    ) {
+      children[index] = { type: 'html', value: typed.url };
+      continue;
+    }
+    unwrapAutolinks(child);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // unified プロセッサ(状態を持たないため、呼び出しごとに再構築せずモジュールスコープの
 // 定数として使い回す。`.freeze()` してプラグイン構成を確定させる)。
 // ---------------------------------------------------------------------------
@@ -715,6 +769,8 @@ const markdownProcessor = unified()
  *    必ず戻す)。
  * 5. 変換後の mdast に `recognizeCodeFences` を適用し、地の文として書かれたコードフェンス
  *    (```` ``` ````)の区間を逐語の `code` ノードへ差し替える(モジュール先頭 JSDoc 参照)。
+ *    続けて `unwrapAutolinks` を適用し、リンクテキストが URL そのものであるリンク
+ *    (オートリンク `<URL>` として直列化される形)を素の URL テキストへ展開する。
  * 6. `remark-gfm` + `remark-stringify` で Markdown 文字列に直列化する。
  *
  * 空の `bodyHtml`、または本文コンテナにタイトル行以外の内容が無い場合は
@@ -788,6 +844,7 @@ export function transformBody(options: TransformBodyOptions): TransformBodyResul
   }
 
   recognizeCodeFences(mdast);
+  unwrapAutolinks(mdast);
 
   const raw = String(markdownProcessor.stringify(mdast));
   const trimmed = raw.trim();

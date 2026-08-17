@@ -421,4 +421,64 @@ describe('transformBody', () => {
       expect(markdown).toBe('```\n```\n');
     });
   });
+
+  // Fix(実機 Zenn 公開に向けた修正): リンクテキストが URL そのものの
+  // `<a href="URL">URL</a>`(URL 貼り付け)は、オートリンク `<URL>` ではなく素の URL
+  // テキストとして出力する(design.md §5.4「オートリンクの素の URL への展開」。Zenn の
+  // リンクカードは行全体が素の URL のときにのみ発動するため)。
+  describe('autolink unwrapping (pasted URLs become bare URL text, not <URL>)', () => {
+    it('outputs a bare URL (no angle brackets) when the link text equals the URL', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="https://example.com/articles/1">https://example.com/articles/1</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('https://example.com/articles/1\n');
+    });
+
+    it('does not escape special characters (e.g. "_") in the bare URL', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="https://example.com/a_b_c">https://example.com/a_b_c</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('https://example.com/a_b_c\n');
+    });
+
+    it('keeps a normal link ([text](URL)) when the link text differs from the URL', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="https://example.com/">記事はこちら</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('[記事はこちら](https://example.com/)\n');
+    });
+
+    it('unwraps a pasted URL nested inside a list item', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><ul><li><a href="https://example.com/x">https://example.com/x</a></li></ul>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('- https://example.com/x\n');
+    });
+
+    it('leaves a non-image attachment placeholder link untouched (label differs from the placeholder URL)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br><a href="../files/report.pdf" data-apple-notes-zidentifier="attach-1111-4111-8111-111111111111">report.pdf</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('[report.pdf](note2web-asset://attach-1111-4111-8111-111111111111)\n');
+    });
+
+    it('unwraps a pasted URL while keeping surrounding prose in the same line intact', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Link Demo<br>\n</h1>\n<br>詳細は <a href="https://example.com/doc">https://example.com/doc</a> を参照。',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('詳細は https://example.com/doc を参照。\n');
+    });
+  });
 });
