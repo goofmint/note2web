@@ -161,6 +161,21 @@ function resolveContentType(ext: string): string {
   return CONTENT_TYPE_BY_EXTENSION[ext.toLowerCase()] ?? DEFAULT_CONTENT_TYPE;
 }
 
+/**
+ * `ext`(`node:path` の `extname` が返す、`.png` のようにドットを含む形。大文字小文字は
+ * 無視する)が画像の拡張子かどうか。
+ *
+ * BodyTransformer(`transform/body.ts` の `assetAwareAHandler`)が、`data-apple-notes-
+ * zidentifier` を直接持つ `<a>`(img を伴わない添付参照)を画像として `![]()` にするか
+ * リンク `[]()` のままにするか(design.md §5.4 FR-14「添付は画像なら `![]()`、それ以外は
+ * リンク」)を判定するのに使う。`CONTENT_TYPE_BY_EXTENSION` と二重管理にならないよう、
+ * その値が `image/` で始まるかどうかで判定を共有する。
+ */
+export function isImageExtension(ext: string): boolean {
+  const contentType = CONTENT_TYPE_BY_EXTENSION[ext.toLowerCase()];
+  return contentType !== undefined && contentType.startsWith('image/');
+}
+
 // ---------------------------------------------------------------------------
 // プレースホルダの走査(`transform/body.ts` の `makeAssetPlaceholder` 契約と共有)。
 // ---------------------------------------------------------------------------

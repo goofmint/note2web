@@ -267,6 +267,7 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
     note = completeNoteMetadata(rawNote);
     const transformed = transformBody({
       bodyHtml: note.bodyHtml,
+      attachments: note.attachments,
       logger,
       noteUuid: note.uuid,
       title: note.title,

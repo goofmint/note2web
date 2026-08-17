@@ -121,6 +121,97 @@ describe('transformBody', () => {
     );
   });
 
+  // Fix 1(実機 Qiita 公開で報告): `<a data-apple-notes-zidentifier>` 直接参照は、HTML の形
+  // (img を伴うか)ではなく参照先の添付の種別(拡張子)で `![]()`/リンクを決める(FR-14)。
+  describe('direct <a data-apple-notes-zidentifier> attachment references (FR-14 image-vs-link by attachment type)', () => {
+    it('renders as a bare image placeholder when the referenced attachment is an image (.jpg)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Photo Demo<br>\n</h1>\n<br><a href="../files/photo.jpg" data-apple-notes-zidentifier="DAC0599E-82F5-4140-A0EC-915F0E37E3CD">DAC0599E-82F5-4140-A0EC-915F0E37E3CD</a>',
+      );
+      const { markdown } = transformBody({
+        bodyHtml,
+        attachments: [{ identifier: 'DAC0599E-82F5-4140-A0EC-915F0E37E3CD', path: 'photo.jpg' }],
+      });
+
+      expect(markdown).toBe(
+        '![DAC0599E-82F5-4140-A0EC-915F0E37E3CD](note2web-asset://DAC0599E-82F5-4140-A0EC-915F0E37E3CD)\n',
+      );
+    });
+
+    it('uses an empty alt when the image reference has no link text', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Photo Demo<br>\n</h1>\n<br><a href="../files/photo.png" data-apple-notes-zidentifier="photo-3333-4333-8333-333333333333"></a>',
+      );
+      const { markdown } = transformBody({
+        bodyHtml,
+        attachments: [{ identifier: 'photo-3333-4333-8333-333333333333', path: 'photo.png' }],
+      });
+
+      expect(markdown).toBe('![](note2web-asset://photo-3333-4333-8333-333333333333)\n');
+    });
+
+    it('stays a link when the referenced attachment is not an image (.pdf)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Report Demo<br>\n</h1>\n<br><a href="../files/report.pdf" data-apple-notes-zidentifier="report-4444-4444-8444-444444444444">report.pdf</a>',
+      );
+      const { markdown } = transformBody({
+        bodyHtml,
+        attachments: [{ identifier: 'report-4444-4444-8444-444444444444', path: 'report.pdf' }],
+      });
+
+      expect(markdown).toBe('[report.pdf](note2web-asset://report-4444-4444-8444-444444444444)\n');
+    });
+
+    it('stays a link when no attachment matches the identifier (unknown reference)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Unknown Demo<br>\n</h1>\n<br><a href="../files/mystery.jpg" data-apple-notes-zidentifier="unknown-5555-4555-8555-555555555555">mystery.jpg</a>',
+      );
+      const { markdown } = transformBody({
+        bodyHtml,
+        // 別の identifier のみを持たせる: 参照先の Attachment が見つからない。
+        attachments: [{ identifier: 'other-identifier', path: 'mystery.jpg' }],
+      });
+
+      expect(markdown).toBe(
+        '[mystery.jpg](note2web-asset://unknown-5555-4555-8555-555555555555)\n',
+      );
+    });
+
+    it('stays a link when attachments is omitted entirely (backward compatibility)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>No Attachments Demo<br>\n</h1>\n<br><a href="../files/photo.jpg" data-apple-notes-zidentifier="no-attachments-6666-4666-8666-666666666666">photo.jpg</a>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe(
+        '[photo.jpg](note2web-asset://no-attachments-6666-4666-8666-666666666666)\n',
+      );
+    });
+
+    it('matches the attachment extension case-insensitively (.JPG)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Uppercase Ext Demo<br>\n</h1>\n<br><a href="../files/PHOTO.JPG" data-apple-notes-zidentifier="upper-7777-4777-8777-777777777777">photo</a>',
+      );
+      const { markdown } = transformBody({
+        bodyHtml,
+        attachments: [{ identifier: 'upper-7777-4777-8777-777777777777', path: 'PHOTO.JPG' }],
+      });
+
+      expect(markdown).toBe('![photo](note2web-asset://upper-7777-4777-8777-777777777777)\n');
+    });
+
+    it('does not affect the existing <a><img data-apple-notes-zidentifier> drawing-reference path', () => {
+      const bodyHtml = readFixture('66666666-6666-4666-8666-666666666666.html');
+      const { markdown } = transformBody({
+        bodyHtml,
+        attachments: [{ identifier: '88888888-8888-4888-8888-888888888888', path: 'sketch.pdf' }],
+      });
+
+      // img を伴う描画参照は、対応する添付が非画像でも常に画像(FR-13)。
+      expect(markdown).toBe('![](note2web-asset://88888888-8888-4888-8888-888888888888)\n');
+    });
+  });
+
   it('propagates the <img alt> attribute onto the asset placeholder image', () => {
     const bodyHtml = noteHtml(
       '<h1>Alt Demo<br>\n</h1>\n<br><img src="../files/sketch.png" alt="a hand-drawn sketch" data-apple-notes-zidentifier="99999999-9999-4999-8999-999999999999">',
@@ -250,5 +341,69 @@ describe('transformBody', () => {
     const { markdown } = transformBody({ bodyHtml });
 
     expect(markdown).toBe('First line.\n\nSecond line.\n\nThird line.\n');
+  });
+
+  // Fix 2(実機 Qiita 公開で報告): 地の文の ``` フェンスを逐語のコードブロックとして認識する。
+  describe('code fence recognition (literal ``` fences typed in the note body)', () => {
+    it('recognizes a ```lang fence spanning multiple single-line paragraphs as a verbatim code block', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>puts 1<br>\n<br>puts 2<br>\n<br>```',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('```ruby\nputs 1\nputs 2\n```\n');
+    });
+
+    it('recognizes a fence with no language token', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>```<br>\n<br>hello<br>\n<br>```');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('```\nhello\n```\n');
+    });
+
+    it('leaves an unclosed fence untouched (escaped literal text, as before this fix)', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>puts 1');
+      const { markdown } = transformBody({ bodyHtml });
+
+      // 閉じフェンスが無いため認識せず、通常のテキスト化(バッククォートのエスケープ)の
+      // ままになる。実際のコードフェンス(```` ``` ````)としては解釈されない。
+      expect(markdown).not.toContain('```ruby\nputs 1\n```');
+      expect(markdown).toContain('ruby');
+      expect(markdown).toContain('puts 1');
+    });
+
+    it('keeps backticks/*/# inside the fenced content fully verbatim (no escaping)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br>```text<br>\n<br>some `code` and *bold* and # heading<br>\n<br>```',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('```text\nsome `code` and *bold* and # heading\n```\n');
+    });
+
+    it('auto-lengthens the outer fence when the content itself contains a run of 3 backticks', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br>```text<br>\n<br>Use ``` to start a fence<br>\n<br>```',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('````text\nUse ``` to start a fence\n````\n');
+    });
+
+    it('recognizes two separate fence regions in one note', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>a<br>\n<br>```<br>\n<br>Some prose.<br>\n<br>```text<br>\n<br>b<br>\n<br>```',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('```ruby\na\n```\n\nSome prose.\n\n```text\nb\n```\n');
+    });
+
+    it('produces an empty code block when the opening fence is immediately followed by the closing fence', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>```<br>\n<br>```');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('```\n```\n');
+    });
   });
 });
