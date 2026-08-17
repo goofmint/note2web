@@ -189,18 +189,23 @@ export function createGitRepoPublisher(options: CreateGitRepoPublisherOptions): 
   async function run(command: string, args: string[]): Promise<RunSubprocessResult> {
     if (command === 'git') {
       // `GIT_CREDENTIAL_ARGS` をサブコマンドより前に付与し(詳細は同定数のコメント参照)、
-      // 加えて `GIT_TERMINAL_PROMPT=0` を渡す。credential helper の強制が何らかの理由で
-      // 効かず認証情報が見つからない場合でも、これにより git は対話プロンプトへ
-      // フォールバックせず即座にエラー終了する(NFR「launchd で対話なし」の最終防波堤)。
-      // `env` は常にオブジェクトを渡す(GH_TOKEN 未設定でも `{ GIT_TERMINAL_PROMPT: '0' }` は
-      // 渡る)—— `runSubprocess`(`src/subprocess.ts`)は `env` が渡されればマージ
-      // (`{ ...process.env, ...env }`)、未指定なら `process.env` をそのまま使うため、
-      // ここで空でないオブジェクトを渡しても既存の環境変数を破壊しない。
+      // 加えて `GIT_TERMINAL_PROMPT=0` と `GIT_ASKPASS=''`(空)を渡す。credential helper の
+      // 強制が何らかの理由で効かず認証情報が見つからない場合でも:
+      //   - `GIT_ASKPASS=''`: 親環境から GUI の askpass プログラム(GIT_ASKPASS /
+      //     core.askPass)を継承していても、空文字で上書きすることで git は askpass 経路を
+      //     スキップする(git は askpass が「設定済みかつ非空」の場合のみ実行する)
+      //   - `GIT_TERMINAL_PROMPT=0`: askpass スキップ後のターミナルプロンプトへの
+      //     フォールバックも禁止し、即座にエラー終了させる
+      // (NFR「launchd で対話なし」の最終防波堤。GUI・ターミナルの両経路を塞ぐ)。
+      // `env` は常にオブジェクトを渡す(GH_TOKEN 未設定でも渡る)—— `runSubprocess`
+      // (`src/subprocess.ts`)は `env` が渡されればマージ(`{ ...process.env, ...env }`)、
+      // 未指定なら `process.env` をそのまま使うため、ここで空でないオブジェクトを渡しても
+      // 既存の環境変数を破壊しない。
       return runner({
         command,
         args: [...GIT_CREDENTIAL_ARGS, ...args],
         cwd: repoPath,
-        env: { ...runnerEnv, GIT_TERMINAL_PROMPT: '0' },
+        env: { ...runnerEnv, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '' },
       });
     }
     // gh コマンドは変更なし(既に GH_TOKEN 環境変数で認証する。issue #21)。

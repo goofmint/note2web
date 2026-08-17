@@ -481,13 +481,13 @@ describe('createGitRepoPublisher', () => {
       const ghCall = calls.find((call) => call.command === 'gh');
       expect(ghCall?.env).toEqual({ GH_TOKEN: 'secret-token' });
       expect(calls.every((call) => call.env?.GH_TOKEN === 'secret-token')).toBe(true);
-      // git 呼び出しには併せて GIT_TERMINAL_PROMPT=0 が付く(gh 呼び出しには付かない)。
-      expect(
-        calls
-          .filter((call) => call.command === 'git')
-          .every((call) => call.env?.GIT_TERMINAL_PROMPT === '0'),
-      ).toBe(true);
+      // git 呼び出しには併せて GIT_TERMINAL_PROMPT=0 と GIT_ASKPASS=""(空文字で GUI
+      // askpass を無効化)が付く(gh 呼び出しには付かない)。
+      const gitCallsWithToken = calls.filter((call) => call.command === 'git');
+      expect(gitCallsWithToken.every((call) => call.env?.GIT_TERMINAL_PROMPT === '0')).toBe(true);
+      expect(gitCallsWithToken.every((call) => call.env?.GIT_ASKPASS === '')).toBe(true);
       expect(ghCall?.env?.GIT_TERMINAL_PROMPT).toBeUndefined();
+      expect(ghCall?.env?.GIT_ASKPASS).toBeUndefined();
     });
 
     it('commands receive no injected GH_TOKEN when absent from the injected env, but git commands still get GIT_TERMINAL_PROMPT=0 (CodeRabbit review, PR #49: this does not mean no commands run)', async () => {
@@ -504,12 +504,14 @@ describe('createGitRepoPublisher', () => {
       // 手段があり得るため、GitRepoPublisher は GH_TOKEN の有無で git コマンドの実行有無を
       // 変えない)。ここで検証するのは、渡す `env` に GH_TOKEN が無ければ、コマンドへは
       // GH_TOKEN を注入しないという一点。一方、git コマンドには GH_TOKEN の有無に関わらず
-      // 常に GIT_TERMINAL_PROMPT=0 が付く(対話フォールバック防止、NFR)。
+      // 常に GIT_TERMINAL_PROMPT=0 と GIT_ASKPASS=""(空文字)が付く(端末プロンプトと
+      // GUI askpass の両方の対話フォールバックを防止、NFR)。
       expect(calls.length).toBeGreaterThan(0);
       expect(calls.every((call) => call.env?.GH_TOKEN === undefined)).toBe(true);
       const gitCalls = calls.filter((call) => call.command === 'git');
       expect(gitCalls.length).toBeGreaterThan(0);
       expect(gitCalls.every((call) => call.env?.GIT_TERMINAL_PROMPT === '0')).toBe(true);
+      expect(gitCalls.every((call) => call.env?.GIT_ASKPASS === '')).toBe(true);
     });
   });
 
@@ -543,7 +545,7 @@ describe('createGitRepoPublisher', () => {
       }
     });
 
-    it('the push invocation carries the credential-forcing prefix, GIT_TERMINAL_PROMPT=0 and GH_TOKEN in env, with no token value in argv', async () => {
+    it('the push invocation carries the credential-forcing prefix, GIT_TERMINAL_PROMPT=0, empty GIT_ASKPASS and GH_TOKEN in env, with no token value in argv', async () => {
       const { runner, calls } = makeMockRunner((call) =>
         gitArgs(call)[0] === 'status' ? success(' M articles/uuid.md\n') : undefined,
       );
@@ -562,6 +564,7 @@ describe('createGitRepoPublisher', () => {
       expect(pushCall?.args.slice(0, GIT_CREDENTIAL_ARGS.length)).toEqual(GIT_CREDENTIAL_ARGS);
       expect(pushCall?.env).toMatchObject({
         GIT_TERMINAL_PROMPT: '0',
+        GIT_ASKPASS: '',
         GH_TOKEN: 'super-secret-token',
       });
       // argv 自体にはトークンの値が一切現れない(FR-30。gh auth git-credential が
