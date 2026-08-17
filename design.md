@@ -191,8 +191,9 @@ interface Publisher {
 
 - 設定で指定した qiita-cli ワークスペース(`itemsRootDir`。qiita-cli 実行時に `--root <workspace>` で指定するか、`QIITA_CLI_ITEMS_ROOT` 環境変数で指定。§13-3)の `public/<uuid>.md`(`<itemsRootDir>/public/<basename>.md`。`dist/lib/file-system-repo.js` `getRootPath` / `getFilePath`)に書き、`npx --no-install qiita publish <uuid> --root <workspace>` を実行(FR-25)
 - **CLI のパッケージ解決(セキュリティ制約)**: `@qiita/qiita-cli` は T-21 で note2web の `dependencies` に**固定バージョンで追加**し(lockfile にも固定)、実行は **`npx --no-install qiita`**(またはローカルの `node_modules/.bin/qiita`)に限定する。素の `npx qiita` はローカル未導入時に npm レジストリの **`qiita` という別パッケージ**(公式 CLI ではない)を取得しに行き、そのプロセスにトークン入りの環境変数が渡ってしまうため**禁止**。未導入の場合は `checkDependencies`(doctor / sync の前提チェック)で exit 2 とし、あわせて qiita-cli の要求する Node.js engine(>= 20)を満たすことも事前検証する
-- frontmatter: `title` / `tags` / `private: false` / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)/ **`slide: false`**(§13-3 で判明した差分。下記参照)
+- frontmatter: `title` / `tags` / `private: false` / **`updated_at: ""`** / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)/ **`organization_url_name: null`** / **`slide: false`**(いずれも qiita-cli の型チェックで判明した差分。下記参照)
   - **差分(調査により判明)**: qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js` `checkSlide`)は `slide` が **真偽値であること**を要求しており(`typeof slide === "boolean"`)、フィールド自体が無い(`undefined`)場合は型エラーとして `publish` が失敗する。当初の想定(`title` / `tags` / `private` / `id` の4項目)には無かったフィールドのため、QiitaPublisher が書き出す frontmatter には `slide: false` を必須項目として追加する
+  - **差分(実機の `publish` 失敗で判明)**: 同チェックの `checkUpdatedAt` / `checkOrganizationUrlName` は `updated_at` / `organization_url_name` が **null または文字列であること**を要求しており、キー欠落(`undefined`)では `publish` が失敗する。qiita-cli 自身の新規テンプレート既定値(`updated_at: ''` / `organization_url_name: null`)を常に書き出す。`updated_at` の空文字は Invalid Date になり publish の「ローカルがリモートより古い場合の拒否」ガード(`isOlderThanRemote`)の日時比較が常に false となるため、新規・更新のどちらも拒否されない
 - タグ制約(1〜5個必須、スペース不可)への対処:
   - 半角スペースを含むタグは**除外**し警告ログ(分割送信による 403 を防ぐ)
   - 除外後 6個以上なら先頭5個に切り詰めて警告ログ
