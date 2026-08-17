@@ -30,7 +30,10 @@
   "files": [
     "dist",
     "!dist/**/*.test.js",
-    "!dist/**/*.test.d.ts"
+    "!dist/**/*.test.d.ts",
+    "ruby",
+    "!ruby/test",
+    "NOTICE"
   ],
   "engines": {
     "node": "^20.19.0 || ^22.13.0 || >=24"
@@ -41,6 +44,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "test": "vitest run",
+    "test:ruby": "node -e \"const {execFileSync}=require('node:child_process');const {readdirSync}=require('node:fs');const path=require('node:path');const dir='ruby/test';const files=readdirSync(dir,{recursive:true}).filter((f)=>f.endsWith('_test.rb')).map((f)=>path.join(dir,f)).sort();if(files.length===0){console.error('no ruby test files found under ruby/test/');process.exit(1);}for(const f of files){console.log('# '+f);execFileSync('ruby',['-Iruby/lib',f],{stdio:'inherit'});}\"",
     "build": "tsc",
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
     "prepack": "npm run clean && npm run build"

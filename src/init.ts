@@ -640,7 +640,7 @@ async function collectHatenaBlock(
  */
 async function collectDependencyWarnings(
   service: ServiceName,
-  parserEntryPoint: string,
+  parserLibEntryPoint: string,
   requiredEnvNames: readonly string[],
   options: {
     commandExistsFn: (command: string) => Promise<boolean>;
@@ -658,9 +658,9 @@ async function collectDependencyWarnings(
         'https://www.ruby-lang.org/ の手順に従ってインストールしてください。',
     );
   }
-  if (!(await fileExistsFn(parserEntryPoint))) {
+  if (!(await fileExistsFn(parserLibEntryPoint))) {
     warnings.push(
-      `[依存] apple_cloud_notes_parser が見つかりません(${parserEntryPoint})。` +
+      `[依存] apple_cloud_notes_parser が見つかりません(${parserLibEntryPoint})。` +
         '以下の手順で導入してください:\n' +
         '    git clone https://github.com/threeplanetssoftware/apple_cloud_notes_parser ~/tools/apple_cloud_notes_parser\n' +
         '    cd ~/tools/apple_cloud_notes_parser && bundle install',
@@ -1047,10 +1047,13 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     }
 
     // --- 6. 依存 CLI・環境の案内(CORRECTION B: 失敗させず警告のみ) -------------------
-    const parserEntryPoint = join(expandHome(DEFAULT_PARSER_PATH), 'notes_cloud_ripper.rb');
+    // issue #72: 実在チェックの対象が upstream の `lib/AppleNoteStore.rb` に変わった
+    // (以前は `notes_cloud_ripper.rb` エントリポイント自体を見ていた。
+    // `src/dependencies.ts` の同種チェックと同じ変更)。
+    const parserLibEntryPoint = join(expandHome(DEFAULT_PARSER_PATH), 'lib', 'AppleNoteStore.rb');
     const dependencyWarnings = await collectDependencyWarnings(
       service,
-      parserEntryPoint,
+      parserLibEntryPoint,
       requiredEnvNames,
       { commandExistsFn, fileExistsFn, qiitaCliResolvableFn, env },
     );

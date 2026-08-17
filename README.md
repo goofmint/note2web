@@ -34,7 +34,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 - **macOS**(Apple Notes のデータへローカルアクセスできる環境が前提です)
 - **Node.js**: `^20.19.0 || ^22.13.0 || >=24`(`package.json` の `engines` を参照)
 - **Ruby**: 3.0 以上(下記 `apple_cloud_notes_parser` の実行に必要)
-- **[apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)**(Apple Notes のエクスポートに使う外部 Ruby ツール。note2web には同梱されないため、別途 clone してセットアップします)
+- **[apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)**(Apple Notes のエクスポート処理が内部で読み込む外部 Ruby ライブラリ。note2web にはソース自体は同梱されないため、別途 clone してセットアップします。**セットアップ方法自体は変わっていません** — 引き続き clone して `bundle install` するだけです)
 
   ```sh
   git clone https://github.com/threeplanetssoftware/apple_cloud_notes_parser ~/tools/apple_cloud_notes_parser
@@ -42,7 +42,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
   bundle install
   ```
 
-  既定のインストール先は `~/tools/apple_cloud_notes_parser` です(設定 YAML の `exporter.parser_path` で変更可能)。
+  既定のインストール先は `~/tools/apple_cloud_notes_parser` です(設定 YAML の `exporter.parser_path` で変更可能)。**note2web は upstream の `notes_cloud_ripper.rb` を直接実行しません**——代わりに note2web に同梱される `ruby/note2web_export.rb` を実行し、そこから upstream の `lib/`(=上記 clone の `lib/` ディレクトリ)だけを読み込みます(issue #72)。これにより、設定 `source.folders` で指定した**フォルダのみが処理対象になり**、Apple Notes 内の他のフォルダ(「最近削除した項目」を含む)は一切読み込まれません。
 
 - **macOS のフルディスクアクセス権限**: Apple Notes のデータ(`~/Library/Group Containers/group.com.apple.notes`)を読み取るため、`note2web` を実行するプロセスに「フルディスクアクセス」を許可する必要があります。**対話シェルから実行する場合はターミナルアプリ(Terminal.app / iTerm2 等)**に、**launchd / cron から無人実行する場合は `node` 実行ファイル自身**に許可してください(詳細・理由は [cron / launchd での定期実行](#cron--launchd-での定期実行)節を参照)。
   1. 「システム設定」→「プライバシーとセキュリティ」→「フルディスクアクセス」を開く
@@ -330,27 +330,27 @@ note.com 向けの構成では、上記に加えてログイン済みブラウ�
 
 ## トラブルシューティング
 
-### `apple_cloud_notes_parser (notes_cloud_ripper.rb) failed`
+### `apple_cloud_notes_parser (note2web_export.rb) failed`
 
 cron / launchd から `note2web sync` を実行したときに以下のようなログが出て失敗する場合の対処法です。
 
 ```text
-note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): exitCode=1, signal=null: <出力の先頭1行>
+note2web: apple_cloud_notes_parser (note2web_export.rb) failed (exit_code): exitCode=1, signal=null: <出力の先頭1行>
 ```
 
-まず**「apple_cloud_notes_parser」はプロジェクト名、「notes_cloud_ripper.rb」はその中のエントリスクリプト名**です。両方とも [threeplanetssoftware/apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) という**同一の Ruby 製 CLI ツール**を指しています(似た名前の Python 製ライブラリ `apple-notes-parser` とは別物です)。note2web はこのツールを clone してサブプロセスとして呼び出しているだけで、同梱・再配布はしていません。
+まず**「apple_cloud_notes_parser」は note2web が内部で読み込む外部 Ruby ライブラリのプロジェクト名、「note2web_export.rb」は note2web 自身に同梱されているエクスポートスクリプト**です([threeplanetssoftware/apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)、似た名前の Python 製ライブラリ `apple-notes-parser` とは別物です)。以前(〜issue #71)は upstream の `notes_cloud_ripper.rb` を直接実行していましたが、issue #72 で note2web 自身の `ruby/note2web_export.rb` を実行する方式に変わりました——upstream の `lib/` だけを読み込み、対象フォルダ(`source.folders`)のみを処理する薄いドライバです。upstream 自体は引き続き clone してセットアップするだけで、同梱・再配布はしていません(詳細は `NOTICE`)。
 
 代表的な原因は次のとおりです:
 
 1. **ruby / bundle が cron / launchd の `PATH` に無い**: rbenv / asdf / rvm / Homebrew の Ruby を使っている場合、対話シェルでは `PATH` が通っていても cron / launchd の実行環境(最小限の `PATH`)には反映されないことがよくあります。launchd については `note2web init` が生成する plist の `EnvironmentVariables` にホームディレクトリの rbenv/asdf/rvm の shim ディレクトリを自動的に含めます(issue #71)。それでも解決しない場合は、実行経路ごとに `PATH` の設定場所が異なる点に注意してください: **対話シェルから直接実行する場合**はシェルの初期化ファイル(`~/.zshrc` 等)で `PATH` を設定し、**launchd 経由の場合**は生成済み plist の `EnvironmentVariables` の `PATH` を使い、**cron を使う場合**は crontab 側のエントリに `PATH=...` を明示してください(env ファイルには `PATH` を書きません。`note2web init` が生成する env ファイルのテンプレートにもこの点のヒントコメントが入っています)
-2. **gem がインストールされていない**: `apple_cloud_notes_parser` の clone 先で `bundle install` を実行していないと、`bundle exec ruby notes_cloud_ripper.rb` は `Could not find gem 'sqlite3'...` のようなメッセージで失敗します。以下を実行してください:
+2. **gem がインストールされていない**: `apple_cloud_notes_parser` の clone 先で `bundle install` を実行していないと、`bundle exec ruby <note2web_export.rb>` は `Could not find gem 'sqlite3'...` のようなメッセージで失敗します。以下を実行してください:
    ```sh
    cd ~/tools/apple_cloud_notes_parser   # exporter.parser_path と同じパス
    bundle install
    ```
 3. **Ruby のバージョンが古い(< 3.0)**: `ruby -v` で確認してください。`note2web doctor` はこのバージョンチェックも行います
 4. **フルディスクアクセス権限が無い**: [必要要件](#必要要件)の「macOS のフルディスクアクセス権限」を参照してください。この場合 parser 自体は起動するものの `NoteStore.sqlite` の読み取りで失敗します
-5. **`exporter.parser_path` が誤っている**: clone 先のパスと設定ファイルの `exporter.parser_path` が一致しているか確認してください
+5. **`exporter.parser_path` が誤っている**: clone 先のパスと設定ファイルの `exporter.parser_path` が一致しているか確認してください(`<exporter.parser_path>/lib/AppleNoteStore.rb` が存在するはずです)
 
 **ログの読み方**: 上記のエラーメッセージの末尾(`exitCode=... signal=...:` の後ろ)には、parser の stderr(無ければ stdout)の先頭の意味のある1行がそのまま含まれます(parser のコマンドライン自体は秘匿情報を含みうる引数がないため、この出力のみを載せています)。`bundle: command not found` なら原因1、`Could not find gem` なら原因2、というように読み分けられます。
 
@@ -362,16 +362,29 @@ note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): e
 node /Users/you/src/note2web/dist/cli.js sync --config ~/.config/note2web/zenn.yaml
 ```
 
-env ファイルの読み込みは CLI 自身が自動で行う(前述の [env ファイルの自動読み込み](#env-ファイルの自動読み込みdoctor--sync-共通)節)ため、`set -a; . env; set +a` のような追加のシェル設定は不要です。`PATH` 関連の問題を切り分けたい場合は、生成された plist(`~/Library/LaunchAgents/com.note2web.<service>.plist`)の `EnvironmentVariables` にある `PATH` の値を一時的に `export` してから実行してください。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby notes_cloud_ripper.rb -m <Notesコンテナ> -o /tmp/out --individual-files --uuid` を直接実行し、parser 単体のエラーメッセージを確認してください。
+env ファイルの読み込みは CLI 自身が自動で行う(前述の [env ファイルの自動読み込み](#env-ファイルの自動読み込みdoctor--sync-共通)節)ため、`set -a; . env; set +a` のような追加のシェル設定は不要です。`PATH` 関連の問題を切り分けたい場合は、生成された plist(`~/Library/LaunchAgents/com.note2web.<service>.plist`)の `EnvironmentVariables` にある `PATH` の値を一時的に `export` してから実行してください。それでも失敗する場合は、`exporter.parser_path` へ `cd` して `bundle exec ruby <note2webのインストール先>/ruby/note2web_export.rb -m <Notesコンテナ> -o /tmp/out --parser-lib <exporter.parser_path>/lib --folder <対象フォルダ名>` を直接実行し、エラーメッセージを確認してください。
 
 **`launcher: ruby` への切り替え**: Bundler を経由せず gem 環境が別の方法(システム全体への gem インストール等)で解決できている場合は、設定 YAML で `exporter.launcher: ruby` を指定すると `bundle exec` を挟まない従来どおりの起動に戻せます。
+
+### `Errno::ENAMETOOLONG`(構造的に解消済み)
+
+以前(issue #72 以前)は、Apple Notes ストア全体(設定 `source.folders` で指定していないフォルダ、および「最近削除した項目」= ゴミ箱を含む)のうちどこか1件でもタイトルが極端に長い/壊れたノート(例: 数千文字の URL がそのままタイトルになっているノート)があると、個別 HTML ファイルの書き込み時にファイル名がタイトル由来になるため `Errno::ENAMETOOLONG` でエクスポート全体が失敗していました。issue #72 以降、note2web 独自のエクスポートスクリプト(`ruby/note2web_export.rb`)は次の2点でこの問題を構造的に解消しています:
+
+- 個別 HTML のファイル名は常に `<uuid>.html`(UUID のみ)で組み立てられ、タイトルは一切ファイル名に使われません
+- 設定 `source.folders` で指定したフォルダ(とその配下)のみを生成・書き込みの対象にします。**「最近削除した項目」(ゴミ箱)は、設定でその名前を対象フォルダに指定していても常に除外されます**——ゴミ箱内にどのようなノートが残っていても、`sync` の実行結果には一切影響しません
+
+対象フォルダ内で個々のノートのデコード/生成に失敗した場合も、そのノート単体をスキップして処理を継続します(実行全体は中断しません)。
+
+### 暗号化(パスワード保護)ノートはスキップされます
+
+パスワードで保護された(暗号化された)ノートは、note2web が復号を試みることなく自動的にスキップされます。`sync` 実行時のログに `warn` イベント(ノートの UUID・タイトル)が出力されるので、そのノートを公開したい場合は Apple Notes 側でロックを解除してから再実行してください。
 
 ### `no such table: ZACCOUNT: (SQLite3::SQLException)`
 
 parser 自体は起動できているものの、`NoteStore.sqlite` の読み取り中にこのようなログで失敗する場合の対処法です(issue #69)。
 
 ```text
-note2web: apple_cloud_notes_parser (notes_cloud_ripper.rb) failed (exit_code): exitCode=1, signal=null: no such table: ZACCOUNT: (SQLite3::SQLException) ヒント(issue #69): ...
+note2web: apple_cloud_notes_parser (note2web_export.rb) failed (exit_code): exitCode=1, signal=null: no such table: ZACCOUNT: (SQLite3::SQLException) ヒント(issue #69): ...
 ```
 
 代表的な原因は次のとおりです(`note2web` は該当パターンを検出すると、上記のようにエラーメッセージの末尾へ同内容の日本語ヒントを自動的に追記します):
@@ -430,3 +443,5 @@ npm run build
 ## ライセンス
 
 [MIT](./LICENSE)
+
+note2web は Apple Notes のエクスポート処理で [apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser)(MIT License、Copyright Three Planets Software)を外部ライブラリとして利用します。同梱・再配布はしておらず、利用者が別途 clone してセットアップします(上記「必要要件」参照)。ライセンス全文・参照コミット・利用形態の詳細は [NOTICE](./NOTICE) を参照してください。

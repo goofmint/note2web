@@ -1,9 +1,25 @@
 /**
- * Exporter(design.md §5.2)。`apple_cloud_notes_parser` をサブプロセスとして実行し、
- * 一時ディレクトリに出力させたうえで、JSON / 個別 HTML / files から `Note` モデルの
- * 骨格(skeleton)一覧を組み立てる。`title` / `emoji` の実値抽出は
- * メタデータ抽出層(`src/transform/metadata.ts`、T-10)の担当であり、ここでは
+ * Exporter(design.md §5.2、issue #72)。note2web 独自の Ruby スクリプト
+ * (`ruby/note2web_export.rb`。upstream の `apple_cloud_notes_parser` の `lib/` を
+ * 薄くラップし、対象フォルダ(`source.folders`、FR-02)のみを生成・書き込みする)を
+ * サブプロセスとして実行し、一時ディレクトリに出力させたうえで、JSON / 個別 HTML /
+ * files から `Note` モデルの骨格(skeleton)一覧を組み立てる。`title` / `emoji` の
+ * 実値抽出はメタデータ抽出層(`src/transform/metadata.ts`、T-10)の担当であり、ここでは
  * 空値で初期化するだけにとどめる(design.md §5.3 冒頭のコンポーネント分割どおり)。
+ *
+ * **issue #72 以前との差分**: 以前は upstream の `notes_cloud_ripper.rb` をそのまま
+ * (`--individual-files --uuid`)実行し、Notes ストア全体をエクスポートさせたうえで
+ * TS 側がフォルダ・UUID で絞り込んでいた。upstream にはフォルダ単位のフィルタが無く、
+ * かつ個別 HTML 書き出しがタイトル由来のファイル名を組み立てるため、ストア中のどこか
+ * (「最近削除した項目」= ゴミ箱の中を含む)1件でもタイトルが極端に長い/壊れたノートが
+ * あると `Errno::ENAMETOOLONG` でエクスポート全体が落ちる問題があった。現在は
+ * note2web 自身のスクリプトが `--folder <name>`(configured folders ごとに1つ、
+ * サブツリー一致は Ruby 側で解決)を受け取り、対象外フォルダ・ゴミ箱・暗号化ノートを
+ * 生成/書き込みの対象から外したうえで、対象内ノート1件のデコード失敗も隔離して継続する
+ * (根拠・到達レベルの詳細は `ruby/note2web_export.rb` 冒頭コメント、ライセンス・
+ * 参照コミットは `NOTICE`)。これに伴い、個別 HTML の格納先も
+ * `html/note_store<N>/<フォルダパス>/<uuid> - <タイトル>.html` から
+ * `html/<uuid>.html`(フラット)へ単純化された。
  *
  * `tags` のみ例外で、ここ(Exporter)が JSON ノートオブジェクトの `hashtags`
  * フィールド(parser が抽出済み)をそのまま(順序を保った重複排除のみ行い)詰める
@@ -19,6 +35,7 @@
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
@@ -41,6 +58,19 @@ export const DEFAULT_NOTES_CONTAINER = '~/Library/Group Containers/group.com.app
 
 /** 一時出力ディレクトリの `mkdtemp` プレフィックス。 */
 const TMP_DIR_PREFIX = 'note2web-export-';
+
+/**
+ * note2web に同梱される Ruby エクスポートスクリプト(`ruby/note2web_export.rb`)の
+ * 絶対パス。このファイル(開発時 `src/exporter/apple-notes.ts`、ビルド後
+ * `dist/exporter/apple-notes.js`)から2階層上がパッケージルートになる
+ * (`tsconfig.json` の `rootDir: "src"` / `outDir: "dist"` によりディレクトリ構造が
+ * 一致するため。`src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と同じ手法)。
+ * `package.json` の `"files"` にも `ruby` ディレクトリを含めており、npm 配布物にも
+ * 実体が含まれる。`src/dependencies.ts` も同じ定数を再利用する。
+ */
+export const NOTE2WEB_EXPORT_SCRIPT_PATH = fileURLToPath(
+  new URL('../../ruby/note2web_export.rb', import.meta.url),
+);
 
 /**
  * サブプロセス実行を差し替えるための最小限の関数シグネチャ。T-05 の `runSubprocess`
@@ -151,56 +181,82 @@ const noteJsonSchema = z
   })
   .passthrough();
 
+/**
+ * `skipped_encrypted`(JSON トップレベル、issue #72)の1エントリ。パスワード保護
+ * ノートは復号を試みず、生成/書き込みの対象から外される(design.md §5.2)。
+ * `ruby/lib/note2web_export_core.rb` `build_skipped_encrypted_entry` が組み立てる。
+ */
+const skippedEncryptedJsonSchema = z
+  .object({
+    uuid: z.string(),
+    title: z.string(),
+  })
+  .passthrough();
+
+/**
+ * `skipped_errors`(JSON トップレベル、issue #72)の1エントリ。対象内ノート1件の
+ * デコード/生成失敗を記録したもの(design.md §5.2「対象内ノートの1件の失敗で全体を
+ * 中断しない」)。`ruby/lib/note2web_export_core.rb` `build_skipped_error_entry` が
+ * 組み立てる。
+ */
+const skippedErrorJsonSchema = z
+  .object({
+    uuid: z.string(),
+    title: z.string(),
+    error: z.string(),
+  })
+  .passthrough();
+
 const parserJsonSchema = z
   .object({
     folders: z.record(z.string(), folderJsonSchema),
     notes: z.record(z.string(), noteJsonSchema),
+    // note2web 独自スクリプトが追加するフィールド(issue #72)。旧 parser 直呼び出し
+    // 時代の fixture/JSON との後方互換のため任意項目にする。
+    skipped_encrypted: z.array(skippedEncryptedJsonSchema).optional(),
+    skipped_errors: z.array(skippedErrorJsonSchema).optional(),
   })
   .passthrough();
 
 type ParserJson = z.infer<typeof parserJsonSchema>;
 
 // ---------------------------------------------------------------------------
-// フォルダパス再構築(design.md §5.2 の具体的な対応規則)。
+// フォルダインデックス(design.md §5.2「defense-in-depth」節、issue #72)。
+//
+// note2web 独自スクリプト(`ruby/note2web_export.rb`)が既に `source.folders`
+// (FR-02)で絞り込んだ JSON を渡してくる想定だが、TS 側でも同じサブツリー一致の
+// フィルタを安価な多重防御(defense-in-depth)として掛け続ける——Ruby 側の絞り込みが
+// 何らかの理由で漏れても、対象外フォルダのノートが `notes`/`failed` のいずれにも
+// 決して現れないという保証(design.md §5.2 hard guarantee (2))を TS 側単独でも満たす
+// ため。個別 HTML の格納先が `html/<uuid>.html`(フラット)になった(issue #72)ため、
+// 以前あった「JSON の `folders` 階層からディレクトリパスを再構築する」処理
+// (`cleanName`/`path` フィールド)は不要になり削除した。
 // ---------------------------------------------------------------------------
 
-/** parser の `clean_name`(`lib/AppleNotesAccount.rb` / `lib/AppleNotesFolder.rb`)を再現する。 */
-function cleanName(name: string): string {
-  return name.replace(/[/:\\]/g, '_');
-}
-
-/** フォルダインデックスの1エントリ。`path` は個別 HTML の格納ディレクトリ名を再構築したもの。 */
+/** フォルダインデックスの1エントリ。 */
 interface FolderIndexEntry {
   id: number;
   name: string;
   parentId: number | null;
-  /** `html/note_store<N>/` からの相対ディレクトリパス(design.md §5.2)。 */
-  path: string;
 }
 
 /**
  * JSON トップレベルの `folders`(ルートのみを key に持ち、子は `child_folders` に
  * 再帰的に格納される。design.md §13-7)を再帰的に辿り、`primary_key` をキーとした
- * フラットなインデックスへ変換する。ルートフォルダの `path` は
- * `<clean(account)>-<clean(name)>`、子フォルダは `<親の path>/<clean(name)>`
- * (アカウント名を繰り返さない。design.md §5.2)。
+ * フラットなインデックスへ変換する。
  */
 function buildFolderIndex(foldersJson: Record<string, FolderJson>): Map<number, FolderIndexEntry> {
   const index = new Map<number, FolderIndexEntry>();
 
-  function walk(folder: FolderJson, parentPath: string | undefined, parentId: number | null): void {
-    const path =
-      parentPath === undefined
-        ? `${cleanName(folder.account)}-${cleanName(folder.name)}`
-        : `${parentPath}/${cleanName(folder.name)}`;
-    index.set(folder.primary_key, { id: folder.primary_key, name: folder.name, parentId, path });
+  function walk(folder: FolderJson, parentId: number | null): void {
+    index.set(folder.primary_key, { id: folder.primary_key, name: folder.name, parentId });
     for (const child of Object.values(folder.child_folders)) {
-      walk(child, path, folder.primary_key);
+      walk(child, folder.primary_key);
     }
   }
 
   for (const root of Object.values(foldersJson)) {
-    walk(root, undefined, null);
+    walk(root, null);
   }
 
   return index;
@@ -249,54 +305,22 @@ function resolveIncludedFolderIds(
 }
 
 // ---------------------------------------------------------------------------
-// UUID → 個別 HTML の解決(design.md §5.2)。
+// UUID → 個別 HTML の解決(design.md §5.2、issue #72で `html/<uuid>.html` 直接解決に
+// 単純化)。
 // ---------------------------------------------------------------------------
 
 /**
- * `folderDir` 直下で `<uuid> - *.html` に前方一致するファイルを探し、生の HTML を
- * 未加工のまま返す(design.md §5.2。JSON の `html` フィールドは使わない)。
- * 一致が0件・複数件のいずれの場合も呼び出し側で failed 扱いにできるよう例外を投げる。
- *
- * 同じフォルダに属するノートごとに `readdir` を繰り返さないよう、ディレクトリ一覧は
- * `dirCache`(フォルダパス → エントリ一覧)で1回だけ読んで使い回す。UUID の重複
- * (複数件一致)検出はキャッシュ後も一覧全体に対して行うため、挙動は変わらない。
+ * `html/<uuid>.html` を直接読み、生の HTML を未加工のまま返す(design.md §5.2。
+ * JSON の `html` フィールドは使わない)。見つからない・読み取れない場合は
+ * 呼び出し側で failed 扱いにできるよう例外を投げる。
  */
-async function resolveNoteHtml(
-  folderDir: string,
-  uuid: string,
-  dirCache: Map<string, string[]>,
-): Promise<string> {
-  let entries = dirCache.get(folderDir);
-  if (entries === undefined) {
-    try {
-      entries = await readdir(folderDir);
-    } catch (error) {
-      throw new Error(`folder directory not found for HTML resolution: ${folderDir}`, {
-        cause: error,
-      });
-    }
-    dirCache.set(folderDir, entries);
+async function resolveNoteHtml(htmlRoot: string, uuid: string): Promise<string> {
+  const path = join(htmlRoot, `${uuid}.html`);
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    throw new Error(`individual HTML file not found for uuid "${uuid}": ${path}`, { cause: error });
   }
-
-  const prefix = `${uuid} - `;
-  const matches = entries.filter((name) => name.startsWith(prefix) && name.endsWith('.html'));
-
-  if (matches.length === 0) {
-    throw new Error(`no individual HTML file found for uuid "${uuid}" under: ${folderDir}`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `multiple individual HTML files matched uuid "${uuid}" under ${folderDir}: ${matches.join(', ')}`,
-    );
-  }
-
-  const matchedName = matches[0];
-  if (matchedName === undefined) {
-    // matches.length === 1 を確認済みのため到達しない。noUncheckedIndexedAccess 相当の
-    // 保守的なガード。
-    throw new Error(`unexpected empty match for uuid "${uuid}" under: ${folderDir}`);
-  }
-  return readFile(join(folderDir, matchedName), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -359,10 +383,12 @@ async function defaultTmpDirFactory(): Promise<string> {
   return mkdtemp(join(tmpdir(), TMP_DIR_PREFIX));
 }
 
-/** `json/all_notes_<N>.json` を探し、パスと `<N>`(`html/note_store<N>/` の解決に使う)を返す。 */
-async function locateNotesJsonFile(
-  exportDir: string,
-): Promise<{ path: string; noteStoreNumber: string }> {
+/**
+ * `json/all_notes_<N>.json` を探してパスを返す(issue #72で `html/<uuid>.html` が
+ * フラット構成になったため、以前 `html/note_store<N>/` の解決に使っていた `<N>` は
+ * もう不要——`json/` ディレクトリの実ファイル名だけを見て決める)。
+ */
+async function locateNotesJsonFile(exportDir: string): Promise<string> {
   const jsonDir = join(exportDir, 'json');
   let entries: string[];
   try {
@@ -375,12 +401,8 @@ async function locateNotesJsonFile(
 
   const pattern = /^all_notes_(\d+)\.json$/;
   for (const name of entries) {
-    const match = pattern.exec(name);
-    if (match !== null) {
-      const noteStoreNumber = match[1];
-      if (noteStoreNumber !== undefined) {
-        return { path: join(jsonDir, name), noteStoreNumber };
-      }
+    if (pattern.test(name)) {
+      return join(jsonDir, name);
     }
   }
 
@@ -392,18 +414,20 @@ async function locateNotesJsonFile(
 // ---------------------------------------------------------------------------
 
 /**
- * `apple_cloud_notes_parser` をサブプロセスで実行し、`Note` モデルの骨格一覧を
- * 組み立てる(design.md §5.2)。
+ * note2web 独自の Ruby スクリプト(`ruby/note2web_export.rb`。upstream の
+ * `apple_cloud_notes_parser` の `lib/` を薄くラップする、issue #72)をサブプロセスで
+ * 実行し、`Note` モデルの骨格一覧を組み立てる(design.md §5.2)。
  *
  * 1. `exporter.parser_path` / `exporter.notes_container`(既定値あり、design.md §7)を
- *    `~` 展開したうえで、`notes_cloud_ripper.rb -m <container> -o <tmpdir>
- *    --individual-files --uuid` を `cwd: parser_path` で実行する(タイムアウトは
+ *    `~` 展開したうえで、`<note2web_export.rb> -m <container> -o <tmpdir>
+ *    --parser-lib <parser_path>/lib --folder <name>`(`source.folders` の各要素につき
+ *    1つ、FR-02)を `cwd: parser_path` で実行する(タイムアウトは
  *    `DEFAULT_TIMEOUTS.parser` = 15分、T-05)。起動コマンドは `exporter.launcher`
- *    (既定 `'bundle'`)で選ぶ——既定は `bundle exec ruby notes_cloud_ripper.rb ...`
- *    (Gemfile の `sqlite3`/`nokogiri` 等を Bundler 経由で解決する。launchd の最小限の
- *    環境では素の `ruby` だけでは gem が解決できず `LoadError` になりがちなため。
- *    issue #67)。`'ruby'` を指定すると `ruby notes_cloud_ripper.rb ...`(Bundler を
- *    経由しない旧来の直接起動)にフォールバックできる。
+ *    (既定 `'bundle'`)で選ぶ——既定は `bundle exec ruby <note2web_export.rb> ...`
+ *    (upstream の Gemfile が要求する `sqlite3`/`nokogiri` 等を Bundler 経由で解決する。
+ *    launchd の最小限の環境では素の `ruby` だけでは gem が解決できず `LoadError` に
+ *    なりがちなため。issue #67)。`'ruby'` を指定すると `ruby <note2web_export.rb> ...`
+ *    (Bundler を経由しない旧来の直接起動)にフォールバックできる。
  * 2. 非成功終了は `ExportError`(分類つき)を投げる。実行全体を中断させる想定
  *    (design.md §10「parser の実行失敗」→ 呼び出し側で exit 1)であり、ここでは
  *    `process.exit` は呼ばない。stderr/stdout に `no such table` / `SQLite3::SQLException`
@@ -411,12 +435,15 @@ async function locateNotesJsonFile(
  *    未チェックポイント・macOS 間のスキーマ不一致等が典型的な原因)は、考えられる原因を
  *    案内する短い日本語のヒントをメッセージ末尾に追記する(`classification`・exitCode・
  *    signal の各部分は変更しない)。
- * 3. `json/all_notes_<N>.json` を読み、`source.folders`(FR-02、配下=サブツリー
- *    マッチ)でノートを絞り込む。
- * 4. 各ノートについて、JSON の `folders` 階層からフォルダディレクトリパスを再構築し、
- *    `html/note_store<N>/<パス>/` 配下で `<uuid> - *.html` を前方一致で探して本文を
- *    読み込む。解決できなかったノートのみ `failed` へ回し、`logger.noteFailed` を
- *    発行して処理を続行する(design.md §5.2)。
+ * 3. `json/all_notes_<N>.json` を読む。note2web 独自スクリプトは既に `source.folders`
+ *    (FR-02)で絞り込んだ結果を返す想定だが、TS 側でも同じサブツリーフィルタを
+ *    defense-in-depth として掛け続ける(このファイル冒頭「フォルダインデックス」節)。
+ * 4. 各ノートについて `html/<uuid>.html` を直接読んで本文を取得する(issue #72で
+ *    フラット構成に単純化)。解決できなかったノートのみ `failed` へ回し、
+ *    `logger.noteFailed` を発行して処理を続行する(design.md §5.2)。
+ * 5. JSON トップレベルの `skipped_encrypted` / `skipped_errors`(issue #72。
+ *    パスワード保護ノート・対象内ノートのデコード失敗)があれば、ノートごとに
+ *    `logger.warn` を発行する(`notes`/`failed` には含めない。§5.2 参照)。
  *
  * 成功時、一時出力ディレクトリは削除しない(`ExportResult.exportDir` として返すのみ。
  * 削除は呼び出し側=sync フロー(T-14)の責務)。一方、失敗して例外を投げる場合は
@@ -452,17 +479,23 @@ async function runExport(params: {
 }): Promise<ExportResult> {
   const { config, logger, runner, parserPath, notesContainer, exportDir } = params;
 
-  // 起動コマンドの組み立て(design.md §5.2、issue #67)。既定 'bundle' は Gemfile の
-  // gem(sqlite3/nokogiri 等)を Bundler 経由で解決する — launchd の最小限の PATH/GEM_HOME
-  // では素の ruby だけでは解決できず LoadError になりがちなため、こちらを既定にする。
+  // 起動コマンドの組み立て(design.md §5.2、issue #67・#72)。既定 'bundle' は upstream の
+  // Gemfile の gem(sqlite3/nokogiri 等)を Bundler 経由で解決する — launchd の最小限の
+  // PATH/GEM_HOME では素の ruby だけでは解決できず LoadError になりがちなため、こちらを
+  // 既定にする。note2web 独自スクリプト(`ruby/note2web_export.rb`)自身は note2web の
+  // リポジトリに同梱されるため絶対パスで指定し、upstream の `lib/` は `--parser-lib` で
+  // 渡す(cwd は引き続き `parser_path` — Bundler が Gemfile を見つけられるようにするため)。
+  // `--folder` は `source.folders`(FR-02)の要素ごとに1つ渡し、対象フォルダ(サブツリー
+  // 含む)のみを note2web 独自スクリプト側で生成/書き込みさせる(issue #72 correction A)。
   const rubyScriptArgs = [
-    'notes_cloud_ripper.rb',
+    NOTE2WEB_EXPORT_SCRIPT_PATH,
     '-m',
     notesContainer,
     '-o',
     exportDir,
-    '--individual-files',
-    '--uuid',
+    '--parser-lib',
+    join(parserPath, 'lib'),
+    ...config.source.folders.flatMap((folderName) => ['--folder', folderName]),
   ];
   const launcher = config.exporter?.launcher ?? 'bundle';
   const { command, args } =
@@ -507,14 +540,14 @@ async function runExport(params: {
         '詳細は README のトラブルシューティングを参照してください。'
       : '';
     throw new ExportError(
-      `apple_cloud_notes_parser (notes_cloud_ripper.rb) failed ` +
+      `apple_cloud_notes_parser (note2web_export.rb) failed ` +
         `(${subprocessResult.classification ?? 'unknown'}): ` +
         `exitCode=${String(subprocessResult.exitCode)}, signal=${String(subprocessResult.signal)}: ${detail}${hint}`,
       { classification: subprocessResult.classification },
     );
   }
 
-  const { path: jsonPath, noteStoreNumber } = await locateNotesJsonFile(exportDir);
+  const jsonPath = await locateNotesJsonFile(exportDir);
 
   let rawJson: string;
   try {
@@ -532,39 +565,26 @@ async function runExport(params: {
 
   const folderIndex = buildFolderIndex(parsed.folders);
   const includedFolderIds = resolveIncludedFolderIds(folderIndex, config.source.folders);
-  const htmlRoot = join(exportDir, 'html', `note_store${noteStoreNumber}`);
+  const htmlRoot = join(exportDir, 'html');
 
   const notes: Note[] = [];
   const failed: FailedNote[] = [];
-  // フォルダごとの readdir 結果のキャッシュ(同一フォルダの全ノートで使い回す)。
-  const dirCache = new Map<string, string[]>();
 
   for (const noteJson of Object.values(parsed.notes)) {
     const folderId =
       typeof noteJson.folder_key === 'number' ? noteJson.folder_key : Number(noteJson.folder_key);
 
     if (!includedFolderIds.has(folderId)) {
-      // source.folders(FR-02)の配下ではない。HTML 解決も添付収集も行わず、
-      // notes / failed のいずれにも含めない(設計「対象外フォルダは一切処理しない」)。
-      continue;
-    }
-
-    const folderEntry = folderIndex.get(folderId);
-    if (folderEntry === undefined) {
-      const error = `note references unknown folder_key ${String(noteJson.folder_key)}`;
-      failed.push({ uuid: noteJson.uuid, title: noteJson.title, error });
-      logger?.noteFailed({
-        service: config.service,
-        noteUuid: noteJson.uuid,
-        title: noteJson.title,
-        error,
-      });
+      // source.folders(FR-02)の配下ではない。note2web 独自スクリプト側で既に
+      // 除外されているはずだが、TS 側でも defense-in-depth として同じフィルタを掛ける
+      // (このファイル冒頭「フォルダインデックス」節)。HTML 解決も添付収集も行わず、
+      // notes / failed のいずれにも含めない。
       continue;
     }
 
     let bodyHtml: string;
     try {
-      bodyHtml = await resolveNoteHtml(join(htmlRoot, folderEntry.path), noteJson.uuid, dirCache);
+      bodyHtml = await resolveNoteHtml(htmlRoot, noteJson.uuid);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failed.push({ uuid: noteJson.uuid, title: noteJson.title, error: message });
@@ -592,7 +612,35 @@ async function runExport(params: {
     });
   }
 
+  // JSON トップレベルの `skipped_encrypted` / `skipped_errors`(issue #72)。いずれも
+  // note2web 独自スクリプトが生成/書き込みの対象から外したノートであり、`notes`/`failed`
+  // には含めない(design.md §5.2「対象内ノートの1件の失敗で全体を中断しない」節)—— 単に
+  // `logger.warn` で可視化するだけにとどめる。タイトルは警告メッセージ中で
+  // `TITLE_TRUNCATE_LENGTH` 文字に切り詰める(JSON 自体には切り詰めずそのまま入っている)。
+  for (const entry of parsed.skipped_encrypted ?? []) {
+    logger?.warn({
+      message: `note skipped: password-protected (encrypted) note, not decrypted: uuid=${entry.uuid} title=${truncateForLog(entry.title)}`,
+      service: config.service,
+      noteUuid: entry.uuid,
+      title: entry.title,
+    });
+  }
+  for (const entry of parsed.skipped_errors ?? []) {
+    logger?.warn({
+      message: `note skipped: export script failed to decode/generate this note: uuid=${entry.uuid} title=${truncateForLog(entry.title)} error=${truncateForLog(entry.error)}`,
+      service: config.service,
+      noteUuid: entry.uuid,
+      title: entry.title,
+    });
+  }
+
   logger?.exportDone({ noteCount: notes.length });
 
   return { notes, failed, exportDir };
+}
+
+/** ログメッセージ埋め込み用に文字列を短く切り詰める(design.md §9、issue #72)。 */
+const TITLE_TRUNCATE_LENGTH = 80;
+function truncateForLog(value: string): string {
+  return value.length > TITLE_TRUNCATE_LENGTH ? `${value.slice(0, TITLE_TRUNCATE_LENGTH)}…` : value;
 }
