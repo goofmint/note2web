@@ -361,6 +361,22 @@ describe('transformBody', () => {
       expect(markdown).toBe('```\nhello\n```\n');
     });
 
+    it('does not recognize fence markers inside a list item (top-level-only contract)', () => {
+      // 仕様: 認識対象は mdast の root 直下(本文の最上位の行)のみ。箇条書き・引用の
+      // 内部にあるフェンス行は変換しない(recognizeCodeFences が root.children だけを
+      // 走査する実装に依存する境界の回帰テスト)。
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<ul><li>```ruby</li><li>puts 1</li><li>```</li></ul>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      // リスト内のフェンス行はコードブロックにならず、リスト項目のまま
+      // (バッククォートはエスケープされる)。
+      expect(markdown).not.toContain('```ruby\nputs 1\n```');
+      expect(markdown).toContain('- ');
+      expect(markdown).toContain('puts 1');
+    });
+
     it('leaves an unclosed fence untouched (escaped literal text, as before this fix)', () => {
       const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>puts 1');
       const { markdown } = transformBody({ bodyHtml });
