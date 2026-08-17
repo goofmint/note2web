@@ -67,18 +67,23 @@ describe('golden: renderQiitaArticle frontmatter', () => {
   });
   const markdown = '本文はここに書きます。\n\n見出しの前後にも改行があります。\n';
 
+  // updated_at / organization_url_name は qiita-cli の frontmatter 型チェック
+  // (checkUpdatedAt / checkOrganizationUrlName)の必須キー。qiita-cli の新規テンプレート
+  // 既定値(空文字 / null)を常に書き出す(design.md §5.7 QiitaPublisher の差分注記)。
   const expectedArtifact =
     '---\n' +
     'title: "こんにちは、世界"\n' +
     'tags: ["TypeScript","Qiita記事"]\n' +
     'private: false\n' +
-    'slide: false\n' +
+    'updated_at: ""\n' +
     'id: null\n' +
+    'organization_url_name: null\n' +
+    'slide: false\n' +
     '---\n' +
     '\n' +
     markdown;
 
-  it('serializes the fixed frontmatter block + body exactly (key order title/tags/private/slide/id)', () => {
+  it('serializes the fixed frontmatter block + body exactly (key order title/tags/private/updated_at/id/organization_url_name/slide)', () => {
     const article = renderQiitaArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.artifact).toBe(expectedArtifact);
   });
@@ -92,6 +97,37 @@ describe('golden: renderQiitaArticle frontmatter', () => {
     const article = renderQiitaArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.noteUuid).toBe(note.uuid);
     expect(article.title).toBe('こんにちは、世界');
+  });
+
+  it('passes the actual bundled qiita-cli frontmatter type check (regression: updated_at / organization_url_name were missing)', async () => {
+    // 同梱されている実物の qiita-cli の型チェッカーに、生成した artifact の frontmatter を
+    // 通す。キー → フィールドのマッピングは qiita-cli の
+    // dist/lib/file-system-repo.js `FileContent.read` と同一の対応
+    // (private → secret / updated_at → updatedAt / organization_url_name →
+    // organizationUrlName)で組み立てる。実機で `updated_at` /
+    // `organization_url_name` の欠落により publish が失敗した回帰を防ぐ。
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const { checkFrontmatterType } =
+      require('@qiita/qiita-cli/dist/lib/check-frontmatter-type.js') as {
+        checkFrontmatterType: (frontMatter: Record<string, unknown>) => string[];
+      };
+    const { parse: parseYaml } = await import('yaml');
+
+    const article = renderQiitaArticle({ note, markdown, config: CONFIG, prev: null });
+    const frontmatterBlock = article.artifact.split('---\n')[1] ?? '';
+    const data = parseYaml(frontmatterBlock) as Record<string, unknown>;
+
+    const errors = checkFrontmatterType({
+      title: data.title,
+      tags: data.tags,
+      secret: data.private,
+      updatedAt: data.updated_at,
+      id: data.id,
+      organizationUrlName: data.organization_url_name,
+      slide: data.slide,
+    });
+    expect(errors).toEqual([]);
   });
 });
 

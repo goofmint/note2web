@@ -194,7 +194,8 @@ const QIITA_PUBLIC_DIR = 'public';
  * `dist/lib/file-system-repo.js` `getRootPath`/`getFilePath`)で、frontmatter の内容も
  * `Note`/`prev` のみから決まるため(`renderZennArticle`/`renderHugoArticle` と同じ方針)。
  *
- * frontmatter のキー順は `QIITA_FRONTMATTER_KEY_ORDER`(`title`/`tags`/`private`/`slide`/`id`)
+ * frontmatter のキー順は `QIITA_FRONTMATTER_KEY_ORDER`
+ * (`title`/`tags`/`private`/`updated_at`/`id`/`organization_url_name`/`slide`)
  * のとおり組み立てる。`id` は初回配信時(`prev` が `null`、または `prev.remoteId` が
  * `null`)は `null`、既配信なら前回の `remoteId` をそのまま書く——qiita-cli は
  * frontmatter の `id` の有無で新規作成/更新を判断するため、既知の ID を渡さないと
@@ -214,13 +215,22 @@ export const renderQiitaArticle: NoteRenderer = ({
     logger,
   });
 
-  // QIITA_FRONTMATTER_KEY_ORDER の並び(title/tags/private/slide/id)どおりに組み立てる。
+  // QIITA_FRONTMATTER_KEY_ORDER の並び
+  // (title/tags/private/updated_at/id/organization_url_name/slide)どおりに組み立てる。
+  // `updated_at` は常に空文字(qiita-cli の新規テンプレート既定値)。qiita-cli の publish は
+  // 「ローカルの updated_at がリモートより古い」場合に拒否するガードを持つが、空文字は
+  // Invalid Date になり日時比較が常に false のため、新規・更新のどちらも拒否されない。
+  // `organization_url_name` は常に null(組織投稿は本ツールの対象外)。どちらもキーを
+  // 省略すると undefined になり qiita-cli の frontmatter 型チェックに落ちる(checkUpdatedAt /
+  // checkOrganizationUrlName は「null または文字列」を要求する)。
   const entries: FrontmatterEntry[] = [
     [QIITA_FRONTMATTER_KEY_ORDER[0], note.title],
     [QIITA_FRONTMATTER_KEY_ORDER[1], tags],
     [QIITA_FRONTMATTER_KEY_ORDER[2], false],
-    [QIITA_FRONTMATTER_KEY_ORDER[3], false],
+    [QIITA_FRONTMATTER_KEY_ORDER[3], ''],
     [QIITA_FRONTMATTER_KEY_ORDER[4], prev?.remoteId ?? null],
+    [QIITA_FRONTMATTER_KEY_ORDER[5], null],
+    [QIITA_FRONTMATTER_KEY_ORDER[6], false],
   ];
 
   const artifact = renderArtifact(entries, markdown);

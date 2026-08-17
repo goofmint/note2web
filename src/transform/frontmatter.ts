@@ -243,8 +243,22 @@ export const JEKYLL_FRONTMATTER_KEY_ORDER = ['title', 'date', 'categories', 'tag
  * 調査で qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js`
  * `checkSlide`)が `slide` を真偽値として必須にしていると判明したため追加した
  * (`src/publishers/qiita.ts` 冒頭 JSDoc 参照)。
+ *
+ * `updated_at` / `organization_url_name` は実機の `publish` 失敗で判明した同チェックの
+ * 必須キー(`checkUpdatedAt` / `checkOrganizationUrlName`。キー欠落 = undefined は
+ * 「null または文字列」の検証に落ちる)。qiita-cli 自身の新規テンプレート既定値
+ * (`updated_at: ''` / `organization_url_name: null`)をそのまま書く。キーの並びも
+ * qiita-cli の `qiita new` テンプレートに合わせている。
  */
-export const QIITA_FRONTMATTER_KEY_ORDER = ['title', 'tags', 'private', 'slide', 'id'] as const;
+export const QIITA_FRONTMATTER_KEY_ORDER = [
+  'title',
+  'tags',
+  'private',
+  'updated_at',
+  'id',
+  'organization_url_name',
+  'slide',
+] as const;
 
 /**
  * note.com(`noet`)の frontmatter キー順(design.md §5.7 NotePublisher 節、§13-4、T-25)。
