@@ -72,6 +72,11 @@
  *     アセット自体への参照は失われる(**コードフェンス内の添付参照は非対応**。
  *     `note2web-asset://` プレースホルダが本文に残らないため、AssetUploader
  *     (T-13)の「未解決プレースホルダが残っていないこと」検証にも抵触しない)
+ * - ノート本文中に地の文として書かれたインラインコード(`` `code` `` のバッククォート対)
+ *   を、逐語の `inlineCode` ノードとして認識する(`recognizeInlineCode`。実機で
+ *   `` `code` `` が `` \`code\` `` とエスケープされてしまう不具合の修正。
+ *   コードフェンス認識のインライン版)。対はバッククォート・改行を含まない1文字以上の
+ *   内容に限り、対になっていないバッククォートは従来どおりエスケープされたまま残す
  */
 
 import { extname } from 'node:path';
@@ -87,9 +92,11 @@ import type { Element, ElementContent, Root, RootContent } from 'hast';
 import type {
   Code as MdastCode,
   Image,
+  InlineCode,
   Link,
   Root as MdastRoot,
   RootContent as MdastRootContent,
+  Text as MdastText,
 } from 'mdast';
 import { toString as mdastToString } from 'mdast-util-to-string';
 import { isImageExtension } from '../assets/uploader.js';
@@ -729,6 +736,83 @@ function unwrapAutolinks(node: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
+// インラインコード認識(design.md §5.4。hast→mdast 変換後・`remark-stringify`
+// 直列化前の後処理。`recognizeCodeFences`(ブロック)のインライン版)。
+// ---------------------------------------------------------------------------
+
+/**
+ * 「インラインコード区間」のパターン: バッククォート対に挟まれた、バッククォート・改行を
+ * 含まない1文字以上の内容。改行を跨ぐ対は認識しない(`<br>` 区切りの各行は独立した段落に
+ * なるため、通常のノートでは元々跨げない。同一 text ノード内の改行も跨がないことを
+ * ここで明示する)。
+ */
+const INLINE_CODE_PATTERN = /`([^`\n]+)`/g;
+
+/**
+ * ノート本文に地の文として書かれたインラインコード(`` `code` `` のバッククォート対)を、
+ * 逐語の `inlineCode` ノードとして認識する(実機 Zenn/Qiita 公開で、`` `code` `` が
+ * `` \`code\` `` とエスケープされてしまう不具合の修正。`recognizeCodeFences`(ブロックの
+ * ```` ``` ```` フェンス)のインライン版)。
+ *
+ * mdast ツリー全体の `text` ノードを再帰的に走査し、`INLINE_CODE_PATTERN` に一致する
+ * 区間を `inlineCode` ノードへ、その前後を `text` ノードへ分割して差し替える。
+ *
+ * - 対になっていないバッククォート(奇数個の余り)は `text` のまま残す(従来どおり
+ *   `remark-stringify` が `` \` `` にエスケープする。対の位置を推測しない——
+ *   `recognizeCodeFences` の「閉じフェンスを推測しない」方針と同じ)
+ * - `inlineCode` の内容は完全に逐語(`remark-stringify` は `inlineCode` の内容を
+ *   エスケープしない。内容にバッククォートは含まれ得ない——`INLINE_CODE_PATTERN` が
+ *   除外している)
+ * - `code`(コードフェンス認識後のブロック)・`inlineCode` は `children` を持たないため
+ *   走査対象にならず、フェンス内容が二重に変換されることはない
+ */
+function recognizeInlineCode(node: unknown): void {
+  if (typeof node !== 'object' || node === null || !('children' in node)) {
+    return;
+  }
+  const children = (node as { children: unknown }).children;
+  if (!Array.isArray(children)) {
+    return;
+  }
+  for (let index = 0; index < children.length; index += 1) {
+    const child: unknown = children[index];
+    if (typeof child !== 'object' || child === null) {
+      continue;
+    }
+    const typed = child as { type?: unknown; value?: unknown };
+    if (typed.type !== 'text' || typeof typed.value !== 'string') {
+      recognizeInlineCode(child);
+      continue;
+    }
+
+    const value = typed.value;
+    if (!value.includes('`')) {
+      continue;
+    }
+    const replacements: Array<MdastText | InlineCode> = [];
+    let lastIndex = 0;
+    INLINE_CODE_PATTERN.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = INLINE_CODE_PATTERN.exec(value)) !== null) {
+      if (match.index > lastIndex) {
+        replacements.push({ type: 'text', value: value.slice(lastIndex, match.index) });
+      }
+      replacements.push({ type: 'inlineCode', value: match[1] ?? '' });
+      lastIndex = match.index + match[0].length;
+    }
+    if (replacements.length === 0) {
+      // バッククォートはあるが対が無い(`INLINE_CODE_PATTERN` に一致しない)。
+      continue;
+    }
+    if (lastIndex < value.length) {
+      replacements.push({ type: 'text', value: value.slice(lastIndex) });
+    }
+    children.splice(index, 1, ...replacements);
+    index += replacements.length - 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // unified プロセッサ(状態を持たないため、呼び出しごとに再構築せずモジュールスコープの
 // 定数として使い回す。`.freeze()` してプラグイン構成を確定させる)。
 // ---------------------------------------------------------------------------
@@ -780,7 +864,9 @@ const markdownProcessor = unified()
  *    必ず戻す)。
  * 5. 変換後の mdast に `recognizeCodeFences` を適用し、地の文として書かれたコードフェンス
  *    (```` ``` ````)の区間を逐語の `code` ノードへ差し替える(モジュール先頭 JSDoc 参照)。
- *    続けて `unwrapAutolinks` を適用し、リンクテキストが URL そのものであるリンク
+ *    続けて `recognizeInlineCode` を適用し、地の文として書かれたインラインコード
+ *    (`` `code` `` のバッククォート対)を逐語の `inlineCode` ノードへ差し替える。
+ *    さらに `unwrapAutolinks` を適用し、リンクテキストが URL そのものであるリンク
  *    (オートリンク `<URL>` として直列化される形)を素の URL テキストへ展開する。
  * 6. `remark-gfm` + `remark-stringify` で Markdown 文字列に直列化する。
  *
@@ -855,6 +941,7 @@ export function transformBody(options: TransformBodyOptions): TransformBodyResul
   }
 
   recognizeCodeFences(mdast);
+  recognizeInlineCode(mdast);
   unwrapAutolinks(mdast);
 
   const raw = String(markdownProcessor.stringify(mdast));
