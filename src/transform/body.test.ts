@@ -505,4 +505,86 @@ describe('transformBody', () => {
       );
     });
   });
+
+  // Fix(実機公開で報告): 地の文として書かれたインラインコード(`code` のバッククォート対)
+  // が \`code\` とエスケープされてしまう不具合の修正(design.md §5.4「インラインコード認識」。
+  // コードフェンス認識のインライン版)。
+  describe('inline code recognition (literal `code` spans typed in the note body)', () => {
+    it('converts a backtick pair into verbatim inline code instead of escaping the backticks', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>Run `note2web sync` to publish.');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('Run `note2web sync` to publish.\n');
+    });
+
+    it('recognizes multiple spans in one line, keeping the surrounding prose intact', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>`foo` と `bar` を比較する。');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('`foo` と `bar` を比較する。\n');
+    });
+
+    it('keeps Markdown special characters inside the span verbatim (no escaping)', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>Use `a_b*c` here.');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('Use `a_b*c` here.\n');
+    });
+
+    it('leaves an unpaired backtick escaped as before (no pair position guessing)', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>a ` b');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('a \\` b\n');
+    });
+
+    it('does not pair backticks across <br>-separated lines (each line is its own paragraph)', () => {
+      const bodyHtml = noteHtml('<h1>Code Demo<br>\n</h1>\n<br>`start<br>\n<br>end`');
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('\\`start\n\nend\\`\n');
+    });
+
+    it('recognizes a span nested inside a list item', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br><ul><li>Install with `npm install`</li></ul>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('- Install with `npm install`\n');
+    });
+
+    it('recognizes a span inside a table cell (table → tableRow → tableCell path)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<table><tr><td>Command</td><td>Effect</td></tr><tr><td>`npm ci`</td><td>clean install</td></tr></table>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe(
+        '| Command  | Effect        |\n' +
+          '| -------- | ------------- |\n' +
+          '| `npm ci` | clean install |\n',
+      );
+    });
+
+    it('recognizes a span inside a blockquote (blockquote → paragraph path)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<blockquote>Run `npm test` first.</blockquote>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('> Run `npm test` first.\n');
+    });
+
+    it('does not double-convert backtick pairs inside a recognized code fence block', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>puts `hostname`<br>\n<br>```',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      // フェンス区間は先に code ノード(逐語)になるため、中のバッククォート対は
+      // インラインコードとして二重変換されない。
+      expect(markdown).toBe('```ruby\nputs `hostname`\n```\n');
+    });
+  });
 });
