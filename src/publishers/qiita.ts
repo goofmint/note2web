@@ -473,13 +473,18 @@ async function sendItemWrite(params: {
       );
     }
     // 接続系エラーに限り1回だけ再試行する。再試行後の失敗はそのまま伝播させる
-    // (さらなる再試行はしない)。
+    // (さらなる再試行はしない)。再試行を開始したのは1回目が接続系エラーだったから
+    // だが、2回目の例外が接続系とは限らないため、文言は retryError 自身を判定して
+    // 決める(PR #83 CodeRabbit レビュー)。
     try {
       return await httpClient(request);
     } catch (retryError) {
+      const retryKind = isRetryableConnectionError(retryError)
+        ? 'connection-layer failure'
+        : 'request failure';
       throw new Error(
         `QiitaPublisher: ${method} request to the Qiita API failed for note "${noteUuid}" even ` +
-          `after 1 retry (connection-layer failure): ${errorMessage(retryError)}`,
+          `after 1 retry (${retryKind}): ${errorMessage(retryError)}`,
         { cause: retryError },
       );
     }

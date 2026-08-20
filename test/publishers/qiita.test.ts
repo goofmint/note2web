@@ -256,9 +256,33 @@ describe('publish() retry policy', () => {
 
     await expect(
       publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' })),
-    ).rejects.toThrow(/connection-layer failure/);
+    ).rejects.toThrow(/even after 1 retry \(connection-layer failure\)/);
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.method === 'PATCH')).toBe(true);
+  });
+
+  it('classifies a non-connection error thrown by the retried PATCH as "request failure", not "connection-layer failure"', async () => {
+    // 1回目が接続系エラーでも、再試行(2回目)の例外が接続系とは限らない
+    // (注入クライアントの実装エラー等)。文言は retryError 自身の判定で決まる
+    // (PR #83 CodeRabbit レビュー)。
+    let attempts = 0;
+    const { client, calls } = makeMockHttpClient(() => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new TypeError('fetch failed');
+      }
+      throw new Error('mock client bug');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await expect(
+      publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' })),
+    ).rejects.toThrow(/even after 1 retry \(request failure\)/);
+    expect(calls).toHaveLength(2);
   });
 
   it('recovers when the retried PATCH succeeds after 1 connection-layer failure', async () => {
