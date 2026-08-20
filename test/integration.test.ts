@@ -337,18 +337,21 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   let statePath: string;
   let exportWorkDir1: string;
   let exportWorkDir2: string;
+  let exportWorkDir3: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), 'note2web-it-state-'));
     statePath = join(stateDir, 'note2web.state.json');
     exportWorkDir1 = await mkdtemp(join(tmpdir(), 'note2web-it-export1-'));
     exportWorkDir2 = await mkdtemp(join(tmpdir(), 'note2web-it-export2-'));
+    exportWorkDir3 = await mkdtemp(join(tmpdir(), 'note2web-it-export3-'));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
     await rm(exportWorkDir1, { recursive: true, force: true });
     await rm(exportWorkDir2, { recursive: true, force: true });
+    await rm(exportWorkDir3, { recursive: true, force: true });
   });
 
   // -------------------------------------------------------------------------
@@ -972,6 +975,71 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       // 変更が無いため Qiita API へは1リクエストも行われない。
       expect(http2.calls).toHaveLength(0);
       expect(uploader2.putObjectCalls).toHaveLength(0);
+
+      // --- run 3(更新経路: PATCH。PR #83 CodeRabbit レビュー)------------------------
+      // LAUNCH_NOTES の本文だけを fixture コピー後に書き換え、contentHash を変えて
+      // 「remoteId を保持したまま本文が変わった」状況を作る → `prev.remoteId` ありの分岐
+      // (PATCH /api/v2/items/{item_id})が統合レベルで通ることを検証する。
+      const parser3 = makeFixtureRunner(async (outDir) => {
+        const htmlPath = join(outDir, 'html', `${LAUNCH_NOTES_UUID}.html`);
+        const original = await readFile(htmlPath, 'utf8');
+        const updated = original.replace(
+          'We need better #planning this week',
+          'We need much better #planning this week',
+        );
+        if (updated === original) {
+          throw new Error(`test fixture: expected body sentence not found in ${htmlPath}`);
+        }
+        await writeFile(htmlPath, updated, 'utf8');
+      });
+      // makeHttpClient は呼び出しごとに qiita-item-<連番> を返す。run 3 は新しいモック
+      // インスタンス(連番リセット)なので PATCH 応答の id は qiita-item-1 ——実 API が
+      // 更新対象と同じ item を返すのと同じ形になり、remoteId は変化しない。
+      const http3 = makeHttpClient();
+      const { logger: logger3, events: events3 } = createFakeLogger();
+      const publisher3 = createQiitaPublisher({
+        config,
+        httpClient: http3.client,
+        logger: logger3,
+        env: { QIITA_TOKEN: 'fake-qiita-token' },
+      });
+      const uploader3 = createFakeUploaderClient();
+
+      const result3 = await runSync({
+        config,
+        publisher: publisher3,
+        renderNote,
+        ...baseSyncOptions({
+          statePath,
+          runner: parser3.runner,
+          tmpDirFactory: async () => exportWorkDir3,
+          logger: logger3,
+          uploaderClient: uploader3,
+        }),
+      });
+
+      expect(result3).toMatchObject({
+        exitCode: PARTIAL_FAILURE,
+        published: 1,
+        skipped: 0,
+        failed: 4,
+      });
+      expect(events3).toContain(`note_published:${LAUNCH_NOTES_UUID}:updated`);
+      expect(http3.calls).toHaveLength(1);
+      expect(http3.calls[0]?.method).toBe('PATCH');
+      expect(http3.calls[0]?.url).toBe(`${QIITA_API_BASE_URL}/api/v2/items/qiita-item-1`);
+      const patchedBody = JSON.parse(http3.calls[0]?.body ?? '{}') as { body: string };
+      expect(patchedBody.body).toContain('much better');
+
+      // 状態は更新後の contentHash を保持しつつ、remoteId/url は既存記事のまま。
+      const onDisk3 = readStateFile(statePath);
+      expect(onDisk3.notes[LAUNCH_NOTES_UUID]).toMatchObject({
+        remoteId: 'qiita-item-1',
+        url: 'https://qiita.com/example/items/qiita-item-1',
+      });
+      expect(onDisk3.notes[LAUNCH_NOTES_UUID]?.contentHash).not.toBe(
+        onDisk1.notes[LAUNCH_NOTES_UUID]?.contentHash,
+      );
     });
   });
 

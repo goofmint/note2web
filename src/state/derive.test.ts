@@ -74,7 +74,10 @@ describe('deriveTarget', () => {
           qiita: { token_env: 'QIITA_TOKEN' },
         }),
       ),
-    ).toBe(QIITA_TARGET);
+      // リテラルで固定する: QIITA_TARGET 定数自身と比較すると定数値の変更を検知できない
+      // (PR #83 CodeRabbit レビュー)。定数と状態ファイル互換性のための値の一致も確認する。
+    ).toBe('qiita.com');
+    expect(QIITA_TARGET).toBe('qiita.com');
   });
 
   it('uses note.workspace for note', () => {

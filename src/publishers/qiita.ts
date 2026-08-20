@@ -460,9 +460,15 @@ async function sendItemWrite(params: {
     return await httpClient(request);
   } catch (error) {
     if (!retryOnConnectionError || !isRetryableConnectionError(error)) {
+      // 接続系エラー(リトライ対象外の POST を含む)と、注入されたクライアントの実装
+      // エラー等それ以外の例外とで文言を分ける(原因切り分けのため。PR #83 CodeRabbit
+      // レビュー)。
+      const kind = isRetryableConnectionError(error)
+        ? 'connection-layer failure'
+        : 'request failure';
       throw new Error(
         `QiitaPublisher: ${method} request to the Qiita API failed for note "${noteUuid}" ` +
-          `(connection-layer failure): ${errorMessage(error)}`,
+          `(${kind}): ${errorMessage(error)}`,
         { cause: error },
       );
     }
@@ -523,6 +529,17 @@ export function createQiitaPublisher(options: CreateQiitaPublisherOptions): Publ
           '(renderQiitaArticle must set one)',
       );
     }
+    // 通常フローでは renderQiitaArticle(resolveQiitaTags)がタグ0個を
+    // QiitaNoTagsRemainingError として弾くため、ここに空のタグ列は届かない。防御的に
+    // Publisher 側でも 1〜QIITA_MAX_TAGS 個の範囲を検証し、契約外の RenderedArticle を
+    // Qiita API のエラーより手前で明確に失敗させる(PR #83 CodeRabbit レビュー)。
+    const tags = article.tags;
+    if (tags === undefined || tags.length === 0 || tags.length > QIITA_MAX_TAGS) {
+      throw new Error(
+        `QiitaPublisher.publish: note "${article.noteUuid}" must carry 1-${String(QIITA_MAX_TAGS)} ` +
+          `resolved tags (renderQiitaArticle must set them); got ${String(tags?.length ?? 'none')}`,
+      );
+    }
 
     // issue #82 プランの wire contract のヘッダ。
     const headers: Record<string, string> = {
@@ -534,7 +551,7 @@ export function createQiitaPublisher(options: CreateQiitaPublisherOptions): Publ
       buildQiitaRequestBody({
         title: article.title,
         bodyMarkdown: article.bodyMarkdown,
-        tags: article.tags ?? [],
+        tags,
       }),
     );
 
@@ -542,7 +559,10 @@ export function createQiitaPublisher(options: CreateQiitaPublisherOptions): Publ
       const response = await sendItemWrite({
         httpClient,
         method: 'PATCH',
-        url: `${QIITA_API_BASE_URL}/api/v2/items/${prev.remoteId}`,
+        // remoteId は通常 Qiita API の応答由来だが、状態 JSON は利用者が手で編集できる
+        // (README の移行手順参照)。`/` 等を含む値でパスが意図しないエンドポイントへ
+        // 変わらないよう、URL パスへ埋め込む前にエンコードする(PR #83 CodeRabbit レビュー)。
+        url: `${QIITA_API_BASE_URL}/api/v2/items/${encodeURIComponent(prev.remoteId)}`,
         headers,
         body: requestBody,
         noteUuid: article.noteUuid,
