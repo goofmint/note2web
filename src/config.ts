@@ -77,9 +77,11 @@ const gitSchema = z
   })
   .strict();
 
+// Qiita API v2 を直叩きする API モード(issue #82: qiita-cli サブプロセス起動を廃止)。
+// devtoSchema と同形(トークン参照のみ)——ワークスペースディレクトリという概念自体が
+// 無くなったため `workspace` は持たない。
 const qiitaSchema = z
   .object({
-    workspace: z.string().min(1),
     token_env: z.string().min(1),
   })
   .strict();

@@ -32,6 +32,13 @@ export function resolveStatePath(configPath: string, config: Config): string {
  */
 export const DEVTO_TARGET = 'dev.to';
 
+/**
+ * Qiita の `target`(design.md §8「qiita: API ホスト」、issue #82)。qiita-cli サブプロセス
+ * 廃止により `qiita.workspace` 設定自体が無くなった(Qiita API v2 を直接叩く固定ホスト、
+ * `src/publishers/qiita.ts`)ため、`DEVTO_TARGET` と同じ理由でサービス共通の固定値とする。
+ */
+export const QIITA_TARGET = 'qiita.com';
+
 /** `value` が `undefined` であれば内部不変条件違反として例外を投げる(スキーマが保証するはずの値)。 */
 function requireConfigBlock<T>(value: T | undefined, blockKey: string, service: string): T {
   if (value === undefined) {
@@ -45,8 +52,9 @@ function requireConfigBlock<T>(value: T | undefined, blockKey: string, service: 
 
 /**
  * 状態 JSON の `target`(design.md §8)を現在の設定から導出する。
- * 「配信先の識別子。Git モード: repo_path、qiita/note: workspace、はてな: blog_id、
- * devto: API ホスト」(design.md §8 のコメントそのまま)。
+ * 「配信先の識別子。Git モード: repo_path、note: workspace、はてな: blog_id、
+ * qiita/devto: API ホスト」(design.md §8。issue #82 で qiita は workspace → API ホスト
+ * 固定値へ変更)。
  */
 export function deriveTarget(config: Config): string {
   switch (config.service) {
@@ -55,7 +63,8 @@ export function deriveTarget(config: Config): string {
     case 'jekyll':
       return requireConfigBlock(config.git, 'git', config.service).repo_path;
     case 'qiita':
-      return requireConfigBlock(config.qiita, 'qiita', config.service).workspace;
+      requireConfigBlock(config.qiita, 'qiita', config.service);
+      return QIITA_TARGET;
     case 'note':
       return requireConfigBlock(config.note, 'note', config.service).workspace;
     case 'hatena':

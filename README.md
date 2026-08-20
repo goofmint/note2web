@@ -7,7 +7,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
 - **Zenn**(Git リポジトリ出力)
 - **Hugo**(Git リポジトリ出力)
 - **Jekyll**(Git リポジトリ出力)
-- **Qiita**(外部 CLI `@qiita/qiita-cli`)
+- **Qiita**(Qiita API v2 を直接呼び出し)
 - **dev.to**(Forem API v1 を直接呼び出し)
 - **note.com**(外部 CLI [`noet`](https://github.com/kako-jun/noet)。※後述の重大な制約あり)
 - **はてなブログ**(はてなブログ AtomPub)
@@ -50,8 +50,7 @@ Apple Notes(macOS のメモアプリ)を Single Source of Truth とし、対応�
   3. 許可後、ターミナルアプリ(または launchd ジョブ)を再起動する
 
 - **Zenn / Hugo / Jekyll(Git リポジトリ出力モード)を使う場合**: `git` コマンドと [`gh`](https://cli.github.com/)(GitHub CLI)、および `GH_TOKEN` 環境変数(`gh` の認証用)
-- **Qiita を使う場合**: `@qiita/qiita-cli` は note2web の `dependencies` に固定バージョンで同梱されているため追加インストールは不要です。トークンは環境変数で渡します(後述)
-- **dev.to / はてなブログを使う場合**: 追加の外部 CLI は不要です(API を直接呼び出します)
+- **Qiita / dev.to / はてなブログを使う場合**: 追加の外部 CLI は不要です(API を直接呼び出します)。トークンは環境変数で渡します(後述)
 - **note.com を使う場合**: [`noet`](https://github.com/kako-jun/noet) バイナリに加えて、**同一マシン上で note.com にログイン済みの実 Chrome ブラウザ + noet 拡張機能が起動していること**が必須です(詳細は [note.com](#notecom) の節を参照)
 
 依存の過不足は `note2web doctor --config <path>` で事前確認できます。
@@ -152,8 +151,7 @@ git:
 
 ```yaml
 qiita:
-  workspace: ~/src/qiita-content   # qiita-cli のワークスペース(public/<uuid>.md を書き出す)
-  token_env: QIITA_TOKEN           # QIITA_TOKEN を読む環境変数名(サンプルは同名だが変更可)
+  token_env: QIITA_TOKEN           # トークンを読む環境変数名(サンプルは同名だが変更可)
 ```
 
 ### dev.to
@@ -212,10 +210,18 @@ hatena:
 
 ### Qiita
 
-- 認証は `qiita.token_env` が指す環境変数(サンプルは `QIITA_TOKEN`)から読み、`@qiita/qiita-cli` の子プロセスへは **常に `QIITA_TOKEN` という固定名**で渡します(qiita-cli 自身がこの名前でしか環境変数を見ないため)
-- `@qiita/qiita-cli` は note2web の `dependencies` に固定バージョンで同梱されており、実行は `npx --no-install qiita` に限定しています(素の `npx qiita` は npm レジストリの無関係な別パッケージ `qiita` を取得してしまい、トークンが漏れる恐れがあるため使用しません)。パッケージが未導入(≒ `npm install` していない状態で `dist/cli.js` だけをコピーした等)の場合は `doctor` / `sync` の依存チェックで exit 2 になります
-- frontmatter には `title` / `tags` / `private: false` / `id`(初回は `null`。qiita-cli が投稿後に書き戻す ID を状態ファイルへ保存)/ `slide: false` を出力します
+Qiita API v2 を直接呼び出します(qiita-cli のような外部 CLI は使いません)。
+
+- 新規作成は `POST /api/v2/items`、更新は `PATCH /api/v2/items/{item_id}` を呼びます
+- 認証は `qiita.token_env` が指す環境変数(サンプルは `QIITA_TOKEN`)から読み、リクエストヘッダ `Authorization: Bearer <トークン>` に渡します
+- リクエストボディは `{ body, title, tags: [{ name, versions: [] }], private: false }` の形です
 - **タグ制約**: Qiita は1〜5個のタグが必須です。半角スペースを含むタグは分割送信による 403 を避けるため除外し、警告ログを出します。除外後に6個以上残っていれば先頭5個に切り詰めます(警告ログ)。除外後に0個になった場合、そのノートは**失敗扱い**になります(タグを付けて再実行してください)
+
+**過去バージョンからの移行(qiita-cli サブプロセス方式の廃止)**: 従来 note2web は `@qiita/qiita-cli` をサブプロセスとして呼び出していましたが、`publish` コマンドが投稿対象の記事に先立って**利用者の Qiita 記事を無条件に全件同期する**(投稿数の多いアカウントで子プロセスタイムアウト・ディスク圧迫を招く)ため、この API 直叩き方式へ移行しました。既存の状態ファイル(`*.state.json`)をお使いの場合は次の点にご注意ください:
+
+- 設定 YAML の `qiita.workspace` は廃止されました。設定ファイルから削除してください(残っていても検証エラーになります)
+- 状態ファイルの `target` フィールドは、旧バージョンでは qiita-cli ワークスペースのパス文字列でしたが、新バージョンでは固定値 `"qiita.com"` になりました。この不一致により、既存の状態ファイルをそのまま使うと `target` 検証エラー(exit 2)になります。**既存の `remoteId`(記事 ID)を引き継いで重複記事の作成を避けるには、状態ファイルの `target` を手動で `"qiita.com"` に書き換えてから再実行してください**
+- 冪等判定に使うコンテンツハッシュの算出方法が変わったため(旧: frontmatter に記事 ID 等の配信結果を含めていた / 新: タイトル・タグ・本文のみ)、既存ノートは内容が変わっていなくても**次回実行時に1回だけ**更新(PATCH)による再配信が発生します。`remoteId` を引き継いでいれば重複記事は作られません
 
 ### dev.to
 
@@ -437,7 +443,7 @@ note2web: apple_cloud_notes_parser (note2web_export.rb) failed (exit_code): exit
 - **`apple_cloud_notes_parser` のエンドツーエンド実行**: 実際の macOS 上の `NoteStore.sqlite` に対するパーサの実行自体は未実施です(パーサ同梱のテスト用データ・ソースコード読解による確認のみ)
 - **note.com への実際の投稿**: `noet` を介した note.com への実際の記事作成・更新・画像アップロードは未確認です(§13-4/§13-6 参照)。また前述のとおり、認証はログイン済みの実ブラウザに依存するため、cron 等の完全無人実行では認証前提そのものが構造的に満たせない場合があります
 - **はてなブログへの実際の入稿**: `text/x-markdown` での入稿という wire contract の実装・HTTP モックでの検証は完了していますが、実際の `blog.hatena.ne.jp` への入稿確認は未実施です。編集モードが Markdown であることが前提条件です
-- **Qiita の実トークンでの認証・公開**: `QIITA_TOKEN` 環境変数だけで無人実行できることはパッケージ実装の読解・ローカル実行で確認済みですが、実トークンでの実際の投稿成功は未確認です
+- **Qiita の実トークンでの認証・公開**: Qiita API v2 の wire contract(認証ヘッダ・リクエストボディ形状)は HTTP モックで検証済みですが、実トークンでの実際の投稿成功は未確認です
 - **Apple Notes の UUID の安定性**: アカウント間の移動や DB 復元をまたいで UUID が安定するかは保証されません。変わった場合、旧記事はサービス側に残り、新 UUID で新規記事として配信されます
 - **孤児記事の扱い**: 配信後にノートが削除・移動されても、サービス側の記事はそのまま残ります(孤児エントリの検出・削除は行いません。設計上の非対応)
 

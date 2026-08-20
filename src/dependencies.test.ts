@@ -154,122 +154,19 @@ describe('checkDependencies', () => {
     expect(messages).toMatch(/GH_TOKEN/);
   });
 
-  it('does not require GH_TOKEN or git/gh for qiita, and instead requires node/npx', async () => {
+  it('requires nothing beyond the common checks for qiita (QIITA_TOKEN is validated by config.ts; issue #82 removed the node/npx/@qiita/qiita-cli checks)', async () => {
     const commands = new Set(['ruby', 'bundle']);
-    const error = await expectDependencyError(
-      buildConfig({
-        service: 'qiita',
-        git: undefined,
-        qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
-        exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      }),
-      {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: {},
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      },
-    );
-
-    const messages = error.problems.map((problem) => problem.message).join('\n');
-    expect(messages).not.toMatch(/"git"/);
-    expect(messages).not.toMatch(/"gh"/);
-    expect(messages).not.toMatch(/GH_TOKEN/);
-    expect(messages).toMatch(/"node"/);
-    expect(messages).toMatch(/"npx"/);
-  });
-
-  it('reports a problem when @qiita/qiita-cli is not resolvable, without affecting other qiita checks', async () => {
-    const commands = new Set(['ruby', 'bundle', 'node', 'npx']);
-    const error = await expectDependencyError(
-      buildConfig({
-        service: 'qiita',
-        git: undefined,
-        qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
-        exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      }),
-      {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: {},
-        qiitaCliResolvableFn: () => false,
-        nodeVersionFn: () => 'v22.0.0',
-        qiitaCliEnginesFn: () => '>=20.0.0',
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      },
-    );
-
-    const messages = error.problems.map((problem) => problem.message).join('\n');
-    expect(messages).toMatch(/@qiita\/qiita-cli/);
-    expect(messages).not.toMatch(/"node"/);
-    expect(messages).not.toMatch(/"npx"/);
-    expect(messages).not.toMatch(/engine/);
-  });
-
-  it('reports a problem via the >=20 fallback when the engines declaration is unavailable', async () => {
-    const commands = new Set(['ruby', 'bundle', 'node', 'npx']);
-    const error = await expectDependencyError(
-      buildConfig({
-        service: 'qiita',
-        git: undefined,
-        qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
-        exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      }),
-      {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: {},
-        qiitaCliResolvableFn: () => true,
-        nodeVersionFn: () => 'v18.19.0',
-        qiitaCliEnginesFn: () => undefined,
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      },
-    );
-
-    const messages = error.problems.map((problem) => problem.message).join('\n');
-    expect(messages).toMatch(/v18\.19\.0/);
-    expect(messages).toMatch(/engine/);
-  });
-
-  it('rejects a Node.js version below the installed qiita-cli engines declaration (e.g. >=22.22.1)', async () => {
-    // v1.10.0 の実際の宣言(>=22.22.1)はメジャー 20 の下限より厳しい。宣言が取得できる
-    // 場合はそちらが優先されることを確認する(v22.13.0 はメジャーでは通るが宣言では不足)。
-    const commands = new Set(['ruby', 'bundle', 'node', 'npx']);
-    const error = await expectDependencyError(
-      buildConfig({
-        service: 'qiita',
-        git: undefined,
-        qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
-        exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      }),
-      {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: {},
-        qiitaCliResolvableFn: () => true,
-        nodeVersionFn: () => 'v22.13.0',
-        qiitaCliEnginesFn: () => '>=22.22.1',
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      },
-    );
-
-    const messages = error.problems.map((problem) => problem.message).join('\n');
-    expect(messages).toMatch(/>=22\.22\.1/);
-    expect(messages).toMatch(/v22\.13\.0/);
-  });
-
-  it('passes the qiita-cli resolvability and Node engine checks when both are satisfied', async () => {
-    const commands = new Set(['ruby', 'bundle', 'node', 'npx']);
     await expect(
       checkDependencies(
         buildConfig({
           service: 'qiita',
           git: undefined,
-          qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
+          qiita: { token_env: 'QIITA_TOKEN' },
           exporter: { parser_path: parserPath, notes_container: '/dev/null' },
         }),
         {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
           env: {},
-          qiitaCliResolvableFn: () => true,
-          nodeVersionFn: () => 'v22.22.1',
-          qiitaCliEnginesFn: () => '>=22.22.1',
           runSubprocessFn: fakeRubyBundleSubprocess(),
           fileReadableFn: () => Promise.resolve(true),
         },

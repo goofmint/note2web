@@ -64,7 +64,7 @@ const TMP_DIR_PREFIX = 'note2web-export-';
  * 絶対パス。このファイル(開発時 `src/exporter/apple-notes.ts`、ビルド後
  * `dist/exporter/apple-notes.js`)から2階層上がパッケージルートになる
  * (`tsconfig.json` の `rootDir: "src"` / `outDir: "dist"` によりディレクトリ構造が
- * 一致するため。`src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と同じ手法)。
+ * 一致するため。`src/init.ts` の CLI エントリポイント解決と同じ手法)。
  * `package.json` の `"files"` にも `ruby` ディレクトリを含めており、npm 配布物にも
  * 実体が含まれる。`src/dependencies.ts` も同じ定数を再利用する。
  */

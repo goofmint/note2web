@@ -77,7 +77,7 @@ function buildConfig(overrides: Partial<Config> = {}): Config {
       access_key_id_env: 'R2_ACCESS_KEY_ID',
       secret_access_key_env: 'R2_SECRET_ACCESS_KEY',
     },
-    qiita: { workspace: '/workspaces/qiita', token_env: 'QIITA_TOKEN' },
+    qiita: { token_env: 'QIITA_TOKEN' },
     ...overrides,
   };
 }

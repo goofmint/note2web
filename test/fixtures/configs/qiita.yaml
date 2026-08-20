@@ -8,5 +8,4 @@ assets:
   access_key_id_env: QIITA_S3_ACCESS_KEY_ID
   secret_access_key_env: QIITA_S3_SECRET_ACCESS_KEY
 qiita:
-  workspace: ~/src/qiita-content
   token_env: QIITA_TOKEN

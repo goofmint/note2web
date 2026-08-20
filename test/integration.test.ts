@@ -18,10 +18,11 @@
  *     `test/sync.test.ts` の `makeFixtureRunner` と同じパターン)で、fixture ディレクトリを
  *     そのまま `-o` 出力先へコピーするだけのフェイクに差し替える
  *   - git/gh サブプロセス: `createGitRepoPublisher` の `runner` 注入点(zenn/hugo/jekyll)
- *   - qiita-cli サブプロセス: `createQiitaPublisher` の `runner` 注入点
  *   - noet サブプロセス: `createNotePublisher` の `runner` 注入点
- *   - dev.to / はてな HTTP: `createDevtoPublisher`/`createHatenaPublisher` の
- *     `httpClient`/`client` 注入点
+ *   - qiita / dev.to / はてな HTTP: `createQiitaPublisher`/`createDevtoPublisher`/
+ *     `createHatenaPublisher` の `httpClient`/`client` 注入点(issue #82: qiita は
+ *     qiita-cli サブプロセスから Qiita API v2 直叩きへ移行したため、他の API モード
+ *     サービスと同じ HTTP 注入点に統一された)
  *   - 環境変数(トークン類): 各 `createXPublisher` の `env` 注入点(`process.env` を汚さない)
  *
  * これら以外(メタデータ抽出・BodyTransformer・AssetUploader・Renderer・StateStore・
@@ -77,7 +78,12 @@ import {
   GIT_CREDENTIAL_ARGS,
   type GitRepoRunner,
 } from '../src/publishers/git-repo.js';
-import { createQiitaPublisher, type QiitaRunner } from '../src/publishers/qiita.js';
+import {
+  createQiitaPublisher,
+  QIITA_API_BASE_URL,
+  type QiitaHttpClient,
+  type QiitaHttpRequest,
+} from '../src/publishers/qiita.js';
 import {
   createDevtoPublisher,
   DEVTO_API_BASE_URL,
@@ -270,8 +276,8 @@ async function patchForZenn(outDir: string): Promise<void> {
 
 const NOOP_CHECK_DEPENDENCIES = async (): Promise<void> => {
   // このスイートは Publisher/Renderer の実結線を検証する対象であり、`checkDependencies`
-  // 自体は `src/dependencies.test.ts` の責務。ホスト環境の実コマンド(ruby/git/gh/qiita-cli/
-  // noet 等)の有無に左右されないよう常に成功させる(`test/sync.test.ts` と同じ方針)。
+  // 自体は `src/dependencies.test.ts` の責務。ホスト環境の実コマンド(ruby/git/gh/noet 等)の
+  // 有無に左右されないよう常に成功させる(`test/sync.test.ts` と同じ方針)。
 };
 
 const NOOP_CHECK_GIT_AUTH = async (): Promise<void> => {
@@ -331,18 +337,21 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   let statePath: string;
   let exportWorkDir1: string;
   let exportWorkDir2: string;
+  let exportWorkDir3: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), 'note2web-it-state-'));
     statePath = join(stateDir, 'note2web.state.json');
     exportWorkDir1 = await mkdtemp(join(tmpdir(), 'note2web-it-export1-'));
     exportWorkDir2 = await mkdtemp(join(tmpdir(), 'note2web-it-export2-'));
+    exportWorkDir3 = await mkdtemp(join(tmpdir(), 'note2web-it-export3-'));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
     await rm(exportWorkDir1, { recursive: true, force: true });
     await rm(exportWorkDir2, { recursive: true, force: true });
+    await rm(exportWorkDir3, { recursive: true, force: true });
   });
 
   // -------------------------------------------------------------------------
@@ -818,66 +827,51 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   });
 
   // -------------------------------------------------------------------------
-  // qiita: CLI モード(npx --no-install qiita)。
+  // qiita: API モード(Qiita API v2 直叩き。issue #82 で qiita-cli サブプロセス方式から移行)。
   // -------------------------------------------------------------------------
 
-  describe('qiita (CLI mode via npx --no-install qiita, createQiitaPublisher + renderQiitaArticle)', () => {
-    let workspace: string;
-
-    beforeEach(async () => {
-      workspace = await mkdtemp(join(tmpdir(), 'note2web-it-qiita-workspace-'));
-    });
-    afterEach(async () => {
-      await rm(workspace, { recursive: true, force: true });
-    });
-
+  describe('qiita (API mode via Qiita API v2, createQiitaPublisher + renderQiitaArticle)', () => {
     function buildConfig(): Config {
       return {
         service: 'qiita',
         timezone: 'Asia/Tokyo',
         source: { folders: ALL_FOLDERS },
         assets: ASSETS_CONFIG,
-        qiita: { workspace, token_env: 'QIITA_TOKEN' },
+        qiita: { token_env: 'QIITA_TOKEN' },
       };
     }
 
-    /**
-     * qiita-cli の実挙動(design.md §5.7「投稿後に frontmatter へ発行済み ID を書き戻す」)を
-     * 模倣する fake runner: `publish` 呼び出しが成功すると、workspace 上のファイルへ
-     * `id: "qiita-<uuid>"` を書き戻す(`test/publishers/qiita.test.ts` の
-     * `simulateQiitaCliWriteBackId` と同じ発想)。
-     */
-    function makeQiitaRunner(): { runner: QiitaRunner; calls: RunSubprocessOptions[] } {
-      const calls: RunSubprocessOptions[] = [];
-      const runner: QiitaRunner = async (options: RunSubprocessOptions) => {
-        calls.push(options);
-        // 実引数は ['--no-install', 'qiita', 'publish', <uuid>, '--root', workspace]
-        // (`src/publishers/qiita.ts` の `createQiitaPublisher`)。uuid は '--root' の
-        // 直前の要素。
-        const rootIndex = options.args.indexOf('--root');
-        const uuid = rootIndex >= 1 ? options.args[rootIndex - 1] : undefined;
-        const root = rootIndex >= 0 ? options.args[rootIndex + 1] : undefined;
-        if (uuid !== undefined && root !== undefined) {
-          const filePath = join(root, 'public', `${uuid}.md`);
-          const content = await readFile(filePath, 'utf8');
-          const updated = content.replace('id: null', `id: "qiita-${uuid}"`);
-          await writeFile(filePath, updated, 'utf8');
-        }
-        return { status: 'success', exitCode: 0, signal: null, stdout: '', stderr: '' };
-      };
-      return { runner, calls };
+    interface RecordedCall {
+      method: QiitaHttpRequest['method'];
+      url: string;
+      body: string | undefined;
     }
 
-    it('publishes only the tagged note (204), isolates the 4 tagless notes as failed (QiitaNoTagsRemainingError), then is fully idempotent', async () => {
+    function makeHttpClient(): { client: QiitaHttpClient; calls: RecordedCall[] } {
+      const calls: RecordedCall[] = [];
+      let nextId = 1;
+      const client: QiitaHttpClient = async (request) => {
+        calls.push({ method: request.method, url: request.url, body: request.body });
+        const id = `qiita-item-${String(nextId)}`;
+        nextId += 1;
+        return {
+          status: request.method === 'POST' ? 201 : 200,
+          body: JSON.stringify({ id, url: `https://qiita.com/example/items/${id}` }),
+        };
+      };
+      return { client, calls };
+    }
+
+    it('publishes only the tagged note via POST, isolates the 4 tagless notes as failed (QiitaNoTagsRemainingError), then is fully idempotent (no HTTP calls at all)', async () => {
       const config = buildConfig();
 
       // --- run 1 ---------------------------------------------------------------
       const parser1 = makeFixtureRunner();
-      const qiita1 = makeQiitaRunner();
+      const http1 = makeHttpClient();
       const { logger: logger1, events: events1, warnings: warnings1 } = createFakeLogger();
       const publisher1 = createQiitaPublisher({
         config,
-        runner: qiita1.runner,
+        httpClient: http1.client,
         logger: logger1,
         env: { QIITA_TOKEN: 'fake-qiita-token' },
       });
@@ -912,26 +906,25 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       ]) {
         expect(events1).toContain(`note_failed:${uuid}`);
       }
-      // renderNote 段で例外(QiitaNoTagsRemainingError)を投げるため、qiita-cli は
-      // タグ無しの4件については一切呼ばれない(境界呼び出しが起きていないことの確認)。
-      expect(qiita1.calls).toHaveLength(1);
-      expect(qiita1.calls[0]?.command).toBe('npx');
-      expect(qiita1.calls[0]?.args.slice(0, 3)).toEqual(['--no-install', 'qiita', 'publish']);
-      expect(qiita1.calls[0]?.args).toContain(LAUNCH_NOTES_UUID);
+      // renderNote 段で例外(QiitaNoTagsRemainingError)を投げるため、Qiita API はタグ無しの
+      // 4件については一切呼ばれない(境界呼び出しが起きていないことの確認)。
+      expect(http1.calls).toHaveLength(1);
+      expect(http1.calls[0]?.method).toBe('POST');
+      expect(http1.calls[0]?.url).toBe(`${QIITA_API_BASE_URL}/api/v2/items`);
+      const parsedBody = JSON.parse(http1.calls[0]?.body ?? '{}') as {
+        title: string;
+        private: boolean;
+      };
+      expect(parsedBody.title).toContain('Launch');
+      expect(parsedBody.private).toBe(false);
       // 5個超の警告は発生しない(タグはハッシュタグ3個のみ)。0個フォールバックの警告も無い
       // ——LAUNCH_NOTES 自体はタグを持つため。
       expect(warnings1.some((w) => w.noteUuid === LAUNCH_NOTES_UUID)).toBe(false);
 
-      const publishedFile = await readFile(
-        join(workspace, 'public', `${LAUNCH_NOTES_UUID}.md`),
-        'utf8',
-      );
-      expect(publishedFile).toContain(`id: "qiita-${LAUNCH_NOTES_UUID}"`);
-
       const onDisk1 = readStateFile(statePath);
       expect(onDisk1.notes[LAUNCH_NOTES_UUID]).toMatchObject({
-        remoteId: `qiita-${LAUNCH_NOTES_UUID}`,
-        url: `https://qiita.com/items/qiita-${LAUNCH_NOTES_UUID}`,
+        remoteId: 'qiita-item-1',
+        url: 'https://qiita.com/example/items/qiita-item-1',
       });
       for (const uuid of [
         SALES_TABLE_UUID,
@@ -942,29 +935,18 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
         expect(onDisk1.notes[uuid]).toBeUndefined();
       }
 
-      // --- run 2: 見かけ上の「同一入力」だが、実際には publish() 直後のノート状態
-      // (remoteId が既知になった)を反映するため、qiita は**もう1回だけ**publish() を
-      // 呼ぶ(下記参照) -----------------------------------------------------------
-      //
-      // design.md §5.7 QiitaPublisher「id は初回 null、qiita-cli が投稿後に書き戻す
-      // ID を読み取って状態 JSON に保存する」——`renderQiitaArticle` は frontmatter に
-      // `prev?.remoteId ?? null` をそのまま書く(`src/publishers/qiita.ts`)。run 1 では
-      // `prev` が無いため `id: null`、run 2 では `prev.remoteId` が既知になったため
-      // `id: "qiita-<uuid>"` が書かれる——**この frontmatter 自体が content_hash の
-      // 一部**(design.md §5.6)なので、fixture の内容が一切変わっていなくても
-      // run 1 と run 2 では article の直列化結果(ひいてはハッシュ)が異なる。
-      // これは note2web のバグではなく、「qiita-cli 自身の重複防止のため id を
-      // frontmatter に書き戻す」という design.md 自身の決定(§5.7)から必然的に生じる
-      // 挙動: Qiita だけは他6サービスと異なり、「1回の成功配信」の直後ではなく
-      // 「remoteId が状態に確定した後の2回目の配信」を経て初めてハッシュが安定する
-      // (=真に skip されるようになるのは3回目から)。この収束を run 2/run 3 の
-      // 両方で検証する。
+      // --- run 2(冪等性)--------------------------------------------------------
+      // issue #82 の contentHash 再定義(title + resolved tags + body Markdown のみ、
+      // remoteId 等の配信結果を含まない。`src/publishers/qiita.ts` 冒頭 JSDoc「contentHash
+      // の入力」参照)により、dev.to/はてなと同様に1回の成功配信で確定的にハッシュが
+      // 安定する——qiita-cli 時代のような「id 書き戻しにより2回目の配信を経て初めて
+      // 安定する」挙動は無くなった。
       const parser2 = makeFixtureRunner();
-      const qiita2 = makeQiitaRunner();
+      const http2 = makeHttpClient();
       const { logger: logger2, events: events2 } = createFakeLogger();
       const publisher2 = createQiitaPublisher({
         config,
-        runner: qiita2.runner,
+        httpClient: http2.client,
         logger: logger2,
         env: { QIITA_TOKEN: 'fake-qiita-token' },
       });
@@ -985,55 +967,79 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
 
       expect(result2).toMatchObject({
         exitCode: PARTIAL_FAILURE,
+        published: 0,
+        skipped: 1,
+        failed: 4,
+      });
+      expect(events2).toContain(`note_skipped:${LAUNCH_NOTES_UUID}`);
+      // 変更が無いため Qiita API へは1リクエストも行われない。
+      expect(http2.calls).toHaveLength(0);
+      expect(uploader2.putObjectCalls).toHaveLength(0);
+
+      // --- run 3(更新経路: PATCH。PR #83 CodeRabbit レビュー)------------------------
+      // LAUNCH_NOTES の本文だけを fixture コピー後に書き換え、contentHash を変えて
+      // 「remoteId を保持したまま本文が変わった」状況を作る → `prev.remoteId` ありの分岐
+      // (PATCH /api/v2/items/{item_id})が統合レベルで通ることを検証する。
+      const parser3 = makeFixtureRunner(async (outDir) => {
+        const htmlPath = join(outDir, 'html', `${LAUNCH_NOTES_UUID}.html`);
+        const original = await readFile(htmlPath, 'utf8');
+        const updated = original.replace(
+          'We need better #planning this week',
+          'We need much better #planning this week',
+        );
+        if (updated === original) {
+          throw new Error(`test fixture: expected body sentence not found in ${htmlPath}`);
+        }
+        await writeFile(htmlPath, updated, 'utf8');
+      });
+      // makeHttpClient は呼び出しごとに qiita-item-<連番> を返す。run 3 は新しいモック
+      // インスタンス(連番リセット)なので PATCH 応答の id は qiita-item-1 ——実 API が
+      // 更新対象と同じ item を返すのと同じ形になり、remoteId は変化しない。
+      const http3 = makeHttpClient();
+      const { logger: logger3, events: events3 } = createFakeLogger();
+      const publisher3 = createQiitaPublisher({
+        config,
+        httpClient: http3.client,
+        logger: logger3,
+        env: { QIITA_TOKEN: 'fake-qiita-token' },
+      });
+      const uploader3 = createFakeUploaderClient();
+
+      const result3 = await runSync({
+        config,
+        publisher: publisher3,
+        renderNote,
+        ...baseSyncOptions({
+          statePath,
+          runner: parser3.runner,
+          tmpDirFactory: async () => exportWorkDir3,
+          logger: logger3,
+          uploaderClient: uploader3,
+        }),
+      });
+
+      expect(result3).toMatchObject({
+        exitCode: PARTIAL_FAILURE,
         published: 1,
         skipped: 0,
         failed: 4,
       });
-      expect(events2).toContain(`note_published:${LAUNCH_NOTES_UUID}:updated`);
-      expect(qiita2.calls).toHaveLength(1);
-      // アセット(画像)は run 1 で既に確定保存済みのため、run 2 では再アップロードされない。
-      expect(uploader2.putObjectCalls).toHaveLength(0);
+      expect(events3).toContain(`note_published:${LAUNCH_NOTES_UUID}:updated`);
+      expect(http3.calls).toHaveLength(1);
+      expect(http3.calls[0]?.method).toBe('PATCH');
+      expect(http3.calls[0]?.url).toBe(`${QIITA_API_BASE_URL}/api/v2/items/qiita-item-1`);
+      const patchedBody = JSON.parse(http3.calls[0]?.body ?? '{}') as { body: string };
+      expect(patchedBody.body).toContain('much better');
 
-      // --- run 3: ここでようやく content_hash が安定し、真の意味で idempotent になる ---
-      const exportWorkDir3 = await mkdtemp(join(tmpdir(), 'note2web-it-export3-'));
-      try {
-        const parser3 = makeFixtureRunner();
-        const qiita3 = makeQiitaRunner();
-        const { logger: logger3, events: events3 } = createFakeLogger();
-        const publisher3 = createQiitaPublisher({
-          config,
-          runner: qiita3.runner,
-          logger: logger3,
-          env: { QIITA_TOKEN: 'fake-qiita-token' },
-        });
-        const uploader3 = createFakeUploaderClient();
-
-        const result3 = await runSync({
-          config,
-          publisher: publisher3,
-          renderNote,
-          ...baseSyncOptions({
-            statePath,
-            runner: parser3.runner,
-            tmpDirFactory: async () => exportWorkDir3,
-            logger: logger3,
-            uploaderClient: uploader3,
-          }),
-        });
-
-        expect(result3).toMatchObject({
-          exitCode: PARTIAL_FAILURE,
-          published: 0,
-          skipped: 1,
-          failed: 4,
-        });
-        expect(events3).toContain(`note_skipped:${LAUNCH_NOTES_UUID}`);
-        // 変更が無いため qiita-cli(npx)は一切呼ばれない(境界呼び出しゼロ)。
-        expect(qiita3.calls).toHaveLength(0);
-        expect(uploader3.putObjectCalls).toHaveLength(0);
-      } finally {
-        await rm(exportWorkDir3, { recursive: true, force: true });
-      }
+      // 状態は更新後の contentHash を保持しつつ、remoteId/url は既存記事のまま。
+      const onDisk3 = readStateFile(statePath);
+      expect(onDisk3.notes[LAUNCH_NOTES_UUID]).toMatchObject({
+        remoteId: 'qiita-item-1',
+        url: 'https://qiita.com/example/items/qiita-item-1',
+      });
+      expect(onDisk3.notes[LAUNCH_NOTES_UUID]?.contentHash).not.toBe(
+        onDisk1.notes[LAUNCH_NOTES_UUID]?.contentHash,
+      );
     });
   });
 

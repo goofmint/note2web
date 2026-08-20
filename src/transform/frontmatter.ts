@@ -238,29 +238,6 @@ export const HUGO_FRONTMATTER_KEY_ORDER = [
 export const JEKYLL_FRONTMATTER_KEY_ORDER = ['title', 'date', 'categories', 'tags'] as const;
 
 /**
- * Qiita の frontmatter キー順(design.md §5.7)。`id` は初回 `null`、以後 qiita-cli が書き戻す値。
- * `slide` は当初の想定(`title`/`tags`/`private`/`id` の4項目)には無かったが、T-21(§13-3)の
- * 調査で qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js`
- * `checkSlide`)が `slide` を真偽値として必須にしていると判明したため追加した
- * (`src/publishers/qiita.ts` 冒頭 JSDoc 参照)。
- *
- * `updated_at` / `organization_url_name` は実機の `publish` 失敗で判明した同チェックの
- * 必須キー(`checkUpdatedAt` / `checkOrganizationUrlName`。キー欠落 = undefined は
- * 「null または文字列」の検証に落ちる)。qiita-cli 自身の新規テンプレート既定値
- * (`updated_at: ''` / `organization_url_name: null`)をそのまま書く。キーの並びも
- * qiita-cli の `qiita new` テンプレートに合わせている。
- */
-export const QIITA_FRONTMATTER_KEY_ORDER = [
-  'title',
-  'tags',
-  'private',
-  'updated_at',
-  'id',
-  'organization_url_name',
-  'slide',
-] as const;
-
-/**
  * note.com(`noet`)の frontmatter キー順(design.md §5.7 NotePublisher 節、§13-4、T-25)。
  * `noet` の `parse_markdown_file` が実際に読むキーは `title`/`tags`/`header_image` の3つ
  * のみ(§13-4)で、本タスク(T-25)の範囲では見出し画像(`header_image`)を扱わないため

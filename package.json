@@ -66,7 +66,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1107.0",
-    "@qiita/qiita-cli": "1.10.0",
     "hast-util-to-mdast": "^10.1.2",
     "hast-util-to-text": "^4.0.2",
     "mdast-util-to-string": "^4.0.0",

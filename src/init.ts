@@ -11,19 +11,17 @@
  *    値そのものは常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く。
  *    `EnvironmentVariables` に書いてよいのは非秘匿の `PATH` 一つだけ(理由は `buildPlist` の
  *    JSDoc を参照)。
- * 2. **依存 CLI のアシスト(T-21)**: `@qiita/qiita-cli` は note2web 自身の `dependencies`
- *    に固定バージョンで既に同梱されているため、ローカル解決できるかの確認のみ行う
- *    (`src/dependencies.ts` の `defaultQiitaCliResolvable` と同じ手法)。ruby /
- *    apple_cloud_notes_parser / gh / noet が無い場合も **自動インストールは一切行わず**、
- *    手順を日本語で案内するだけに留める(`init` の目的はブートストラップの補助であり、
- *    欠如を理由に失敗させない)。
+ * 2. **依存 CLI のアシスト**: ruby / apple_cloud_notes_parser / gh / noet が無い場合も
+ *    **自動インストールは一切行わず**、手順を日本語で案内するだけに留める(`init` の目的は
+ *    ブートストラップの補助であり、欠如を理由に失敗させない)。qiita は issue #82 で
+ *    qiita-cli サブプロセス方式を廃止し Qiita API v2 直叩きへ移行したため、この案内対象
+ *    からも外れた(`src/dependencies.ts` 冒頭 JSDoc 参照)。
  * 3. **書き込み後のスキーマ検証(FR-30)**: 生成した YAML の検証には `src/config.ts` の
  *    `validateConfigObject`(スキーマのみ。`*_env` 環境変数の存在確認は行わない)を使う。
  *    利用者はまだ env ファイルへ値を書き込んでいない段階のため、未設定の環境変数は
  *    エラーではなく成功サマリの「次にやること」として列挙する。
  */
 
-import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -97,8 +95,6 @@ export interface RunInitOptions {
   chmodFn?: (path: string, mode: number) => Promise<void>;
   /** コマンド存在確認の注入点。既定は `src/subprocess.ts` の `commandExists`。 */
   commandExistsFn?: (command: string) => Promise<boolean>;
-  /** `@qiita/qiita-cli` がローカル解決できるかどうかの注入点(テスト用)。 */
-  qiitaCliResolvableFn?: () => boolean;
   /** 実行中インストールの `dist/cli.js` の絶対パスを解決する注入点(テスト用)。既定は `resolveCliEntrypoint`。 */
   resolveCliEntrypointFn?: () => string | undefined;
   /**
@@ -331,26 +327,11 @@ async function defaultChmod(path: string, mode: number): Promise<void> {
 }
 
 /**
- * `@qiita/qiita-cli` が note2web 自身の依存としてローカル解決できるかどうかの既定実装。
- * `src/dependencies.ts` の `defaultQiitaCliResolvable` と同じ手法(T-21・design.md §5.7
- * セキュリティ制約)だが、依存モジュールを増やさないためここでも小さく複製している
- * (挙動は同一)。
- */
-function defaultQiitaCliResolvable(): boolean {
-  try {
-    createRequire(import.meta.url).resolve('@qiita/qiita-cli/package.json');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * 実行中の note2web インストールにおける CLI エントリポイント(`dist/cli.js`)の絶対パスを
  * 解決する(issue #63: note2web は npm へ公開されていないため、`npx --yes note2web@<version>`
  * を plist から呼ぶと必ず 404 になる。代わりに `node` でこのエントリポイントを直接起動する
  * ——issue #71 以降は生成した plist の `ProgramArguments` へ直接埋め込む)。
- * `src/publishers/qiita.ts` の `NOTE2WEB_PACKAGE_ROOT` と同じ手法で、`import.meta.url`
+ * `src/exporter/apple-notes.ts` が同種のパス解決に使うのと同じ手法で、`import.meta.url`
  * (実行時は `dist/init.js`)から見た兄弟ファイルとして `cli.js`(= `dist/cli.js`)を解決する。
  *
  * この関数自体は存在確認を行わない(純粋にパスを計算するのみ)——ここで `existsSync` 等の
@@ -569,17 +550,15 @@ async function collectQiitaBlock(
   promptFn: InitPromptFn,
   defaults: Record<string, unknown> | undefined,
 ): Promise<NonNullable<Config['qiita']>> {
-  const workspace = await askRequired(
-    promptFn,
-    'qiita-cli workspace directory',
-    stringField(defaults, 'workspace') ?? '~/src/qiita-content',
-  );
+  // issue #82: qiita-cli サブプロセス方式を廃止し Qiita API v2 直叩きへ移行したため、
+  // workspace ディレクトリという概念自体が無くなった(`collectDevtoBlock` と同じ形の
+  // *_env プロンプトのみ)。
   const tokenEnv = await askRequired(
     promptFn,
     'Environment variable name that holds the Qiita token',
     stringField(defaults, 'token_env') ?? 'QIITA_TOKEN',
   );
-  return { workspace, token_env: tokenEnv };
+  return { token_env: tokenEnv };
 }
 
 async function collectDevtoBlock(
@@ -645,11 +624,10 @@ async function collectDependencyWarnings(
   options: {
     commandExistsFn: (command: string) => Promise<boolean>;
     fileExistsFn: (path: string) => Promise<boolean>;
-    qiitaCliResolvableFn: () => boolean;
     env: NodeJS.ProcessEnv;
   },
 ): Promise<string[]> {
-  const { commandExistsFn, fileExistsFn, qiitaCliResolvableFn, env } = options;
+  const { commandExistsFn, fileExistsFn, env } = options;
   const warnings: string[] = [];
 
   if (!(await commandExistsFn('ruby'))) {
@@ -695,13 +673,6 @@ async function collectDependencyWarnings(
         '[依存] 環境変数 GH_TOKEN が未設定です。GitHub の Personal Access Token(repo 権限)を発行し、' +
           '生成した env ファイルに設定してください(`gh auth login` は無人実行の cron / launchd では使えないため、' +
           'GH_TOKEN 方式を用います)。',
-      );
-    }
-  } else if (service === 'qiita') {
-    if (!qiitaCliResolvableFn()) {
-      warnings.push(
-        '[依存] note2web に同梱されているはずの @qiita/qiita-cli が解決できません。' +
-          '`npm install` をやり直してください。',
       );
     }
   } else if (service === 'note') {
@@ -932,7 +903,6 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     mkdirFn = defaultMkdir,
     chmodFn = defaultChmod,
     commandExistsFn = commandExists,
-    qiitaCliResolvableFn = defaultQiitaCliResolvable,
     resolveCliEntrypointFn = resolveCliEntrypoint,
     nodeExecPathFn = () => process.execPath,
     env = process.env,
@@ -1067,7 +1037,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       service,
       parserLibEntryPoint,
       requiredEnvNames,
-      { commandExistsFn, fileExistsFn, qiitaCliResolvableFn, env },
+      { commandExistsFn, fileExistsFn, env },
     );
     summary.push(...dependencyWarnings);
 
