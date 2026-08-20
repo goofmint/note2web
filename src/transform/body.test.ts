@@ -554,6 +554,28 @@ describe('transformBody', () => {
       expect(markdown).toBe('- Install with `npm install`\n');
     });
 
+    it('recognizes a span inside a table cell (table → tableRow → tableCell path)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<table><tr><td>Command</td><td>Effect</td></tr><tr><td>`npm ci`</td><td>clean install</td></tr></table>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe(
+        '| Command  | Effect        |\n' +
+          '| -------- | ------------- |\n' +
+          '| `npm ci` | clean install |\n',
+      );
+    });
+
+    it('recognizes a span inside a blockquote (blockquote → paragraph path)', () => {
+      const bodyHtml = noteHtml(
+        '<h1>Code Demo<br>\n</h1>\n<blockquote>Run `npm test` first.</blockquote>',
+      );
+      const { markdown } = transformBody({ bodyHtml });
+
+      expect(markdown).toBe('> Run `npm test` first.\n');
+    });
+
     it('does not double-convert backtick pairs inside a recognized code fence block', () => {
       const bodyHtml = noteHtml(
         '<h1>Code Demo<br>\n</h1>\n<br>```ruby<br>\n<br>puts `hostname`<br>\n<br>```',
