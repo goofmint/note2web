@@ -113,7 +113,6 @@ function buildOptions(
     mkdirFn: fs.mkdirFn,
     chmodFn: fs.chmodFn,
     commandExistsFn: () => Promise.resolve(true),
-    qiitaCliResolvableFn: () => true,
     resolveCliEntrypointFn: () => '/fake/install/dist/cli.js',
     nodeExecPathFn: () => FAKE_NODE_EXEC_PATH,
     env: {},
@@ -187,7 +186,6 @@ describe('runInit', () => {
         mkdirFn: fs.mkdirFn,
         chmodFn: fs.chmodFn,
         commandExistsFn: () => Promise.resolve(true),
-        qiitaCliResolvableFn: () => true,
         env: {},
         homeDir: HOME_DIR,
         promptFn,
@@ -223,7 +221,6 @@ describe('runInit', () => {
         expect(parsed.qiita).toBeUndefined();
       } else if (service === 'qiita') {
         const qiita = parsed.qiita as Record<string, unknown>;
-        expect(qiita.workspace).toBe('~/src/qiita-content');
         expect(qiita.token_env).toBe('QIITA_TOKEN');
         expect(parsed.git).toBeUndefined();
       } else if (service === 'devto') {

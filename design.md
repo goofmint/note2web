@@ -6,7 +6,7 @@ requirements.md(以下「要件」)に基づく設計書。要件の FR / NFR �
 
 - **パイプライン構成**: 「エクスポート → 変換 → 公開」を単方向のパイプラインとして実装する(FR-31)。各段は「前段の出力」と、唯一の副作用ポートである **StateStore** のみに依存する。StateStore は実行開始時にディスクから状態を1回だけ読み込み、以後は自身の書き込みを反映した一貫ビューを全段に提供する(AssetUploader の既アップロード判定、Publisher への `prev: NoteState` 受け渡しはこのビューから行う)。書き込みは「アセットアップロード成功時」と「ノート配信の確定時」の2箇所に限定する(§5.6)
 - **Publisher の抽象化**: 配信先ごとの差異は Publisher インターフェースの実装に閉じ込める。Git リポジトリ出力(Zenn / Hugo / Jekyll)は共通基盤 + サービス別の frontmatter・パス規約のみ差し替える
-- **外部ツールはサブプロセス**: `apple_cloud_notes_parser`・`gh`・`@qiita/qiita-cli`・`noet` はすべて外部 CLI として呼び出す。ライブラリとしてリンクしない
+- **外部ツールはサブプロセス**: `apple_cloud_notes_parser`・`gh`・`noet` はすべて外部 CLI として呼び出す。ライブラリとしてリンクしない(issue #82: Qiita は当初 `@qiita/qiita-cli` サブプロセス経由だったが、qiita-cli の `publish` が投稿前に利用者の全記事を無条件同期する実装のため大規模アカウントでタイムアウトし、Qiita API v2 を dev.to と同じ HTTP 直叩き方式へ移行した。§5.7 QiitaPublisher 参照)
 - **失敗の局所化**: 1ノートの失敗が実行全体を止めない。失敗したノートは状態を更新せず、次回実行で自動的に再試行される(NFR-06)
 
 ## 2. 実装言語・ランタイム
@@ -14,7 +14,7 @@ requirements.md(以下「要件」)に基づく設計書。要件の FR / NFR �
 **TypeScript(Node.js 20+)** を採用する。
 
 - `apple_cloud_notes_parser` は gem ではなく「clone して bundler で動かすアプリケーション」であり、Ruby を選んでも in-process 利用はできず、サブプロセス呼び出しになる点は同じ
-- Qiita(`@qiita/qiita-cli`)・dev.to 系ツールが npm パッケージであり、利用者の環境に Node.js がいずれにせよ必要になる
+- Qiita・dev.to はいずれも HTTP API を直接叩く(issue #82 以降。CLI のインストールは不要)ため、Node.js 標準の `fetch` のみで完結する
 - HTML → Markdown 変換(unified / rehype-remark 系)、S3 互換クライアント(AWS SDK v3、R2 対応)、grapheme 分割(`Intl.Segmenter` 標準搭載)の各要素が揃っている
 - 配布は npm(`npx note2web`)。Ruby(parser 用)は別途必要な依存としてドキュメントに明記する(NFR-05)
 
@@ -60,7 +60,7 @@ note2web sync --config ~/.config/note2web/zenn.yaml
 | はてなブログ AtomPub の Markdown 入稿 | `content type="text/x-markdown"` で入稿可能(複数の実装事例で確認。公式仕様書はネットワーク制約で未参照のため実装時に実機確認)。**ブログの編集モードが Markdown であることを利用条件とする** |
 | はてなブログの認証方式 | **Basic 認証(はてな ID + API キー)を採用**。HTTPS 経由のため十分であり、実装が最も単純 |
 | dev.to の方式 | **Forem API v1 を直接叩く方式を採用**。`@sinedied/devto-cli` は「GitHub リポジトリに画像をホストする」ワークフロー前提で、本ツールの R2 / S3 方式と競合するため |
-| Qiita の認証 | **確認済み(§13-3 解消)**。`qiita-cli` は `qiita login` による対話登録が基本だが、実装(`Credential.load`)は認証情報ファイルを読む**前に** `process.env.QIITA_TOKEN` の有無を確認し、設定されていればファイルを一切読まずにそれをアクセストークンとして使う。したがって note2web は**認証情報ファイルを生成する必要が無く**、`npx qiita publish` 実行時に子プロセスの環境変数 `QIITA_TOKEN` をセットするだけで無人実行できる(設計変更。詳細は §13-3)。note2web 側でトークンの取得元となる環境変数名は `qiita.token_env` で設定する(FR-30。既定のサンプルは `QIITA_TOKEN`)。QiitaPublisher は `token_env` が指す環境変数から値を読み、**子プロセスには常に `QIITA_TOKEN` という名前で**渡す(qiita-cli 側が参照する名前は `QIITA_TOKEN` 固定のため) |
+| Qiita の認証 | **issue #82 で方式変更(§13-3 の調査結果は歴史的経緯として残す。下記注記参照)**。qiita-cli サブプロセス方式は廃止し、**Qiita API v2 を `Authorization: Bearer <トークン>` ヘッダで直接叩く**(dev.to と同じ HTTP 直叩き方式)。note2web 側でトークンの取得元となる環境変数名は `qiita.token_env` で設定する(FR-30。既定のサンプルは `QIITA_TOKEN`)。QiitaPublisher は `token_env` が指す環境変数から値を読み、そのまま `Authorization` ヘッダへ入れる(qiita-cli 時代のような固定名 `QIITA_TOKEN` への詰め替えは不要) |
 | note.com | **確認済み(§13-4/§13-6 解消)。ただし重大な設計前提の崩れあり**。`noet`(kako-jun/noet, commit `e3a8562`)は要件調査時点(README.md の記載)とは**別物の内部アーキテクチャに移行済み**: 現行ソース(`apps/cli/src/cli.rs` 等)には note.com の非公式 API を直接叩くコードは無く、`Note.comのAPIは一切使用しない。すべての操作はブラウザ拡張機能を経由してDOM操作で行う`(`CLAUDE.md:19`)という設計に全面移行している。CLI はローカルの Chrome 拡張機能と `ws://127.0.0.1:9876` の WebSocket で通信し、拡張機能側が**実際にログイン中の人間のブラウザ**で note.com のページを開いて DOM 操作(フォーム入力・ボタンクリック)を行う(`apps/extension/src/background.js`)。README.md が案内する環境変数認証(`NOET_SESSION_COOKIE` 等)やレート制御(500ms 固定)は**現行コードには存在しない旧アーキテクチャの記述**(ソース grep で該当箇所ゼロ。詳細は §13-4)。この結果、**`noet` はサーバー / cron 上でヘッドレスに動かせる「gh・qiita-cli 相当のサブプロセス CLI」ではない**。加えて画像は note.com 側の ProseMirror エディタが Markdown 画像記法 `![]()` を解釈しないため、外部 URL をそのまま本文に埋め込んでも画像としては表示されない(noet 自身の調査結果 `docs/IMAGE_UPLOAD_INVESTIGATION.md` より。§13-6)。**この2点は note2web の当初設計(サブプロセス呼び出し・R2/S3 URL そのまま埋め込み)の前提を崩す。T-25(issue #30)で対応方針を決定・実装済み: (1) 認証前提が満たされない実行(cron 等)ではノート単位の failed として扱う自動実行、(2) 画像を含むノートは note.com 向けでは明示的に failed とする(option (b))。詳細は §5.7 NotePublisher 節を参照** |
 | Jekyll のファイル名規約 | `_posts/YYYY-MM-DD-<uuid>.md`。日付はノートの**作成日**を使う。初回配信時のファイル名を状態 JSON に記録し、以後は作成日が変わっても**記録済みファイル名を使い続ける**(URL の安定性を優先) |
 | ハッシュアルゴリズム | SHA-256 |
@@ -217,16 +217,22 @@ interface Publisher {
 
 #### QiitaPublisher
 
-- 設定で指定した qiita-cli ワークスペース(`itemsRootDir`。qiita-cli 実行時に `--root <workspace>` で指定するか、`QIITA_CLI_ITEMS_ROOT` 環境変数で指定。§13-3)の `public/<uuid>.md`(`<itemsRootDir>/public/<basename>.md`。`dist/lib/file-system-repo.js` `getRootPath` / `getFilePath`)に書き、`npx --no-install qiita publish <uuid> --root <workspace>` を実行(FR-25)
-- **CLI のパッケージ解決(セキュリティ制約)**: `@qiita/qiita-cli` は T-21 で note2web の `dependencies` に**固定バージョンで追加**し(lockfile にも固定)、実行は **`npx --no-install qiita`**(またはローカルの `node_modules/.bin/qiita`)に限定する。素の `npx qiita` はローカル未導入時に npm レジストリの **`qiita` という別パッケージ**(公式 CLI ではない)を取得しに行き、そのプロセスにトークン入りの環境変数が渡ってしまうため**禁止**。未導入の場合は `checkDependencies`(doctor / sync の前提チェック)で exit 2 とし、あわせて qiita-cli の要求する Node.js engine(>= 20)を満たすことも事前検証する
-- frontmatter: `title` / `tags` / `private: false` / **`updated_at: ""`** / `id`(初回は `null`、qiita-cli が投稿後に書き戻す ID を読み取って状態 JSON に保存)/ **`organization_url_name: null`** / **`slide: false`**(いずれも qiita-cli の型チェックで判明した差分。下記参照)
-  - **差分(調査により判明)**: qiita-cli の frontmatter 型チェック(`dist/lib/check-frontmatter-type.js` `checkSlide`)は `slide` が **真偽値であること**を要求しており(`typeof slide === "boolean"`)、フィールド自体が無い(`undefined`)場合は型エラーとして `publish` が失敗する。当初の想定(`title` / `tags` / `private` / `id` の4項目)には無かったフィールドのため、QiitaPublisher が書き出す frontmatter には `slide: false` を必須項目として追加する
-  - **差分(実機の `publish` 失敗で判明)**: 同チェックの `checkUpdatedAt` / `checkOrganizationUrlName` は `updated_at` / `organization_url_name` が **null または文字列であること**を要求しており、キー欠落(`undefined`)では `publish` が失敗する。qiita-cli 自身の新規テンプレート既定値(`updated_at: ''` / `organization_url_name: null`)を常に書き出す。`updated_at` の空文字は Invalid Date になり publish の「ローカルがリモートより古い場合の拒否」ガード(`isOlderThanRemote`)の日時比較が常に false となるため、新規・更新のどちらも拒否されない
-- タグ制約(1〜5個必須、スペース不可)への対処:
+**issue #82 で qiita-cli サブプロセス方式を廃止し、Qiita API v2 を直接叩く方式(dev.to と同じ HTTP 直叩き方式)へ移行した。以下は移行後の契約。旧 qiita-cli 方式の調査記録(§13-3・§13 項目3)は歴史的経緯として §13 に残す(下記「移行の背景」参照)。**
+
+- **移行の背景(issue #82)**: qiita-cli の `publish` コマンドは、対象記事の投稿に先立って**利用者の Qiita 記事を無条件に全件同期する**(1ページ100件 × 最大100ページ = 最大10,000件を毎回取得)。投稿数の多いアカウントではこの全件同期だけで note2web のサブプロセスタイムアウト(5分)を超過し、かつ記事本文一式がローカルの qiita-cli ワークスペースへ丸ごとダウンロードされてディスクを圧迫する問題が判明した。qiita-cli 自体にこの全件同期を無効化するオプションは無いため、qiita-cli サブプロセス方式そのものを廃止し、必要な記事だけを操作できる Qiita API v2 の直接呼び出しへ置き換えた
+- **wire contract**:
+  - 認証ヘッダ: `Authorization: Bearer <トークン>`、`Content-Type: application/json`
+  - 新規: `POST https://qiita.com/api/v2/items`。更新: `PATCH https://qiita.com/api/v2/items/{item_id}`(`{item_id}` は状態 JSON の `remoteId`)
+  - リクエストボディ(新規・更新共通): `{ "body": …, "title": …, "tags": [{ "name": …, "versions": [] }], "private": false }`
+  - 成功レスポンスの `id`(文字列)を状態 JSON の `remoteId` に、`url` を `url` に保存する
+  - HTTP タイムアウト30秒。**新規作成(POST)は自動リトライしない**。更新(PATCH)は同一内容の再送が冪等なので、接続系エラーに限り1回だけ再試行してよい(dev.to と同じ規約、下記「応答不明時の重複防止」参照)。**dev.to/はてなと異なり、タイトル一致による既存記事の照合は行わない**——`prev.remoteId` の有無だけで新規作成/更新を振り分ける単純な契約とした(issue #82 のプランによる意図的な単純化)
+- **contentHash の再定義(issue #82)**: 旧 qiita-cli 方式は frontmatter に qiita-cli が書き戻す `remoteId`/`updated_at`/`organization_url_name`/`slide`/`id` を含めていたため、初回配信の直後ではなく2回目の配信を経て初めてハッシュが安定するという直感に反する挙動があった(下記「移行後の状態ファイル互換性」参照)。新方式は dev.to と同じく `title` + タグ + 変換済み本文 Markdown のみをハッシュ対象とし、配信結果に左右される値は一切含めない——他6サービスと同様、1回の成功配信でハッシュが確定的に安定する
+- タグ制約(1〜5個必須、スペース不可)への対処(旧方式から変更なし):
   - 半角スペースを含むタグは**除外**し警告ログ(分割送信による 403 を防ぐ)
   - 除外後 6個以上なら先頭5個に切り詰めて警告ログ
   - 除外後 0個ならそのノートは**失敗扱い**(エラーログ。タグを付けて再実行してもらう)
-- 認証: 設定 `qiita.token_env` が指す環境変数からトークンを読む(FR-30。サンプル設定では `QIITA_TOKEN`)。**確認済み(§13-3)**: `qiita-cli` は `qiita login` の認証情報ファイルより先に `QIITA_TOKEN` 環境変数を見るため、QiitaPublisher は `token_env` の値を子プロセス環境変数 **`QIITA_TOKEN`(qiita-cli 側の参照名は固定)** にセットして `npx qiita publish` を呼ぶだけでよく、認証情報ファイルの生成・`qiita login` の代替実装は不要
+- 認証: 設定 `qiita.token_env` が指す環境変数からトークンを読む(FR-30。サンプル設定では `QIITA_TOKEN`)。値はログ・エラーメッセージに一切含めない
+- **移行後の状態ファイル互換性**: `qiita.workspace` 設定は廃止し、状態 JSON の `target` は(dev.to と同じ)固定値 `qiita.com` になった(§8)。旧バージョンで生成された状態ファイルの `target` は qiita-cli ワークスペースのパス文字列であり、新バージョンの `qiita.com` と一致しないため §8 の検証(`target` 不一致 → exit 2)に引っかかる。既存の `remoteId` を失わず引き継ぎたい場合は、状態 JSON の `target` フィールドを手動で `"qiita.com"` に書き換えてから再実行すること(README「Qiita」節に移行手順を明記)。加えて上記の contentHash 再定義により、既存ノートは(内容が変わっていなくても)次回実行で1回だけ PATCH による再配信が発生する(重複記事は作られない——`remoteId` を引き継いでいれば PATCH のみ)
 
 #### DevtoPublisher
 
@@ -261,10 +267,10 @@ interface Publisher {
 新規作成の要求が受理されたのに応答が失われた場合(タイムアウト・接続断)、記事は作成済みだが `remoteId` が未保存になり、素朴に再試行すると重複記事を作る。次の規約で防ぐ:
 
 - HTTP はタイムアウト 30 秒。**新規作成(POST)は自動リトライしない**。更新(PUT)は同一内容の再送が冪等なので、接続系エラーに限り1回だけ再試行してよい
-- `remoteId` の無いノートを新規作成する**前に、既存記事の照合**を行う:
+- `remoteId` の無いノートを新規作成する**前に、既存記事の照合**を行う(**Qiita は例外**、下記):
   - dev.to: 自分の記事一覧 API からタイトル一致で検索
   - はてな: コレクション URI の entry 一覧からタイトル一致で検索
-  - Qiita: qiita-cli が投稿後に frontmatter へ書き戻す `id` をワークスペースのファイルから読む(CLI 側の機構をそのまま利用し、独自照合はしない)
+  - Qiita: **照合を行わない**(issue #82 の意図的な単純化)。`prev.remoteId` があれば PATCH、無ければ POST とするだけ
   - note.com: **確認済み(§13-4)**。`noet list` が `/notes` ページを DOM スクレイピングして返す記事一覧(タイトル・key・status)からタイトル一致で照合する。この一覧取得はページネーションに対応していないため、対象記事が一覧の初期表示範囲に無い場合は0件判定になり得る点に注意(§13-4)
 - 照合結果の扱い: **ちょうど1件一致**した場合のみその ID を `remoteId` に採用し、更新として配信する。**0件**なら記事は未作成と判断して新規作成する。**複数一致**の場合は誤った記事への紐付けや重複作成を避けるため、そのノートを failed とし状態を更新しない(警告ログを出し、手動での解決を促す)
   - **note.com 固有の例外**: `noet list` は一覧の完全性を保証しないため、「0件なら新規作成」は**一覧が完全と確認できた場合(= 一覧が空だった場合)のみ**適用する(`src/publishers/note.ts` の `listAbsenceTrusted`)。一覧が空でないのにタイトル一致が0件の場合は確認不能として failed とし、状態を更新しない(§5.7 NotePublisher の「照合の安全条件」)
@@ -300,7 +306,7 @@ sync:
 |---|---|
 | 共通 | `ruby`(>= 3.0)+ `apple_cloud_notes_parser`、R2 / S3 の認証環境変数。`exporter.launcher`(既定 `bundle`)が `bundle` のときは加えて `bundle` コマンドと `bundle check` による gem 準備状況(issue #67)。加えて `exporter.notes_container` が指す Notes コンテナディレクトリと `NoteStore.sqlite` の存在・読み取り可否(issue #69。未許可が最も多い原因はフルディスクアクセス未付与で、フルディスクアクセスが無いと `apple_cloud_notes_parser` は `no such table: ZACCOUNT: (SQLite3::SQLException)` という原因の分かりにくいエラーで失敗する) |
 | zenn / hugo / jekyll | `git`、`gh` + `GH_TOKEN`(Git モードのみ `gh` を要求) |
-| qiita | Node.js(qiita-cli の要求 engine >= 20)、`@qiita/qiita-cli`(note2web の `dependencies` に固定バージョンで追加し、`npx --no-install` で解決。§5.7。**現時点では未導入・依存チェック未実装 = T-21 で実装する契約**)、`qiita.token_env` が指す環境変数(サンプルでは `QIITA_TOKEN`) |
+| qiita | `qiita.token_env` が指す環境変数のみ(サンプルでは `QIITA_TOKEN`。API 直接、CLI 不要。issue #82 で qiita-cli サブプロセス方式(Node.js engine 確認・`@qiita/qiita-cli` の解決確認)を廃止) |
 | devto | `DEVTO_API_KEY` のみ(API 直接。CLI 不要) |
 | note | `noet` バイナリ(`checkDependencies`、T-25 で `src/dependencies.ts` に実装済み)に加え、**同一マシン上で note.com にログイン済みの実 Chrome ブラウザ + noet 拡張機能が起動していること**(§13-4)。トークン等の環境変数では代替できず、`doctor`/`sync` 冒頭の自動チェックで確認できる項目ではない(拡張機能との WebSocket 接続失敗は `noet` サブプロセス実行時に初めて判明し、当該ノートのみ failed になる。§5.7 NotePublisher「認証・実行モード」参照)|
 | hatena | `HATENA_API_KEY` のみ(API 直接。CLI 不要) |
@@ -310,7 +316,7 @@ sync:
   - PID が存在しない、または開始時刻が不一致(PID 再利用)の場合のみ stale と判定する。生存・開始時刻のどちらかが確認できない場合は削除せず exit 2
   - stale 回収は「ロックファイルを一時名へ rename して隔離 → 隔離したファイルの内容が判定時に読んだ内容と一致することを確認 → `O_CREAT | O_EXCL` で新規取得」の手順とする。内容が一致しない場合は判定と rename の間に別プロセスが新しいロックを作っているため、隔離を取り消して exit 2(TOCTOU 防止)
   - これにより、異常終了でロックが残っても以後の実行は恒久的に止まらず、生存中のプロセスのロックを誤って奪うこともない
-- **サブプロセス実行の共通規約**(`apple_cloud_notes_parser` / `gh` / `qiita-cli` / `noet` / `git`): 各コマンドにタイムアウトを設ける(parser: 15分、その他: 5分)。超過時はプロセスグループごと SIGTERM を送り、10秒待って残存すれば SIGKILL。失敗は `timeout` / `exit_code` / `signal` に分類し、failed ログの `error` に記録する。正常・異常いずれの終了経路でも一時ディレクトリの削除とロック解放を必ず実施する(プロセス自体のクラッシュで実施できなかった場合は、次回実行の stale ロック回収で回復する)
+- **サブプロセス実行の共通規約**(`apple_cloud_notes_parser` / `gh` / `noet` / `git`。issue #82 以降、Qiita はこの対象から外れ dev.to と同じ HTTP タイムアウト30秒の規約に従う。§5.7 QiitaPublisher 参照): 各コマンドにタイムアウトを設ける(parser: 15分、その他: 5分)。超過時はプロセスグループごと SIGTERM を送り、10秒待って残存すれば SIGKILL。失敗は `timeout` / `exit_code` / `signal` に分類し、failed ログの `error` に記録する。正常・異常いずれの終了経路でも一時ディレクトリの削除とロック解放を必ず実施する(プロセス自体のクラッシュで実施できなかった場合は、次回実行の stale ロック回収で回復する)
 
 ## 7. 設定 YAML スキーマ
 
@@ -346,8 +352,7 @@ git:
 
 # --- サービス固有（該当 service のときのみ）---
 qiita:
-  workspace: ~/src/qiita-content
-  token_env: QIITA_TOKEN
+  token_env: QIITA_TOKEN         # issue #82: API 直接方式へ移行し workspace は廃止
 devto:
   api_key_env: DEVTO_API_KEY
   canonical_base_url: https://example.com/articles/   # 省略可
@@ -370,7 +375,7 @@ hatena:
 {
   "version": 1,
   "service": "zenn",
-  "target": "配信先の識別子。Git モード: repo_path、qiita / note: workspace、hatena: blog_id、devto: API ホスト",
+  "target": "配信先の識別子。Git モード: repo_path、note: workspace、hatena: blog_id、qiita / devto: API ホスト（issue #82: qiita は workspace から API ホスト固定値へ変更）",
   "notes": {
     "5c1c2c3d-…-uuid": {
       "contentHash": "sha256:ab12…",
@@ -453,21 +458,21 @@ note2web/
 - **golden test**: 正規化直列化の固定(§5.6)。同一入力ノートに対して期待する直列化文字列とハッシュ値をリポジトリに固定し、serializer・依存更新でハッシュが変わったら検知する。ケースには YAML の境界値(`null` / 真偽値 / 数値 / 日時に見える文字列、`:` `#` `"` `\` 改行を含む文字列)を必ず含める
 - **結合**: `test/fixtures/parser-output/`(**表・チェックリスト・描画参照・絵文字タイトル+ハッシュタグ+ネストフォルダを含む複数ノート**の fixture)でエクスポート以降を通しで検証。JSON の UUID と個別 HTML(`--individual-files --uuid`)の対応が一意に解決できることをここで検証する。Publisher は外部呼び出し(git / gh / HTTP / CLI)をモック化
   - この fixture は実機の `NoteStore.sqlite` からではなく、parser 実装をパーサ同梱の実エクスポート blob に対して実行した結果 + ソースコード読解によって構成した(T-08, §13)。由来・確認方法・各ノートがどこまで実行検証済みかは `test/fixtures/parser-output/README.md` に明記する
-- **実機確認**(CI 不能なもの): noet の公開フロー、はてな AtomPub での `text/x-markdown` 入稿(T-23 時点の状況は §13-5 参照。wire contract 自体の実装と HTTP モックでの検証は完了しており、残るのは実際のはてなブログへの入稿確認のみ)、**qiita-cli の実トークンでの認証・記事公開**。§13 の項目と対応
+- **実機確認**(CI 不能なもの): noet の公開フロー、はてな AtomPub での `text/x-markdown` 入稿(T-23 時点の状況は §13-5 参照。wire contract 自体の実装と HTTP モックでの検証は完了しており、残るのは実際のはてなブログへの入稿確認のみ)、**Qiita API v2 の実トークンでの認証・記事公開**(issue #82 以降。HTTP モックでの wire contract 検証は完了)。§13 の項目と対応
   - noet(note.com)は他の実機確認項目と性質が異なる: 確認すべきなのは「wire contract の細部」ではなく「note.com にログイン済みの実ブラウザ + noet 拡張機能を用意した状態で `noet create`/`noet update` が実際に記事を作成・更新できるか」「作成直後に `noet list` で該当記事の `key` を一意に特定できるか」「画像を noet 自身の画像アップロード機能経由で送った場合に本文中の参照が正しく置換されるか(`docs/IMAGE_FEATURE_STATUS.md` が『統合テスト未実施』とする部分)」の3点であり、いずれも GUI ブラウザとログイン済みアカウントを要するため本タスクの環境(egress 遮断・GUI 無し)では原理的に検証不能。§13-4/§13-6 参照
-  - qiita-cli は確認範囲を分けて扱う: **無人実行経路**(認証情報ファイル不要・`QIITA_TOKEN` 環境変数のみで対話なしに HTTP 要求まで進むこと)は §13-3 のとおりパッケージ実装の読解 + ローカル実行で確認済み。一方、**実トークンでの認証成功・記事公開成功**は未確認であり、実機確認の対象として残る。また、この確認は `node dist/main.js` の直接実行によるもので、実運用コマンド `npx qiita publish` のパッケージ解決(`qiita` → `@qiita/qiita-cli`)は未確認。QiitaPublisher 本体と `@qiita/qiita-cli` の導入は T-21 時点でも未実装・未導入である(§13-3 は調査のための一時インストールで確認した)
+  - Qiita は dev.to/はてなと同じ HTTP 直叩き方式(issue #82)のため、wire contract 自体は HTTP モック(`test/publishers/qiita.test.ts`)で検証済み。残るのは実トークンでの実際の認証成功・記事公開成功の確認のみ(本タスクの実行環境は egress プロキシにより `qiita.com` へ到達できず未実施)。**qiita-cli サブプロセス方式時代の確認記録(無人実行経路の検証等)は §13-3 に歴史的経緯として残すが、現行実装(API 直叩き)には適用されない**
 
 ## 13. 実装時に確認が必要な残課題
 
 **確認方法についての注記(1・2・7 に共通)**: 本タスクの実行環境には macOS も実機の Apple Notes データベースも無いため、「実機確認」は `apple_cloud_notes_parser`(commit `4754a2b62686570cca46690d101079e80cf6ae66`, 2026-07-25)の**実装をパーサ同梱の実エクスポート blob(`spec/data/exported_blobs/*.bin`)に対して実行**し、加えて `lib/` のソースコードと同梱 `JSON.md` を読解する、という方法で代替した。macOS 実機で `NoteStore.sqlite` に対してパーサをエンドツーエンドで実行する確認は行っていない。詳細な根拠・引用元は `test/fixtures/parser-output/README.md` を参照
 
-**確認方法についての注記(3 = §13-3 に固有)**: 本タスクの実行環境は egress プロキシにより `qiita.com` へ到達できず、実トークンも無いため、実際の記事投稿(実 publish)による確認はできない。代わりに次の2点で確認した: (a) `@qiita/qiita-cli`(**v1.10.0**。`npm install @qiita/qiita-cli` でレジストリから取得した実パッケージ)の `dist/` 配下の実装をソースコード読解した、(b) そのパッケージをローカルで実際に実行し(`node dist/main.js publish <basename> --root <workspace>`)、ダミーの `QIITA_TOKEN` を与えて対話プロンプトが一切発生しないこと・処理が `qiita.com` への HTTP リクエスト(egress プロキシのホスト許可リストで拒否され `QiitaForbiddenError: Host not in allowlist` として失敗)まで進むことを確認した。**パッケージ実装の読解とローカル実行による確認であり、実トークンでの実 publish は未実施**
+**確認方法についての注記(3 = §13-3 に固有。歴史的経緯——issue #82 で qiita-cli サブプロセス方式そのものを廃止したため、以下の調査内容は現行実装には適用されない。QiitaPublisher の現行契約は §5.7 QiitaPublisher 節を参照)**: 本タスクの実行環境は egress プロキシにより `qiita.com` へ到達できず、実トークンも無いため、実際の記事投稿(実 publish)による確認はできない。代わりに次の2点で確認した: (a) `@qiita/qiita-cli`(**v1.10.0**。`npm install @qiita/qiita-cli` でレジストリから取得した実パッケージ)の `dist/` 配下の実装をソースコード読解した、(b) そのパッケージをローカルで実際に実行し(`node dist/main.js publish <basename> --root <workspace>`)、ダミーの `QIITA_TOKEN` を与えて対話プロンプトが一切発生しないこと・処理が `qiita.com` への HTTP リクエスト(egress プロキシのホスト許可リストで拒否され `QiitaForbiddenError: Host not in allowlist` として失敗)まで進むことを確認した。**パッケージ実装の読解とローカル実行による確認であり、実トークンでの実 publish は未実施**
 
 **確認方法についての注記(4・6 = §13-4・§13-6 に固有)**: 本タスクの実行環境には note.com アカウントも GUI ブラウザも無く、egress も遮断されているため、noet を通じた実際の note.com への投稿・画像アップロードは確認できない。代わりに次の方法で確認した: (a) `kako-jun/noet` を clone した実ソース(commit `e3a85629ad67d1d217f023e849d3d848a3a303f8`, 2026-04-13。`apps/cli/src/`・`apps/extension/src/`・`docs/`・`CLAUDE.md`・`protocol.yaml`)を読解した、(b) `cargo build`(依存クレートは crates.io から取得。note.com への通信は発生しない)でローカルビルドが成功することを確認した上で、`cargo run` で生成したバイナリを実行し、`noet --help` / `noet create --help` / `noet update --help` / `noet template --help` の出力(コマンド一覧・引数)、および `noet init` によるワークスペース初期化(`.noet/config.toml` と `templates/` の生成)、`noet ping` がローカルの `127.0.0.1:9876` に WebSocket サーバーを起動し**ブラウザ拡張機能からの接続を最大30秒待って(接続が来ないため)タイムアウトする**という実際の待機動作を、いずれもネットワーク到達不要な範囲でローカル実行により確認した(いずれも note.com への実通信は発生していない)。**ソースコード読解 + ローカル実行確認であり、実際の note.com への記事作成・更新・画像アップロードの成功は未確認。** なお noet は README.md / CLAUDE.md / CHANGELOG.md 間で記述が一致しておらず(後述)、本調査では**現行ソースコードの実装(cli.rs 等)を唯一の一次情報として優先し**、これと矛盾するドキュメント記述(README.md の環境変数認証案内等)は「旧アーキテクチャ由来の記述漏れ」として採用しなかった
 
 1. ~~parser の HTML 出力における**チェックリストの表現**~~ → **確認済み**。`<ul class="checklist" data-apple-notes-indent-amount="N">` の下に `<li class="checked">` または `<li class="unchecked">` が並ぶ。ネストは `li` 要素の中に入れ子の `ul class="checklist" data-apple-notes-indent-amount="N+1"` を置く形(`lib/ProtoPatches.rb:383-385,464-467`)。実データ blob (`list_indents_gzipped.bin`) を `AppleNote#generate_html` で実行して確認。→ BodyTransformer(§5.4)は `li.checked` → `- [x]`、`li.unchecked` → `- [ ]`、ネストしたインデント量に応じて Markdown 側のリストもネストする変換ルールとする
 2. ~~parser が抽出する**描画ファイルの形式**~~ → **確認済み**。描画(`ZTYPEUTI` が `com.apple.drawing.2` / `com.apple.drawing` / `com.apple.paper`)は常に**ラスター画像(png/jpg/jpeg のいずれか。Apple が生成する「フォールバック画像」)**として `files/Accounts/<アカウント ZIDENTIFIER>/FallbackImages/<描画オブジェクトの UUID>/…/FallbackImage.<拡張子>` に抽出される(`lib/AppleNotesEmbeddedDrawing.rb`)。ベクター(手書きストローク)そのものは出力されないため、「画像でない場合のフォールバック」という論点自体が発生しない(常に画像)。本文には `generate_html_with_images`(`lib/AppleNotesEmbeddedObject.rb:694-721`)により `<a href="…"><img src="…" data-apple-notes-zidentifier="…" width="…"></a>` が挿入される。この経路はソースコード読解で確認(exported_blobs に手書きの実データが含まれないため実行検証は未実施)。→ AssetUploader(§5.5)・BodyTransformer(§5.4)の「手書き描画はそのまま画像としてアップロードする」という設計は変更不要
-3. ~~`qiita-cli` を **`QIITA_TOKEN` 環境変数だけで無人実行**する方法(認証情報ファイルの生成先・形式)~~ → **確認済み(T-20)**。結論: **認証情報ファイルの生成は不要**。`qiita-cli`(**v1.10.0**)の `Credential.load()`(`node_modules/@qiita/qiita-cli/dist/lib/config.js:156-181`)は次の優先順で認証情報を決定する:
+3. ~~`qiita-cli` を **`QIITA_TOKEN` 環境変数だけで無人実行**する方法(認証情報ファイルの生成先・形式)~~ → **確認済み(T-20)。ただし歴史的経緯——issue #82 で qiita-cli サブプロセス方式そのものを廃止し Qiita API v2 直叩きへ移行したため、以下の調査内容(qiita-cli 内部実装の詳細)は現行実装には適用されない。現行の QiitaPublisher 契約は §5.7 QiitaPublisher 節を参照**。当時の結論: **認証情報ファイルの生成は不要**。`qiita-cli`(**v1.10.0**)の `Credential.load()`(`node_modules/@qiita/qiita-cli/dist/lib/config.js:156-181`)は次の優先順で認証情報を決定する:
    1. **`QIITA_TOKEN` 環境変数が設定されていれば、認証情報ファイルを読まずにそれをそのままアクセストークンとして使う**(`config.js:161-172`。`credentialData = { default: "environment variable", credentials: [{ accessToken: process.env.QIITA_TOKEN, name: "environment variable" }] }` をメモリ上に生成するだけで、ファイル I/O は発生しない)
    2. `QIITA_TOKEN` が無い場合のみ、`<credentialDir>/credentials.json` を読む(無ければ `ENOENT` で失敗。後述)
    - `credentialDir` の既定値は `~/.config/qiita-cli`(`XDG_CONFIG_HOME` があればそちらを優先、`--credential <dir>` オプションでも上書き可。`config.js:90-100`)。`qiita login` が対話的に取得したトークンを書き込む先も同じ `<credentialDir>/credentials.json` で、形式は次のとおり(`config.js:136-148` のコメント、および `setCredential`/`config.js:199-224` の実装で確認): `{"default": "<プロファイル名>", "credentials": [{"accessToken": "<トークン>", "name": "<プロファイル名>"}]}`(ファイルパーミッション `0o600`)
@@ -494,6 +499,6 @@ note2web/
 7. ~~parser の JSON スキーマの詳細(フォルダ階層・作成日時のフィールド名)~~ → **確認済み**。トップレベルは `{version, file_path, backup_type, html, accounts, cloudkit_participants, folders, notes}`。`folders` は **ルートフォルダのみ**を key(`z_pk` の文字列)に持ち、子フォルダは各フォルダオブジェクトの `child_folders`(同じ形の入れ子オブジェクト)の中に再帰的に格納される(`parent_folder_id` で親を指す。トップレベルの `folders` には子フォルダは並ばない)。`notes` はネストせず、`note_id` をキーにしたフラットな辞書で、各ノートは `folder_key` / `folder`(フォルダの `z_pk` / 名前)で所属フォルダを参照する。ノートのフィールドは `account_key, account, folder_key, folder, note_id, uuid, primary_key, creation_time, modify_time, cloudkit_creator_id, cloudkit_modifier_id, cloudkit_last_modified_device, is_pinned, is_password_protected, title, plaintext, html, note_proto, embedded_objects, hashtags, mentions`。作成日時 / 更新日時のフィールド名は `creation_time` / `modify_time`(`title` や `uuid`のような単純な名前ではない点に注意)で、値は `"YYYY-MM-DD HH:MM:SS +0000"` 形式の文字列(`Time#to_s` 相当。実行して確認)。ソース: `JSON.md` と `lib/AppleNoteStore.rb#prepare_json`、`lib/AppleNote.rb#prepare_json`、`lib/AppleNotesFolder.rb#prepare_json`、`lib/AppleNotesAccount.rb#prepare_json`。具体例は `test/fixtures/parser-output/json/all_notes_1.json`。→ §5.3 の Note モデルのフィールド対応・§5.2 のパス解決規約はこのスキーマに基づいて記述した(差分は §5.3 内に明記)
 8. **issue #72(2026-08-17 実装)**: `notes_cloud_ripper.rb` のそのまま実行が Notes ストア全体を無条件に処理し、フォルダ単位のフィルタを持たないこと。加えて `--individual-files` の個別ファイル書き出し(`AppleNoteStore#write_individual_html` → `AppleNote#title_as_filename`)がタイトル由来のファイル名を組み立て、この `@notes.each` ループには `rescue` が無いため、ストア中のどこか(「最近削除した項目」= ゴミ箱の中を含む)1件でもタイトルが極端に長い/壊れたノートがあると `Errno::ENAMETOOLONG` でプロセス全体が落ちる、という根本問題が判明した。**確認方法**: upstream の `master` を `git ls-remote` で確認したところ、T-08 SPIKE 時点で固定していたコミット `4754a2b62686570cca46690d101079e80cf6ae66` から変わっていなかった(2026-08-17 時点)。そのコミットの `lib/AppleBackup.rb`・`lib/AppleBackupMac.rb`・`lib/AppleNoteStore.rb`・`lib/AppleNote.rb`・`lib/AppleNotesFolder.rb`・`lib/AppleNotesAccount.rb`・`lib/AppleCloudKitRecord.rb`・`notes_cloud_ripper.rb` を読解し、`rip_notes`(ノート選択クエリが iOS/macOS バージョンごとに9通りの SQL 分岐を持つこと)・`rip_folders`(フォルダ選択に `ZFOLDERTYPE` を使っていないこと=ゴミ箱の特別扱いが upstream 側に無いこと)・`write_individual_html`/`title_as_filename`(根本原因の所在)・`back_up_file`(添付コピーがノードのデコード時点=`rip_notes` 内で発生し、フォルダ絞り込みより前であること)を確認した。**対応**: note2web 独自の Ruby ドライバ(`ruby/note2web_export.rb` + `ruby/lib/note2web_export_core.rb`)を追加し、upstream の `notes_cloud_ripper.rb` の代わりにこちらを実行するよう `src/exporter/apple-notes.ts` を変更した(§5.2 参照)。**早期フィルタの到達レベル**: 上記の9通りの SQL 分岐を安全に再実装/上書きする手段が(実機の各バージョンの `NoteStore.sqlite` でテストできる環境が無いため)無く、「対象外フォルダは読み取らない」の完全な実現(SQL クエリ自体を対象フォルダに限定する)は見送った。フォルダ(`rip_folders`)・ノート本体(`rip_notes`)の読み取り自体は upstream にそのまま行わせる一方(ノート本体は upstream 自身が1ノートずつ `rescue` 済みで、ここは元から issue #72 の原因ではない)、**生成・書き込み**(`generate_html` の実行・JSON への採用・ファイル書き込み)は対象フォルダのサブツリーに属し、ゴミ箱でなく、暗号化されていないノートに限定し、対象内ノートのデコード/生成失敗もここでさらに `begin/rescue` する、というフォールバック水準を採用した(詳細・根拠は `ruby/note2web_export.rb` 冒頭コメント参照)。既知の残存効果として、添付・描画ファイルは upstream がノードのデコード時点(=対象内/対象外を問わない)で `files/` へコピーするため、対象外ノートの添付が(参照されないまま)一時ディレクトリに残ることがある(実害なし)。ライセンス・参照コミットの詳細は `NOTICE`(リポジトリルート)を参照
 
-確認結果によってアーキテクチャが変わらないもの(1・2・3・7)と、変わるもの(4・6 = note.com、8 = Apple Notes エクスポートの起動方式)がある(5 = はてなは wire contract の実装まで完了・実機確認のみ残存)。ただし 3(Qiita)は当初想定と異なり Publisher 内部だけには閉じない: `qiita.token_env`(設定)→ 依存チェック(`@qiita/qiita-cli` の固定バージョン解決と Node engine の事前検証)→ 子プロセス環境(`QIITA_TOKEN` 固定名での受け渡し)→ CLI のパッケージ解決(`npx --no-install` 限定)にまたがる契約であり、§5.7 / §9 に明記した(実装は T-21)。
+確認結果によってアーキテクチャが変わらないもの(1・2・7)と、変わるもの(4・6 = note.com、8 = Apple Notes エクスポートの起動方式)がある(5 = はてなは wire contract の実装まで完了・実機確認のみ残存)。3(Qiita)は T-21 時点では上記のとおり Publisher 内部だけに閉じない契約(依存チェック・子プロセス環境・CLI のパッケージ解決にまたがる)として実装されたが、**issue #82 でこの qiita-cli サブプロセス方式そのものを廃止し、Qiita API v2 を直接叩く方式(dev.to と同じ HTTP 直叩き)へ移行した**——現行の契約は `qiita.token_env`(設定)→ HTTP リクエストの `Authorization` ヘッダのみに単純化されている(§5.7 QiitaPublisher 節参照)。
 
 **4・6(note.com / noet)はさらに深刻で、「未決事項の解消」に留まらず §1 の実行モデル(cron / launchd からの無人実行)そのものが note.com には適用できないという結論に至った**。noet(commit `e3a8562`)は README.md / CHANGELOG.md が説明する「環境変数認証 + 非公式 API 直叩き」のアーキテクチャから、現行ソースでは「ログイン済みの実ブラウザ + Chrome 拡張機能を DOM 操作で遠隔操作する」アーキテクチャへ全面移行済みであり、この移行後のアーキテクチャにはサーバー上で完結する認証手段が存在しない(§13-4)。加えて note.com の編集画面は Markdown の画像記法を解釈しないため、外部 URL をそのまま埋め込む当初設計はリテラルテキストの露出という形で失敗する可能性が高い(§13-6)。**T-25(issue #30)でこの決定を行い実装した**: 半自動モードへ後退させる案(a)ではなく、自動実行を維持したうえで「認証前提が満たされない実行は当該ノートを failed にする」(NFR-06 の局所化に委ねる)を選び、画像は §13-6 の案(b)(画像を含むノートを明示的に failed とする)を採用した。詳細・根拠は §5.7 NotePublisher 節を参照。

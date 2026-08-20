@@ -340,29 +340,29 @@ describe('runDoctorChecks', () => {
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
 
-    it('reports the missing "node"/"npx" commands for qiita, naming each one', async () => {
+    it('passes for qiita using only the reused common/service checks (issue #82: no more node/npx/qiita-cli checks)', async () => {
       const runSubprocessFn = vi.fn<
         (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
       >(() => Promise.resolve(success()));
 
-      const error = await expectDoctorError(
-        buildConfig({
-          service: 'qiita',
-          git: undefined,
-          qiita: { workspace: '~/src/qiita-content', token_env: 'QIITA_TOKEN' },
-          exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-        }),
-        {
-          commandExistsFn: (command) => Promise.resolve(command === 'ruby'),
-          env: {},
-          runSubprocessFn,
-          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
-        },
-      );
+      await expect(
+        runDoctorChecks(
+          buildConfig({
+            service: 'qiita',
+            git: undefined,
+            qiita: { token_env: 'QIITA_TOKEN' },
+            exporter: { parser_path: parserPath, notes_container: '/dev/null' },
+          }),
+          {
+            commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
+            env: {},
+            runSubprocessFn,
+            dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
+            fileReadableFn: () => Promise.resolve(true),
+          },
+        ),
+      ).resolves.toBeUndefined();
 
-      const messages = error.problems.map((problem) => problem.message).join('\n');
-      expect(messages).toMatch(/"node"/);
-      expect(messages).toMatch(/"npx"/);
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
 

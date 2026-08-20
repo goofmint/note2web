@@ -1,6 +1,6 @@
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { deriveTarget, DEVTO_TARGET, resolveStatePath } from './derive.js';
+import { deriveTarget, DEVTO_TARGET, QIITA_TARGET, resolveStatePath } from './derive.js';
 import type { Config } from '../config.js';
 
 function buildConfig(overrides: Partial<Config> = {}): Config {
@@ -65,16 +65,16 @@ describe('deriveTarget', () => {
     },
   );
 
-  it('uses qiita.workspace for qiita', () => {
+  it('uses a fixed constant for qiita (no user-configured identifier exists in the schema, issue #82)', () => {
     expect(
       deriveTarget(
         buildConfig({
           service: 'qiita',
           git: undefined,
-          qiita: { workspace: '/workspaces/qiita', token_env: 'QIITA_TOKEN' },
+          qiita: { token_env: 'QIITA_TOKEN' },
         }),
       ),
-    ).toBe('/workspaces/qiita');
+    ).toBe(QIITA_TARGET);
   });
 
   it('uses note.workspace for note', () => {

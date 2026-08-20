@@ -26,16 +26,11 @@
  *   - zenn/hugo/jekyll(Git モード): `git` / `gh` コマンド、`GH_TOKEN` 環境変数
  *     (`GH_TOKEN` は design.md §5.7 が定める固定名で、設定スキーマの `*_env` には
  *     現れないため、config.ts の汎用チェックではカバーされない)
- *   - qiita: `node` / `npx`(`@qiita/qiita-cli` を `npx --no-install qiita` 経由で呼ぶための
- *     実行手段)に加え、T-21(issue #26)で以下2点を追加した(design.md §5.7 セキュリティ
- *     制約・§6 依存表「`@qiita/qiita-cli`… 現時点では未導入・依存チェック未実装 = T-21 で
- *     実装する契約」):
- *       (a) `@qiita/qiita-cli` が note2web 自身の依存として実際にローカル解決できること
- *           (`package.json` の `dependencies` に固定バージョンで追加し `npm install` 済み
- *           であることの検証。`npx --no-install qiita` はこれが無いと失敗するため、
- *           `sync`/`doctor` の実行前に検出する)
- *       (b) 実行中の Node.js が qiita-cli の要求する engine を満たすこと(インストール済み
- *           パッケージの `engines.node` 宣言を優先し、取得できない場合は `>= 20` の下限)
+ *   - qiita: 上記の共通チェックのみ(`QIITA_TOKEN` 相当は config.ts が既にチェック済み。
+ *     issue #82 で qiita-cli サブプロセス方式(`npx --no-install qiita` 起動・CLI の
+ *     ローカル解決確認・Node engine 確認)を廃止し、dev.to と同じ「HTTP を直叩きする API
+ *     モード」へ移行したため、この節にあった `node`/`npx` コマンド確認・
+ *     `@qiita/qiita-cli` の解決確認・engine 確認は不要になった)
  *   - devto: 上記の共通チェックのみ(`DEVTO_API_KEY` は config.ts が既にチェック済み)
  *   - note: `noet` コマンド(design.md は「認証設定」も要求するが、現行の設定スキーマ
  *     (`src/config.ts` の `noteSchema`)は `workspace` のみで認証用の `*_env` を
@@ -53,7 +48,6 @@
 
 import { access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
@@ -89,61 +83,6 @@ export type DependencySubprocessRunner = (
 const RUBY_MIN_VERSION: readonly [number, number, number] = [3, 0, 0];
 
 /**
- * qiita-cli(`@qiita/qiita-cli`)が要求する Node.js の最低メジャーバージョンの下限
- * (design.md §6)。実際の要求は、インストール済みパッケージの `engines.node` 宣言
- * (`defaultQiitaCliEnginesNode`)を優先して用い、宣言が取得できない・単純な `>=X.Y.Z`
- * 形式でない場合のみこの値へフォールバックする(固定バージョンの更新に検査が追随する
- * ようにするため。例: v1.10.0 の宣言は `>=22.22.1` で、この下限 20 より厳しい)。
- */
-const QIITA_CLI_MIN_NODE_MAJOR = 20;
-
-/**
- * インストール済み `@qiita/qiita-cli` の `package.json` から `engines.node` 宣言を読む
- * 既定実装。解決できない(未インストール等)場合や宣言が無い場合は `undefined` を返し、
- * 呼び出し側は `QIITA_CLI_MIN_NODE_MAJOR` の下限チェックへフォールバックする。
- */
-function defaultQiitaCliEnginesNode(): string | undefined {
-  try {
-    const require = createRequire(import.meta.url);
-    const pkg = require('@qiita/qiita-cli/package.json') as {
-      engines?: { node?: unknown };
-    };
-    return typeof pkg.engines?.node === 'string' ? pkg.engines.node : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * `>=A.B.C`(A.B / A のみも可)という単純な engines 範囲文字列から最低バージョンの
- * 3つ組を取り出す。qiita-cli の宣言はこの形式(`>=22.22.1`)。複合範囲(`||` や上限付き)
- * には対応せず `undefined` を返す(その場合はメジャー下限チェックへフォールバック)。
- */
-function parseSimpleMinimumEngineRange(range: string): [number, number, number] | undefined {
-  const match = /^>=\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*$/.exec(range.trim());
-  if (match === null || match[1] === undefined) {
-    return undefined;
-  }
-  return [Number(match[1]), Number(match[2] ?? '0'), Number(match[3] ?? '0')];
-}
-
-/** `v22.22.2` のような Node.js バージョン文字列を [major, minor, patch] に分解する。 */
-function parseNodeVersionTriple(version: string): [number, number, number] {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version);
-  if (
-    match === null ||
-    match[1] === undefined ||
-    match[2] === undefined ||
-    match[3] === undefined
-  ) {
-    throw new Error(
-      `internal error: could not parse Node.js version string: ${JSON.stringify(version)}`,
-    );
-  }
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-/**
  * `ruby -v` の出力(例: `"ruby 3.2.2p53 (2023-03-30 revision e51014f9c0) [x86_64-darwin23]"`)
  * から `[major, minor, patch]` を取り出す(issue #67)。先頭付近に `ruby X.Y.Z` があれば
  * 十分で、`p53` のようなパッチレベル接尾辞は無視する。マッチしない場合は `undefined`。
@@ -170,38 +109,6 @@ function compareVersionTriples(a: readonly number[], b: readonly number[]): numb
     }
   }
   return 0;
-}
-
-/**
- * `@qiita/qiita-cli` が note2web 自身の依存としてローカル解決できるかどうかの既定実装
- * (design.md §5.7 セキュリティ制約「`@qiita/qiita-cli` は `dependencies` に固定バージョンで
- * 追加し… `npx --no-install` で解決」)。`createRequire(import.meta.url)` は本モジュール
- * (`src/dependencies.ts`)自身の位置から `node_modules` 解決を行うため、note2web パッケージの
- * 依存として実際にインストールされているかを問う——`npx --no-install` が実行時に行う解決と
- * 同じ前提(ローカル `node_modules` に存在すること)を、コマンドを実行せずに事前確認できる。
- */
-function defaultQiitaCliResolvable(): boolean {
-  try {
-    createRequire(import.meta.url).resolve('@qiita/qiita-cli/package.json');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * `v22.22.2` のような Node.js バージョン文字列からメジャーバージョンの整数を取り出す。
- * `process.version` は常にこの形式(先頭 `v` 付き)のため、パース不能は内部矛盾として例外を
- * 投げる(呼び出し側の注入テストが不正な文字列を渡した場合の早期検出も兼ねる)。
- */
-function parseNodeMajorVersion(version: string): number {
-  const match = /^v?(\d+)\./.exec(version);
-  if (match === null || match[1] === undefined) {
-    throw new Error(
-      `internal error: could not parse Node.js version string: ${JSON.stringify(version)}`,
-    );
-  }
-  return Number(match[1]);
 }
 
 /** 検出された依存不足1件。design.md §5.1「不足内容を呼び出し側へ返す」に対応する。 */
@@ -241,18 +148,6 @@ export interface CheckDependenciesOptions {
   fileReadableFn?: (path: string) => Promise<boolean>;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
-  /**
-   * `@qiita/qiita-cli` がローカル解決できるかどうかの注入点(テスト用)。既定は
-   * `defaultQiitaCliResolvable`(`createRequire(import.meta.url).resolve` の成否)。
-   */
-  qiitaCliResolvableFn?: () => boolean;
-  /** 実行中の Node.js バージョン文字列の注入点(テスト用)。既定は `process.version`。 */
-  nodeVersionFn?: () => string;
-  /**
-   * インストール済み `@qiita/qiita-cli` の `engines.node` 宣言の注入点(テスト用)。
-   * 既定は `defaultQiitaCliEnginesNode`(解決不能・宣言なしは `undefined`)。
-   */
-  qiitaCliEnginesFn?: () => string | undefined;
   /**
    * `ruby -v` / `bundle check` の実行を差し替える注入点(テスト用、issue #67)。
    * 既定は `src/subprocess.ts` の `runSubprocess`。
@@ -294,9 +189,6 @@ export async function checkDependencies(
     fileExistsFn = defaultFileExists,
     fileReadableFn = defaultFileReadable,
     env = process.env,
-    qiitaCliResolvableFn = defaultQiitaCliResolvable,
-    nodeVersionFn = () => process.version,
-    qiitaCliEnginesFn = defaultQiitaCliEnginesNode,
     runSubprocessFn = runSubprocess,
   } = options;
 
@@ -470,51 +362,9 @@ export async function checkDependencies(
       break;
     }
     case 'qiita': {
-      await requireCommand(
-        'node',
-        'required to run @qiita/qiita-cli, design.md §5.7 QiitaPublisher',
-      );
-      await requireCommand(
-        'npx',
-        'used to invoke @qiita/qiita-cli via `npx --no-install`, design.md §5.7 QiitaPublisher',
-      );
-      // design.md §5.7 セキュリティ制約: `npx --no-install qiita` はローカル解決できる
-      // `@qiita/qiita-cli` が無いと失敗する(素の `npx qiita` は禁止のため、未導入時に
-      // フォールバックしてはならない)。T-21(issue #26)で追加。
-      if (!qiitaCliResolvableFn()) {
-        problems.push({
-          message:
-            '"@qiita/qiita-cli" is not resolvable from note2web\'s own dependencies (expected a ' +
-            'pinned exact version in package.json "dependencies", installed via `npm install`; ' +
-            'design.md §5.7 forbids falling back to bare `npx qiita`, which would resolve an ' +
-            'unrelated npm package named "qiita")',
-        });
-      }
-      // engine 検査は、インストール済みパッケージの `engines.node` 宣言(例: v1.10.0 は
-      // `>=22.22.1`)を優先する。宣言が取得できない・単純な `>=X.Y.Z` 形式でない場合のみ
-      // design.md §6 の下限(メジャー >= 20)へフォールバックする。
-      const nodeVersion = nodeVersionFn();
-      const declaredRange = qiitaCliEnginesFn();
-      const declaredMinimum =
-        declaredRange !== undefined ? parseSimpleMinimumEngineRange(declaredRange) : undefined;
-      if (declaredMinimum !== undefined && declaredRange !== undefined) {
-        if (compareVersionTriples(parseNodeVersionTriple(nodeVersion), declaredMinimum) < 0) {
-          problems.push({
-            message:
-              `Node.js ${nodeVersion} does not satisfy @qiita/qiita-cli's declared engine ` +
-              `requirement "${declaredRange}"; upgrade Node.js (design.md §6)`,
-          });
-        }
-      } else {
-        const nodeMajor = parseNodeMajorVersion(nodeVersion);
-        if (nodeMajor < QIITA_CLI_MIN_NODE_MAJOR) {
-          problems.push({
-            message:
-              `Node.js ${nodeVersion} does not satisfy @qiita/qiita-cli's engine requirement ` +
-              `(>=${String(QIITA_CLI_MIN_NODE_MAJOR)}); upgrade Node.js (design.md §6)`,
-          });
-        }
-      }
+      // issue #82: qiita-cli サブプロセス方式(node/npx コマンド確認・
+      // @qiita/qiita-cli のローカル解決確認・Node engine 確認)を廃止し、dev.to と同じ
+      // 「HTTP を直叩きする API モード」へ移行したため、追加のチェックは無い。
       // QIITA_TOKEN(config.qiita.token_env が指す環境変数)は config.ts が既に検証済み。
       break;
     }

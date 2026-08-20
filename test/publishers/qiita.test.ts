@@ -1,54 +1,47 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Config } from '../../src/config.js';
-import { createQiitaPublisher, type QiitaRunner } from '../../src/publishers/qiita.js';
+import {
+  createQiitaPublisher,
+  QIITA_API_BASE_URL,
+  type QiitaHttpClient,
+  type QiitaHttpRequest,
+  type QiitaHttpResponse,
+} from '../../src/publishers/qiita.js';
 import type { RenderedArticle } from '../../src/publishers/types.js';
 import type { NoteState } from '../../src/state/store.js';
-import type { RunSubprocessOptions, RunSubprocessResult } from '../../src/subprocess.js';
 
 // ---------------------------------------------------------------------------
-// テスト用ヘルパー(`test/publishers/git-repo.test.ts` と同じパターンを踏襲)。
+// テスト用ヘルパー(`test/publishers/devto.test.ts` と同じ「記録可能・応答をスクリプト
+// 可能なモック」パターンを踏襲する。vi.fn は使わない)。
 // ---------------------------------------------------------------------------
 
-function buildConfig(workspace: string, tokenEnv = 'QIITA_TOKEN'): Config {
+const NOTE_UUID = '5c1c2c3d-0000-4000-8000-000000000001';
+
+function buildConfig(overrides: { tokenEnv?: string } = {}): Config {
+  const { tokenEnv = 'QIITA_TOKEN' } = overrides;
   return {
     service: 'qiita',
     timezone: 'Asia/Tokyo',
     source: { folders: ['tech'] },
     assets: {
-      provider: 'r2',
-      bucket: 'blog-assets',
-      endpoint: 'https://example-account.r2.cloudflarestorage.com',
-      region: 'auto',
-      prefix: 'notes/',
+      provider: 's3',
+      bucket: 'blog-assets-qiita',
       public_base_url: 'https://assets.example.com/notes/',
-      access_key_id_env: 'R2_ACCESS_KEY_ID',
-      secret_access_key_env: 'R2_SECRET_ACCESS_KEY',
+      access_key_id_env: 'QIITA_S3_ACCESS_KEY_ID',
+      secret_access_key_env: 'QIITA_S3_SECRET_ACCESS_KEY',
     },
-    qiita: { workspace, token_env: tokenEnv },
+    qiita: { token_env: tokenEnv },
   };
 }
-
-const NOTE_UUID = '5c1c2c3d-0000-4000-8000-000000000001';
 
 function buildArticle(overrides: Partial<RenderedArticle> = {}): RenderedArticle {
   return {
     noteUuid: NOTE_UUID,
     title: 'Hello World',
-    artifact:
-      '---\n' +
-      'title: "Hello World"\n' +
-      'tags: ["typescript"]\n' +
-      'private: false\n' +
-      'slide: false\n' +
-      'id: null\n' +
-      '---\n' +
-      '\n' +
-      'body text\n',
+    artifact: '---\ntitle: "Hello World"\ntags: ["typescript"]\n---\n\nbody text\n',
     contentHash: 'sha256:deadbeef',
-    artifactPath: `public/${NOTE_UUID}.md`,
+    bodyMarkdown: 'body text\n',
+    tags: ['typescript', 'qiita'],
     ...overrides,
   };
 }
@@ -64,343 +57,385 @@ function buildPrevState(overrides: Partial<NoteState> = {}): NoteState {
 }
 
 interface RecordedCall {
-  command: string;
-  args: string[];
-  cwd: string | undefined;
-  env: Record<string, string> | undefined;
+  method: QiitaHttpRequest['method'];
+  url: string;
+  headers: Record<string, string>;
+  body: string | undefined;
 }
 
 /**
- * 記録可能・応答をスクリプト可能なモック runner。`handler` が特定コマンドに対する結果を
- * 返せば使い、`undefined` を返せば既定(成功・空出力)にフォールバックする
- * (`test/publishers/git-repo.test.ts` の `makeMockRunner` と同じパターン)。
+ * 記録可能・応答をスクリプト可能なモック HTTP クライアント。`handler` が投げれば
+ * `httpClient` 自体が reject する(接続系エラーの模擬)、返せばその応答を解決する。
  */
-function makeMockRunner(
-  handler?: (
-    call: RecordedCall,
-  ) => Promise<RunSubprocessResult | undefined> | RunSubprocessResult | undefined,
-): { runner: QiitaRunner; calls: RecordedCall[] } {
+function makeMockHttpClient(
+  handler: (call: RecordedCall) => QiitaHttpResponse | Promise<QiitaHttpResponse>,
+): { client: QiitaHttpClient; calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
-  const runner: QiitaRunner = async (options: RunSubprocessOptions) => {
+  const client: QiitaHttpClient = async (request: QiitaHttpRequest) => {
     const call: RecordedCall = {
-      command: options.command,
-      args: options.args,
-      cwd: options.cwd,
-      env: options.env,
+      method: request.method,
+      url: request.url,
+      headers: request.headers,
+      body: request.body,
     };
     calls.push(call);
-    const custom = await handler?.(call);
-    if (custom !== undefined) {
-      return custom;
-    }
-    return { status: 'success', exitCode: 0, signal: null, stdout: '', stderr: '' };
+    return await handler(call);
   };
-  return { runner, calls };
+  return { client, calls };
 }
 
-function failure(stderr = 'boom'): RunSubprocessResult {
-  return {
-    status: 'failure',
-    classification: 'exit_code',
-    exitCode: 1,
-    signal: null,
-    stdout: '',
-    stderr,
-  };
-}
-
-/**
- * qiita-cli が `publish` 成功後にワークスペースのファイルへ `id` を書き戻す挙動を模倣する
- * (design.md §5.7「応答不明時の重複防止」)。`article.artifact` の `id: null` を実際の
- * 発行 ID へ置き換えてディスク上のファイルを書き換える。
- */
-async function simulateQiitaCliWriteBackId(
-  workspaceRoot: string,
-  artifactPath: string,
-  id: string,
-): Promise<void> {
-  const absolutePath = resolve(workspaceRoot, artifactPath);
-  const content = await readFile(absolutePath, 'utf8');
-  await writeFile(absolutePath, content.replace('id: null', `id: "${id}"`), 'utf8');
+function jsonResponse(status: number, value: unknown): QiitaHttpResponse {
+  return { status, body: JSON.stringify(value) };
 }
 
 // ---------------------------------------------------------------------------
 // テスト本体。
 // ---------------------------------------------------------------------------
 
-describe('createQiitaPublisher', () => {
-  let workspaceRoot: string;
-
-  beforeEach(async () => {
-    workspaceRoot = await mkdtemp(join(tmpdir(), 'note2web-qiita-test-'));
+describe('createQiitaPublisher() construction', () => {
+  it('has no prepare/finalize (API mode)', () => {
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: makeMockHttpClient(() => jsonResponse(200, {})).client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+    expect(publisher.prepare).toBeUndefined();
+    expect(publisher.finalize).toBeUndefined();
   });
 
-  afterEach(async () => {
-    await rm(workspaceRoot, { recursive: true, force: true });
+  it('throws immediately when config.qiita is undefined', () => {
+    const config = { ...buildConfig(), qiita: undefined };
+    expect(() => createQiitaPublisher({ config })).toThrow(/config\.qiita/);
+  });
+});
+
+describe('publish() wire contract', () => {
+  it('sends the exact request body/headers/URL for a new article (POST, no prev)', async () => {
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: 'abc123', url: 'https://qiita.com/me/items/abc123' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'the-secret-token' },
+    });
+    const article = buildArticle({ tags: ['typescript', 'qiita'] });
+
+    const result = await publisher.publish(article, null);
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0];
+    if (call === undefined) {
+      throw new Error('test setup: no call recorded');
+    }
+    expect(call.method).toBe('POST');
+    expect(call.url).toBe(`${QIITA_API_BASE_URL}/api/v2/items`);
+    // issue #82 プランの wire contract: exactly these 2 headers, exact values.
+    expect(call.headers).toEqual({
+      Authorization: 'Bearer the-secret-token',
+      'Content-Type': 'application/json',
+    });
+    const parsedBody: unknown = JSON.parse(call.body ?? 'null');
+    expect(parsedBody).toEqual({
+      body: 'body text\n',
+      title: 'Hello World',
+      tags: [
+        { name: 'typescript', versions: [] },
+        { name: 'qiita', versions: [] },
+      ],
+      private: false,
+    });
+    expect(result).toEqual({
+      result: 'created',
+      remoteId: 'abc123',
+      url: 'https://qiita.com/me/items/abc123',
+    });
   });
 
-  describe('publish() success path', () => {
-    it('writes the article file, then invokes "npx --no-install qiita publish <uuid> --root <workspace>"', async () => {
-      const { runner, calls } = makeMockRunner(async (call) => {
-        if (call.command === 'npx') {
-          await simulateQiitaCliWriteBackId(
-            workspaceRoot,
-            `public/${NOTE_UUID}.md`,
-            'generated-id-1',
-          );
-        }
-        return undefined;
-      });
-      const config = buildConfig(workspaceRoot, 'MY_QIITA_TOKEN');
-      const publisher = createQiitaPublisher({
-        config,
-        runner,
-        env: { MY_QIITA_TOKEN: 'super-secret-token' },
-      });
-
-      const article = buildArticle();
-      const result = await publisher.publish(article, null);
-
-      expect(calls).toHaveLength(1);
-      const call = calls[0];
-      if (call === undefined) {
-        throw new Error('test setup: runner was not called');
-      }
-      expect(call.command).toBe('npx');
-      expect(call.args).toEqual([
-        '--no-install',
-        'qiita',
-        'publish',
-        NOTE_UUID,
-        '--root',
-        workspaceRoot,
-      ]);
-      // cwd must be note2web's own package root (where @qiita/qiita-cli is a pinned
-      // dependency), never the (arbitrary, possibly dependency-less) qiita workspace —
-      // otherwise `npx --no-install` could fail to resolve the local binary (module JSDoc
-      // "npx --no-install の cwd").
-      expect(call.cwd).not.toBe(workspaceRoot);
-      const packageJson = JSON.parse(
-        await readFile(resolve(call.cwd ?? '', 'package.json'), 'utf8'),
-      ) as { name: string };
-      expect(packageJson.name).toBe('note2web');
-
-      // written article on disk matches the rendered artifact (before the CLI's id write-back
-      // mutated it further in the mock).
-      const onDisk = await readFile(resolve(workspaceRoot, article.artifactPath ?? ''), 'utf8');
-      expect(onDisk).toContain('title: "Hello World"');
-
-      expect(result).toMatchObject({
-        result: 'created',
-        remoteId: 'generated-id-1',
-        url: 'https://qiita.com/items/generated-id-1',
-      });
+  it('updates via PATCH to /api/v2/items/{remoteId} when prev.remoteId is present', async () => {
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(200, { id: 'existing-id', url: 'https://qiita.com/me/items/existing-id' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
     });
 
-    it('passes the token from the configured token_env indirection as child env QIITA_TOKEN (fixed name)', async () => {
-      const { runner, calls } = makeMockRunner(async (call) => {
-        if (call.command === 'npx') {
-          await simulateQiitaCliWriteBackId(workspaceRoot, `public/${NOTE_UUID}.md`, 'id-2');
-        }
-        return undefined;
-      });
-      const config = buildConfig(workspaceRoot, 'CUSTOM_TOKEN_VAR_NAME');
-      const publisher = createQiitaPublisher({
-        config,
-        runner,
-        env: { CUSTOM_TOKEN_VAR_NAME: 'the-actual-token-value' },
-      });
+    const result = await publisher.publish(
+      buildArticle(),
+      buildPrevState({ remoteId: 'existing-id' }),
+    );
 
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      method: 'PATCH',
+      url: `${QIITA_API_BASE_URL}/api/v2/items/existing-id`,
+    });
+    expect(result).toEqual({
+      result: 'updated',
+      remoteId: 'existing-id',
+      url: 'https://qiita.com/me/items/existing-id',
+    });
+  });
+
+  it('creates via POST when prev is null', async () => {
+    const { client } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: 'new-id', url: 'https://qiita.com/me/items/new-id' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    const result = await publisher.publish(buildArticle(), null);
+    expect(result.result).toBe('created');
+  });
+
+  it('creates via POST when prev.remoteId is null (previously failed/unpublished)', async () => {
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: 'new-id', url: 'https://qiita.com/me/items/new-id' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    const result = await publisher.publish(buildArticle(), buildPrevState({ remoteId: null }));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe('POST');
+    expect(result.result).toBe('created');
+  });
+
+  it('sends exactly 1 request with no title-match lookup, unlike dev.to/hatena (issue #82 simplification)', async () => {
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: 'x', url: 'https://qiita.com/me/items/x' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await publisher.publish(buildArticle(), null);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe('POST');
+  });
+});
+
+describe('publish() retry policy', () => {
+  it('does not retry POST on a connection-layer failure: exactly 1 request, error propagates', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      throw new TypeError('fetch failed');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
+      /connection-layer failure/,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries PATCH exactly once on a connection-layer failure; propagates if the retry also fails', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      throw new TypeError('fetch failed');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await expect(
+      publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' })),
+    ).rejects.toThrow(/connection-layer failure/);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.method === 'PATCH')).toBe(true);
+  });
+
+  it('recovers when the retried PATCH succeeds after 1 connection-layer failure', async () => {
+    let attempts = 0;
+    const { client, calls } = makeMockHttpClient(() => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new TypeError('fetch failed');
+      }
+      return jsonResponse(200, { id: '9', url: 'https://qiita.com/me/items/9' });
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    const result = await publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' }));
+
+    expect(calls).toHaveLength(2);
+    expect(result).toEqual({
+      result: 'updated',
+      remoteId: '9',
+      url: 'https://qiita.com/me/items/9',
+    });
+  });
+
+  it('does not retry PATCH on an HTTP-status failure (500): exactly 1 request, throws', async () => {
+    const { client, calls } = makeMockHttpClient(() => ({
+      status: 500,
+      body: '{"error":"boom"}',
+    }));
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await expect(
+      publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' })),
+    ).rejects.toThrow(/HTTP 500/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('treats an errno-style connection error (e.g. ECONNRESET) on PATCH as retryable', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      const error = new Error('socket hang up') as NodeJS.ErrnoException;
+      error.code = 'ECONNRESET';
+      throw error;
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
+    });
+
+    await expect(
+      publisher.publish(buildArticle(), buildPrevState({ remoteId: '9' })),
+    ).rejects.toThrow(/connection-layer failure/);
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe('publish() authentication (FR-30)', () => {
+  it('throws when the configured token_env environment variable is not set, without any HTTP calls', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      throw new Error('test setup: no HTTP call should have been made');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig({ tokenEnv: 'QIITA_TOKEN' }),
+      httpClient: client,
+      env: {}, // QIITA_TOKEN not set
+    });
+
+    await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/QIITA_TOKEN/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('throws when the configured token_env environment variable is set to an empty string', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      throw new Error('test setup: no HTTP call should have been made');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: '' },
+    });
+
+    await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/QIITA_TOKEN/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reads the token from the environment variable named by qiita.token_env (not a fixed name)', async () => {
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: '1', url: 'https://qiita.com/me/items/1' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig({ tokenEnv: 'MY_CUSTOM_QIITA_TOKEN_VAR' }),
+      httpClient: client,
+      env: { MY_CUSTOM_QIITA_TOKEN_VAR: 'the-actual-token' },
+    });
+
+    await publisher.publish(buildArticle(), null);
+
+    expect(calls[0]?.headers.Authorization).toBe('Bearer the-actual-token');
+  });
+
+  it('never puts the token in request URLs', async () => {
+    const secretToken = 'super-secret-qiita-token-value';
+    const { client, calls } = makeMockHttpClient(() =>
+      jsonResponse(201, { id: '1', url: 'https://qiita.com/me/items/1' }),
+    );
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: secretToken },
+    });
+
+    await publisher.publish(buildArticle(), null);
+
+    for (const call of calls) {
+      expect(call.url).not.toContain(secretToken);
+    }
+  });
+
+  it('never leaks the token in a connection-failure error message', async () => {
+    const secretToken = 'super-secret-qiita-token-value';
+    const { client } = makeMockHttpClient(() => {
+      throw new TypeError('fetch failed');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: secretToken },
+    });
+
+    try {
       await publisher.publish(buildArticle(), null);
-
-      const call = calls[0];
-      if (call === undefined) {
-        throw new Error('test setup: runner was not called');
-      }
-      // child env carries the fixed name QIITA_TOKEN, regardless of the configured token_env name.
-      expect(call.env).toEqual({ QIITA_TOKEN: 'the-actual-token-value' });
-      // the token value never appears in argv.
-      expect(call.args.join(' ')).not.toContain('the-actual-token-value');
-    });
-
-    it('returns result "created" when prev is null', async () => {
-      const { runner } = makeMockRunner(async (call) => {
-        if (call.command === 'npx') {
-          await simulateQiitaCliWriteBackId(workspaceRoot, `public/${NOTE_UUID}.md`, 'new-id');
-        }
-        return undefined;
-      });
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const result = await publisher.publish(buildArticle(), null);
-      expect(result.result).toBe('created');
-    });
-
-    it('returns result "created" when prev.remoteId is null (previously unpublished)', async () => {
-      const { runner } = makeMockRunner(async (call) => {
-        if (call.command === 'npx') {
-          await simulateQiitaCliWriteBackId(workspaceRoot, `public/${NOTE_UUID}.md`, 'new-id');
-        }
-        return undefined;
-      });
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const result = await publisher.publish(buildArticle(), buildPrevState({ remoteId: null }));
-      expect(result.result).toBe('created');
-    });
-
-    it('returns result "updated" when prev.remoteId is already set', async () => {
-      const { runner } = makeMockRunner(async (call) => {
-        if (call.command === 'npx') {
-          // re-publish: id was already "existing-id" in the article (renderer would have put
-          // prev.remoteId there); simulate qiita-cli leaving it unchanged.
-          await simulateQiitaCliWriteBackId(workspaceRoot, `public/${NOTE_UUID}.md`, 'existing-id');
-        }
-        return undefined;
-      });
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const article = buildArticle({
-        artifact: buildArticle().artifact.replace('id: null', 'id: "existing-id"'),
-      });
-      const result = await publisher.publish(article, buildPrevState({ remoteId: 'existing-id' }));
-      expect(result).toMatchObject({ result: 'updated', remoteId: 'existing-id' });
-    });
+      expect.unreachable('publish() should have thrown');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).not.toContain(secretToken);
+    }
   });
 
-  describe('publish() failure paths', () => {
-    it('rejects an artifactPath that escapes the workspace via traversal, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const article = buildArticle({ artifactPath: '../../etc/evil.md' });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
-      expect(calls).toHaveLength(0);
+  it('never leaks the token in an HTTP-status failure error message', async () => {
+    const secretToken = 'super-secret-qiita-token-value';
+    const { client } = makeMockHttpClient(() => ({ status: 401, body: 'Unauthorized' }));
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: secretToken },
     });
 
-    it('rejects an absolute artifactPath, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const article = buildArticle({ artifactPath: '/etc/evil.md' });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
-      expect(calls).toHaveLength(0);
-    });
-
-    it('rejects when the configured token_env environment variable is not set, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot, 'QIITA_TOKEN'),
-        runner,
-        env: {}, // QIITA_TOKEN not set
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/QIITA_TOKEN/);
-      expect(calls).toHaveLength(0);
-    });
-
-    it('rejects when the configured token_env environment variable is set to an empty string', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: '' },
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/QIITA_TOKEN/);
-      expect(calls).toHaveLength(0);
-    });
-
-    it('does not leak the token value in the thrown error message on CLI failure', async () => {
-      const { runner } = makeMockRunner(() => failure('some qiita-cli error detail'));
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'super-secret-token-value' },
-      });
-
-      try {
-        await publisher.publish(buildArticle(), null);
-        expect.unreachable('publish() should have thrown');
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        expect(message).not.toContain('super-secret-token-value');
-        expect(message).toContain('some qiita-cli error detail');
-      }
-    });
-
-    it('throws when the CLI exits with a failure status', async () => {
-      const { runner } = makeMockRunner(() => failure('network unreachable'));
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/network unreachable/);
-    });
-
-    it('throws when the CLI exits successfully but did not write back an "id" (treated as failure to avoid a false-confirmed publish)', async () => {
-      const { runner } = makeMockRunner(); // default success, no id write-back
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
-        /did not write back an "id"/,
-      );
-    });
-
-    it('throws when article.artifactPath is undefined', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { QIITA_TOKEN: 'token' },
-      });
-
-      const article = buildArticle({ artifactPath: undefined });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/artifactPath/);
-      expect(calls).toHaveLength(0);
-    });
+    try {
+      await publisher.publish(buildArticle(), null);
+      expect.unreachable('publish() should have thrown');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).not.toContain(secretToken);
+    }
   });
+});
 
-  describe('createQiitaPublisher() construction', () => {
-    it('has no prepare/finalize (API/CLI mode)', () => {
-      const publisher = createQiitaPublisher({
-        config: buildConfig(workspaceRoot),
-        env: { QIITA_TOKEN: 'token' },
-      });
-      expect(publisher.prepare).toBeUndefined();
-      expect(publisher.finalize).toBeUndefined();
+describe('publish() input validation', () => {
+  it('throws when article.bodyMarkdown is undefined, without any HTTP calls', async () => {
+    const { client, calls } = makeMockHttpClient(() => {
+      throw new Error('test setup: no HTTP call should have been made');
+    });
+    const publisher = createQiitaPublisher({
+      config: buildConfig(),
+      httpClient: client,
+      env: { QIITA_TOKEN: 'token' },
     });
 
-    it('throws immediately when config.qiita is undefined', () => {
-      const config = buildConfig(workspaceRoot);
-      const brokenConfig = { ...config, qiita: undefined };
-      expect(() => createQiitaPublisher({ config: brokenConfig })).toThrow(/config\.qiita/);
-    });
+    const article = buildArticle({ bodyMarkdown: undefined });
+    await expect(publisher.publish(article, null)).rejects.toThrow(/bodyMarkdown/);
+    expect(calls).toHaveLength(0);
   });
 });

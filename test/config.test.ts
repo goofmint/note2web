@@ -119,7 +119,7 @@ describe('loadConfig', () => {
     expect(config.timezone).toBe('America/New_York');
   });
 
-  it('rejects a config missing the service-specific required block (qiita.workspace)', () => {
+  it('rejects a config missing the service-specific required block (qiita.token_env)', () => {
     const configPath = join(dir, 'config.yaml');
     writeFileSync(
       configPath,
@@ -133,8 +133,7 @@ describe('loadConfig', () => {
         '  public_base_url: https://assets.example.com/notes/',
         '  access_key_id_env: QIITA_S3_ACCESS_KEY_ID',
         '  secret_access_key_env: QIITA_S3_SECRET_ACCESS_KEY',
-        'qiita:',
-        '  token_env: QIITA_TOKEN',
+        'qiita: {}',
         '',
       ].join('\n'),
     );
@@ -145,7 +144,7 @@ describe('loadConfig', () => {
       expect.unreachable('loadConfig should have thrown');
     } catch (error) {
       const validationError = error as ConfigValidationError;
-      expect(validationError.problems.some((problem) => problem.path === 'qiita.workspace')).toBe(
+      expect(validationError.problems.some((problem) => problem.path === 'qiita.token_env')).toBe(
         true,
       );
     }
@@ -324,7 +323,6 @@ describe('loadConfig', () => {
         '  access_key_id_env: QIITA_S3_ACCESS_KEY_ID',
         '  secret_access_key_env: QIITA_S3_SECRET_ACCESS_KEY',
         'qiita:',
-        '  workspace: ~/src/qiita-content',
         '  token_env: QIITA_TOKEN',
         '  token: xxxxxxxxxxxxxxxx',
         '',

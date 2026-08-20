@@ -15,7 +15,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
   - Zenn（Git リポジトリ出力）
   - Hugo（Git リポジトリ出力）
   - Jekyll（Git リポジトリ出力）
-  - Qiita（外部 CLI `@qiita/qiita-cli`）
+  - Qiita（Qiita API v2 を直接呼び出し。issue #82: 当初は外部 CLI `@qiita/qiita-cli` を想定していたが、`publish` が投稿前に利用者の全記事を無条件同期しタイムアウトする問題のため API 直叩きへ変更）
   - dev.to（外部 CLI `devto-cli`、または Forem API v1）
   - note.com（外部 CLI `noet`）
   - はてなブログ（はてなブログ AtomPub）
@@ -85,7 +85,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 
 ### API / 外部 CLI 配信モード
 
-- **FR-25**: Qiita へは外部 CLI `@qiita/qiita-cli` を呼び出して配信する。
+- **FR-25**: Qiita へは Qiita API v2 を直接呼び出して配信する（issue #82。新規は `POST /api/v2/items`、更新は `PATCH /api/v2/items/{item_id}`。認証は `Authorization: Bearer <トークン>` ヘッダ）。
 - **FR-26**: dev.to へは外部 CLI `devto-cli`、または Forem API v1 で配信する。
 - **FR-27**: note.com へは外部 CLI `noet` を呼び出して配信する。
 - **FR-28**: はてなブログへは、はてなブログ AtomPub で配信する。
@@ -102,7 +102,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 - **NFR-02（実行環境）**: macOS 上で動作する。Apple Notes のデータにローカルでアクセスできる環境を前提とする。
 - **NFR-03（無人実行）**: 実行中にパスワード入力・確認プロンプト等の対話を要求しない。認証情報はすべて環境変数から取得する。
 - **NFR-04（権限）**: Apple Notes のデータおよび出力先 Git リポジトリへの読み書きに必要な権限は、事前設定を前提とする。必要な権限・事前設定はドキュメントに明記する。
-- **NFR-05（依存関係）**: 外部 CLI（`gh`、`@qiita/qiita-cli`、`devto-cli`、`noet`）および `apple_cloud_notes_parser` の実行環境（Ruby）が必要。実行時に必要な依存が欠けている場合は、明確なエラーメッセージを出して失敗する。
+- **NFR-05（依存関係）**: 外部 CLI（`gh`、`devto-cli`、`noet`）および `apple_cloud_notes_parser` の実行環境（Ruby）が必要。Qiita・dev.to は外部 CLI を使わず HTTP API を直接呼び出す（issue #82 以降、Qiita は API 直叩きへ変更）。実行時に必要な依存が欠けている場合は、明確なエラーメッセージを出して失敗する。
 - **NFR-06（エラー時の挙動）**: あるノートの配信に失敗しても状態 JSON を「配信済み」に更新しない。次回実行時に再試行される。
 - **NFR-07（ライセンス）**: OSS として公開する。依存ライブラリ・CLI のライセンスと矛盾しないこと。
 
@@ -112,7 +112,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 |---|---|---|---|
 | `threeplanetssoftware/apple_cloud_notes_parser` | Ruby ライブラリ（MIT） | Apple Notes の読み取り・エクスポート | 表・チェックリスト・手書きの出力形式は未確認（未決事項） |
 | `gh` | 外部 CLI | PR の作成・マージ | — |
-| `@qiita/qiita-cli` | 外部 CLI | Qiita への配信 | タグは1〜5個必須。半角スペースを含むタグは送信時に分割され、個数上限を超えて 403 になる。画像アップロード API は存在しない |
+| Qiita API v2 | 公式 API | Qiita への配信(issue #82: 外部 CLI `@qiita/qiita-cli` から API 直叩きへ変更。`publish` コマンドが投稿前に利用者の全記事を無条件同期しタイムアウトする問題を避けるため) | タグは1〜5個必須。半角スペースを含むタグは送信時に分割され、個数上限を超えて 403 になる。画像アップロード API は存在しない |
 | `devto-cli` / Forem API v1 | 外部 CLI / API | dev.to への配信 | タグは最大4個。`canonical_url` を指定できる |
 | `noet` | 外部 CLI（Rust製、MIT） | note.com への配信 | note.com に公式 API は存在せず、非公式 API を利用。画像アップロードには未対応 |
 | はてなブログ AtomPub | 公式 API | はてなブログへの配信 | 認証は WSSE / Basic / OAuth に対応。Markdown 形式で入稿できるかは未確認（未決事項） |
