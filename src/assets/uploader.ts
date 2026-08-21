@@ -27,34 +27,25 @@
  * 共有し、本モジュールはアップロードを並列化せず逐次実行する(取りこぼしのない
  * 重複排除のため)。
  *
- * **note.com 向けの例外(design.md §5.7「画像」節、利用者決定 2026-08-21。旧 §13-6
- * option (b) から option (a) へ変更)**: `service === 'note'` かつプレースホルダが画像
- * (`isImageExtension`)を指す場合は、上記の R2/S3 アップロード経路を通らず、代わりに
- * ファイルを `<noteWorkspace>/images/<identifier><ext>` へコピーし、本文の参照を
- * `./images/<identifier><ext>` という相対パスに差し替える。`noet create`/`update` が
- * (kako-jun/noet commit `e3a8562`、`apps/cli/src/commands/extension.rs::image_handler.rs`)
- * markdown 中の `![alt](相対パス)` を自動検出し、`markdown_path.parent()` 基準で解決した
- * ファイルを note.com へ自前でアップロードしたうえで本文中の参照を `st-note.com` の URL に
- * 差し替えてくれるため、note.com 向けにはこちらの経路の方が正しく画像として表示される
- * (note.com の ProseMirror エディタは `http(s)://` 参照を画像として解釈しないため、
- * R2/S3 の公開 URL のまま送っても意味が無い——noet の `extract_image_references` も
- * `http://`/`https://` で始まる参照はアップロード対象から除外(スキップ)する)。
- * ローカルコピーは `StateStore` のアセット状態には一切記録しない(R2/S3 アセットでは
- * なく、実行のたびに再コピーする使い捨てファイルのため)。noet がサポートする画像形式は
- * jpg/jpeg/png/gif/webp のみ(`read_image_as_base64`)であり、`isImageExtension`
- * (本モジュール)が許容する拡張子の方が広いため、この経路では別途
- * `NOET_SUPPORTED_IMAGE_EXTENSIONS` でさらに絞り込み、対象外の拡張子は
- * `noet create`/`update` が60秒のコマンドタイムアウトの末に不可解に失敗する前に、
- * このアセット解決段階で明確な `AssetUploadError` として早期に落とす。
- * `<noteWorkspace>/images/` 配下の、もはやどのノートからも参照されなくなった古いファイル
- * (画像の削除・差し替え後に残るもの)は掃除しない——noet は毎回そのノートが実際に参照する
- * 画像だけを再アップロードするため無害であり、note.com 側で参照されなくなった過去の
- * アップロード自体は note.com のクリーンアップに委ねる(design.md §5.7 参照)。
+ * **note.com 向けの例外(issue #86 で note.com 非公式 API を直叩きする方式へ移行。旧 noet
+ * ローカルコピー経路(PR #85)を廃止)**: `service === 'note'` かつプレースホルダが画像
+ * (`isImageExtension`)を指す場合、本モジュールは一切手を出さない——R2/S3 へのアップロード
+ * も行わず、本文中の `note2web-asset://<identifier>` プレースホルダも**未解決のまま**残す
+ * (`resolvedUrlByIdentifier` へ何も登録せず、置換ステップでもプレースホルダをそのまま
+ * 温存する。本モジュール末尾の置換ロジック参照)。note.com は自身の presigned アップロード
+ * API(`src/publishers/note-client.ts` の `uploadImage`)へ画像バイト列を直接アップロード
+ * したうえで、本文 HTML を組み立てる段階(`src/publishers/note-html.ts`)で初めて画像参照を
+ * 解決する必要があるため、`RenderedArticle`(`src/publishers/types.ts` の `attachments`/
+ * `assetSourceDir`)経由で添付ファイルの実体を Publisher 側(`src/publishers/note.ts`)へ
+ * そのまま引き渡す設計にした——アセット解決段階(本モジュール)でバイト列を読み書き
+ * しない分、`contentHash`(冪等判定)も画像の再アップロードのたびに変わらず安定する
+ * (`src/publishers/note.ts` 冒頭 JSDoc 参照)。note.com 向けの**非画像**添付は他サービスと
+ * 同じ R2/S3 アップロード経路をそのまま使う(リンクとして本文に埋め込まれる。FR-14)。
  */
 
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, realpath } from 'node:fs/promises';
-import { extname, join, resolve, sep } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { extname, resolve, sep } from 'node:path';
 import type { Attachment } from '../model/note.js';
 import type { AssetUploadedPayload } from '../logger.js';
 import type { StateStore } from '../state/store.js';
@@ -181,7 +172,13 @@ const CONTENT_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
 
 const DEFAULT_CONTENT_TYPE = 'application/octet-stream';
 
-function resolveContentType(ext: string): string {
+/**
+ * 拡張子(`node:path` の `extname` が返す、`.png` のようにドットを含む形。大文字小文字は
+ * 無視)から Content-Type を推定する。`src/publishers/note.ts` が note.com への画像
+ * アップロード(`note-client.ts` の `uploadImage`)でも再利用するため export する
+ * (issue #86 Phase 2 プラン)。
+ */
+export function resolveContentType(ext: string): string {
   return CONTENT_TYPE_BY_EXTENSION[ext.toLowerCase()] ?? DEFAULT_CONTENT_TYPE;
 }
 
@@ -200,21 +197,6 @@ export function isImageExtension(ext: string): boolean {
   return contentType !== undefined && contentType.startsWith('image/');
 }
 
-/**
- * noet(kako-jun/noet, commit `e3a8562`)の `read_image_as_base64` が実際に読める画像拡張子
- * (小文字、ドット付き)。note.com 向けのローカル画像コピー経路(モジュール冒頭 JSDoc
- * 「note.com 向けの例外」参照)専用の、`isImageExtension` より厳しいゲート。この集合に無い
- * 拡張子を渡すと `noet create`/`update` がコマンド全体を失敗させる(該当ノートも巻き込む)ため、
- * ここで先に検出して明確なエラーにする。
- */
-export const NOET_SUPPORTED_IMAGE_EXTENSIONS: ReadonlySet<string> = new Set([
-  '.jpg',
-  '.jpeg',
-  '.png',
-  '.gif',
-  '.webp',
-]);
-
 // ---------------------------------------------------------------------------
 // プレースホルダの走査(`transform/body.ts` の `makeAssetPlaceholder` 契約と共有)。
 // ---------------------------------------------------------------------------
@@ -229,8 +211,13 @@ const PLACEHOLDER_PREFIX = 'note2web-asset://';
  */
 const PLACEHOLDER_PATTERN = /note2web-asset:\/\/([^\s)\]"'>]+)/g;
 
-/** `markdown` 中に現れる一意な `identifier` を、初出順を保って抽出する。 */
-function extractPlaceholderIdentifiers(markdown: string): string[] {
+/**
+ * `markdown` 中に現れる一意な `identifier` を、初出順を保って抽出する。`src/publishers/note.ts`
+ * が本文中の画像プレースホルダ(note.com 向けは未解決のまま残る、モジュール冒頭 JSDoc
+ * 「note.com 向けの例外」参照)を列挙してアップロード対象を決めるためにも再利用する
+ * (issue #86 Phase 4 プラン)。
+ */
+export function extractPlaceholderIdentifiers(markdown: string): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];
   for (const match of markdown.matchAll(PLACEHOLDER_PATTERN)) {
@@ -280,8 +267,11 @@ function isPathWithinRoot(root: string, candidate: string): boolean {
  *      存在しない場合(`ENOENT` 等)は「読み取れない」エラーとして扱う。
  *
  * いずれの拒否も `AssetUploadError`(`noteUuid`/`identifier` の文脈つき)を送出する。
+ *
+ * `src/publishers/note.ts` が note.com への画像アップロード対象ファイルを解決する際にも
+ * 同じ封じ込め検証を再利用するため export する(issue #86 Phase 4 プラン)。
  */
-async function resolveAttachmentAbsolutePath(
+export async function resolveAttachmentAbsolutePath(
   exportDir: string,
   attachment: Attachment,
   context: { noteUuid: string; identifier: string },
@@ -346,13 +336,6 @@ export interface ProcessNoteBodyOptions {
   service: string;
   /** 検証済み設定の `assets` ブロック(design.md §7)。 */
   assets: AssetsConfig;
-  /**
-   * note.com 向けワークスペースの絶対パス(呼び出し側で `expandHome` 展開済み。
-   * `src/sync.ts` が `config.note` から渡す)。`service === 'note'` かつ画像プレース
-   * ホルダが1つでもある場合のみ必須(モジュール冒頭 JSDoc「note.com 向けの例外」参照)。
-   * それ以外のサービスでは無視される。
-   */
-  noteWorkspace?: string;
   /** 実行全体で共有する単一の `StateStore` インスタンス(read-your-writes による重複排除の前提)。 */
   state: StateStore;
   /** アップロード先クライアント(本番は `createS3UploaderClient`、テストは偽実装)。 */
@@ -392,7 +375,6 @@ export async function processNoteBody(
     noteUuid,
     service,
     assets,
-    noteWorkspace,
     state,
     client,
     logger,
@@ -421,92 +403,22 @@ export async function processNoteBody(
       });
     }
 
+    const ext = extname(attachment.path);
+
+    // note.com 向けの画像プレースホルダは意図的に未解決のまま残す(モジュール冒頭 JSDoc
+    // 「note.com 向けの例外」参照)。R2/S3 へのアップロードもファイル I/O も一切行わない
+    // ——実体の読み取り・note.com への画像アップロードは Publisher 側
+    // (`src/publishers/note.ts`)が `RenderedArticle.attachments`/`assetSourceDir` から
+    // 直接行う。`resolvedUrlByIdentifier` へ登録しないことで、下記の置換ステップが
+    // このプレースホルダをそのまま温存する。
+    if (service === 'note' && isImageExtension(ext)) {
+      continue;
+    }
+
     const absolutePath = await resolveAttachmentAbsolutePath(exportDir, attachment, {
       noteUuid,
       identifier,
     });
-    const ext = extname(attachment.path);
-
-    // note.com 向けの画像はローカルコピー経路(モジュール冒頭 JSDoc「note.com 向けの例外」
-    // 参照)。R2/S3 へはアップロードせず、`StateStore` にも記録しない。
-    if (service === 'note' && isImageExtension(ext)) {
-      if (noteWorkspace === undefined) {
-        throw new AssetUploadError(
-          `internal error: processNoteBody was called with service "note" and an image ` +
-            `attachment (identifier "${identifier}") but no "noteWorkspace" option was provided; ` +
-            'the config schema guarantees "note.workspace" for the note service, so this indicates ' +
-            'a wiring bug in the caller (src/sync.ts) rather than a user-facing configuration error',
-          { noteUuid, identifier },
-        );
-      }
-
-      const lowerExt = ext.toLowerCase();
-      if (!NOET_SUPPORTED_IMAGE_EXTENSIONS.has(lowerExt)) {
-        const supported = [...NOET_SUPPORTED_IMAGE_EXTENSIONS].sort().join(', ');
-        throw new AssetUploadError(
-          `image attachment for identifier "${identifier}" has extension "${ext}", which noet ` +
-            `does not support for note.com uploads (noet's read_image_as_base64 accepts only: ` +
-            `${supported}); remove or convert this image, or publish this note to a different ` +
-            'service instead',
-          { noteUuid, identifier },
-        );
-      }
-
-      // `identifier` は parser JSON 由来(`data-apple-notes-zidentifier`)の外部入力であり、
-      // そのままファイル名に使うとパス区切り文字等で `images/` の外へ書き出されかねない。
-      // 実際の値は UUID(英数字とハイフン)なので、その文字集合だけを許可する
-      // (PR #85 CodeRabbit レビュー)。
-      if (!/^[A-Za-z0-9-]+$/.test(identifier)) {
-        throw new AssetUploadError(
-          `image attachment identifier "${identifier}" contains characters outside the expected ` +
-            'UUID alphabet (A-Z, a-z, 0-9, "-"); refusing to use it as a filename component',
-          { noteUuid, identifier },
-        );
-      }
-
-      let imageBytes: Buffer;
-      try {
-        imageBytes = await readFile(absolutePath);
-      } catch (error) {
-        throw new AssetUploadError(
-          `failed to read attachment file for identifier "${identifier}": ${absolutePath}`,
-          { noteUuid, identifier, cause: error },
-        );
-      }
-
-      // ファイル名に内容ハッシュ(先頭16桁)を含める(PR #85 CodeRabbit レビュー): 参照
-      // ファイル名がバイト内容に追随することで、同じ identifier のまま画像だけ差し替えた
-      // 場合も本文 Markdown(→ contentHash)が変わり、既存のスキップ判定のまま
-      // `noet update` による再配信が発動する。R2 経路がキーに内容ハッシュを使うのと同じ
-      // 性質を、ローカルコピー経路にも持たせるための措置。差し替え前の古いハッシュの
-      // ファイルは `images/` に残るが無害(下記の掃除しない方針と同じ)。
-      const imageHash = createHash('sha256').update(imageBytes).digest('hex').slice(0, 16);
-      const imagesDir = join(noteWorkspace, 'images');
-      const destFileName = `${identifier}-${imageHash}${lowerExt}`;
-      const destPath = resolve(imagesDir, destFileName);
-      // 封じ込めの防御的検証: 上の identifier 検証により通常は起こり得ないが、コピー先が
-      // `images/` の外を指していないことをパス解決後にも確認する(PR #85 CodeRabbit レビュー)。
-      if (!destPath.startsWith(resolve(imagesDir) + sep)) {
-        throw new AssetUploadError(
-          `internal error: resolved image copy destination "${destPath}" escapes the images ` +
-            `directory "${imagesDir}"`,
-          { noteUuid, identifier },
-        );
-      }
-      try {
-        await mkdir(imagesDir, { recursive: true });
-        await copyFile(absolutePath, destPath);
-      } catch (error) {
-        throw new AssetUploadError(
-          `failed to copy image attachment for identifier "${identifier}" into the note.com ` +
-            `workspace ("${destPath}")`,
-          { noteUuid, identifier, cause: error },
-        );
-      }
-
-      resolvedUrlByIdentifier.set(identifier, `./images/${destFileName}`);
-      continue;
-    }
 
     let bytes: Buffer;
     try {
@@ -569,9 +481,14 @@ export async function processNoteBody(
     resolvedUrlByIdentifier.set(identifier, url);
   }
 
-  const replaced = markdown.replace(PLACEHOLDER_PATTERN, (_match, identifier: string) => {
+  const replaced = markdown.replace(PLACEHOLDER_PATTERN, (fullMatch, identifier: string) => {
     const url = resolvedUrlByIdentifier.get(identifier);
     if (url === undefined) {
+      if (service === 'note') {
+        // note.com 向けの画像プレースホルダは意図的に未解決のまま温存する(上記ループの
+        // note.com 分岐参照)。プレースホルダそのものをそのまま返す(置換しない)。
+        return fullMatch;
+      }
       // `identifiers` は同じ `PLACEHOLDER_PATTERN` で抽出したものなので、
       // ここには到達しないはず(防御的チェック)。
       throw new AssetUploadError(
@@ -582,8 +499,10 @@ export async function processNoteBody(
     return url;
   });
 
-  if (replaced.includes(PLACEHOLDER_PREFIX)) {
-    // 受け入れ条件: 差し替え後の本文にプレースホルダが1つも残らないこと。
+  // 受け入れ条件(design.md §5.5「全プレースホルダ解決後にプレースホルダが1つも残っていない
+  // ことを確認する」)。note.com は画像プレースホルダを意図的に未解決のまま残すため、この
+  // 不変条件検査自体の対象外とする(上記参照)。
+  if (service !== 'note' && replaced.includes(PLACEHOLDER_PREFIX)) {
     throw new AssetUploadError(
       'unresolved note2web-asset:// placeholder remained in the body after replacement',
       { noteUuid },

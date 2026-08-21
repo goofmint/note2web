@@ -8,16 +8,17 @@
  * 1. **launchd 生成のセキュリティ契約(PR #60 レビュー、issue #71 で node 直接起動へ改訂)**:
  *    README の「cron / launchd での定期実行」節が定める「env ファイル + plist」の2点構成を
  *    踏襲し、**秘匿情報(または `*_env` が指す値)を plist の `EnvironmentVariables` へ書かない**。
- *    秘匿情報の値は常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く——ただし
- *    `NOET_PATH`(実機報告。§5.7 NotePublisher の `noet` バイナリ解決先)のように秘匿情報
- *    ではなく、かつ init の対話で既に値を集めているものは例外で、値入りの行として書く
- *    (`ensureEnvFile`/`EnvFileEntry` 参照)。`EnvironmentVariables` に書いてよいのは
- *    非秘匿の `PATH` 一つだけ(理由は `buildPlist` の JSDoc を参照)。
- * 2. **依存 CLI のアシスト**: ruby / apple_cloud_notes_parser / gh / noet が無い場合も
+ *    秘匿情報の値は常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く
+ *    (`ensureEnvFile`/`EnvFileEntry` 参照——非秘匿の値入りエントリを書く仕組み自体は
+ *    `EnvFileEntry.value` として汎用的に残してあるが、issue #86 で `NOET_PATH` の対話収集を
+ *    廃止したため、本稿執筆時点でこれを使うサービスは無い)。`EnvironmentVariables` に
+ *    書いてよいのは非秘匿の `PATH` 一つだけ(理由は `buildPlist` の JSDoc を参照)。
+ * 2. **依存 CLI のアシスト**: ruby / apple_cloud_notes_parser / gh が無い場合も
  *    **自動インストールは一切行わず**、手順を日本語で案内するだけに留める(`init` の目的は
  *    ブートストラップの補助であり、欠如を理由に失敗させない)。qiita は issue #82 で
- *    qiita-cli サブプロセス方式を廃止し Qiita API v2 直叩きへ移行したため、この案内対象
- *    からも外れた(`src/dependencies.ts` 冒頭 JSDoc 参照)。
+ *    qiita-cli サブプロセス方式を廃止し Qiita API v2 直叩きへ移行し、note は issue #86 で
+ *    noet サブプロセス方式を廃止し note.com 非公式 API 直叩きへ移行したため、いずれも
+ *    この案内対象からも外れた(`src/dependencies.ts` 冒頭 JSDoc 参照)。
  * 3. **書き込み後のスキーマ検証(FR-30)**: 生成した YAML の検証には `src/config.ts` の
  *    `validateConfigObject`(スキーマのみ。`*_env` 環境変数の存在確認は行わない)を使う。
  *    利用者はまだ env ファイルへ値を書き込んでいない段階のため、未設定の環境変数は
@@ -25,7 +26,7 @@
  */
 
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
@@ -589,12 +590,14 @@ async function collectNoteBlock(
   promptFn: InitPromptFn,
   defaults: Record<string, unknown> | undefined,
 ): Promise<NonNullable<Config['note']>> {
-  const workspace = await askRequired(
+  // issue #86: note.com 非公式 API を直叩きする方式へ移行し、noet ワークスペース/NOET_PATH
+  // という概念自体が無くなった(`collectDevtoBlock` と同じ形の *_env プロンプトのみ)。
+  const sessionCookieEnv = await askRequired(
     promptFn,
-    'noet workspace directory (working directory for the noet CLI)',
-    stringField(defaults, 'workspace') ?? '~/src/note-content',
+    'Environment variable name that holds the note.com session cookie (_note_session_v5)',
+    stringField(defaults, 'session_cookie_env') ?? 'NOTE_SESSION_COOKIE',
   );
-  return { workspace };
+  return { session_cookie_env: sessionCookieEnv };
 }
 
 async function collectHatenaBlock(
@@ -627,16 +630,9 @@ async function collectDependencyWarnings(
     commandExistsFn: (command: string) => Promise<boolean>;
     fileExistsFn: (path: string) => Promise<boolean>;
     env: NodeJS.ProcessEnv;
-    /**
-     * `service === 'note'` のとき、直前に対話で尋ねた `NOET_PATH` の回答(`~` 展開前)。
-     * `noet` は PATH からではなく常にこのパスから解決される契約(`src/publishers/note.ts`
-     * の `resolveNoetCommand`、PATH フォールバックなし)であるため、依存警告も PATH ではなく
-     * このパスの実在を見る。
-     */
-    noetPath?: string;
   },
 ): Promise<string[]> {
-  const { commandExistsFn, fileExistsFn, env, noetPath } = options;
+  const { commandExistsFn, fileExistsFn, env } = options;
   const warnings: string[] = [];
 
   if (!(await commandExistsFn('ruby'))) {
@@ -684,22 +680,9 @@ async function collectDependencyWarnings(
           'GH_TOKEN 方式を用います)。',
       );
     }
-  } else if (service === 'note') {
-    // 実機報告: `noet` は cargo install で `~/.cargo/bin/noet` に置かれることが多く、
-    // launchd の PATH はこれを含まないため、`noet` は PATH からではなく直前に集めた
-    // `NOET_PATH` の回答が指すパスから解決する契約(PATH フォールバックなし)。ここでの
-    // 依存警告も PATH ではなく、そのパスに実際にバイナリがあるかどうかを見る。
-    const resolvedNoetPath = noetPath !== undefined ? expandHome(noetPath) : undefined;
-    if (resolvedNoetPath === undefined || !(await fileExistsFn(resolvedNoetPath))) {
-      warnings.push(
-        `[依存] noet バイナリが見つかりません${resolvedNoetPath !== undefined ? `(${resolvedNoetPath})` : ''}。` +
-          'https://github.com/kako-jun/noet の手順に従ってインストールし、正しい絶対パスを ' +
-          'NOET_PATH に設定してください(env ファイルに init が書き込んだ値を必要なら編集してください)。' +
-          '加えて、note.com にログイン済みの実 Chrome ブラウザと noet 拡張機能が常時起動している必要があります' +
-          '(詳細は README の「note.com」節を参照)。',
-      );
-    }
   }
+  // note.com は issue #86 で非公式 API を直叩きする方式へ移行し、noet / NOET_PATH という
+  // 依存が無くなった(必要な env は下記 `requiredEnvNames` の一般チェックでカバーされる)。
 
   const unsetEnvNames = requiredEnvNames.filter(
     (name) => env[name] === undefined || env[name] === '',
@@ -757,8 +740,7 @@ async function ensureEnvFile(
     const header =
       '# note2web 環境変数ファイル(chmod 600 で保護)。\n' +
       '# 設定 YAML の *_env が指す名前で、値を直接ここに記入してください(YAML には書きません)。\n' +
-      '# NOET_PATH のような非秘匿の設定値は init が対話で集めた値をそのまま書き込みます\n' +
-      '# (秘匿情報である *_env 系トークンは常に空欄のままです)。\n' +
+      '# 秘匿情報である *_env 系トークンは常に空欄のままです(FR-30)。\n' +
       '#\n' +
       '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、\n' +
       '# 対話シェルから直接 `note2web doctor`/`sync` を実行するときに、bundle exec ruby の\n' +
@@ -1027,28 +1009,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       requiredEnvNames.push(config.devto.api_key_env);
     } else if (service === 'note') {
       config.note = await collectNoteBlock(ask_, existingDefaults?.note);
-      // 実機報告: `noet` は `cargo install` で導入されることが多く、その場合
-      // `~/.cargo/bin/noet` に置かれる。launchd の PATH(`buildLaunchdPath`)はこの
-      // ディレクトリを含まないため、PATH 頼みでは無人実行下で `noet` が見つからない。
-      // `NOET_PATH` に絶対パスを持たせて解決する(`src/publishers/note.ts` の
-      // `resolveNoetCommand`、`src/dependencies.ts` の `case 'note'`)——PATH への
-      // フォールバックは行わないため、この値は必須(空文字を許さない)として尋ねる。
-      // 相対パスは cwd 依存で launchd 実行時に解決先が変わるため受け付けない
-      // (`src/dependencies.ts` の `case 'note'` と同じ規則。PR #84 CodeRabbit レビュー)。
-      // 絶対パス(`~` 始まりの展開後を含む)が入力されるまで問い直す。
-      let noetPathAnswer = await askRequired(
-        ask_,
-        'Path to the noet binary (written to the env file as NOET_PATH)',
-        '~/.cargo/bin/noet',
-      );
-      while (!isAbsolute(expandHome(noetPathAnswer))) {
-        noetPathAnswer = await askRequired(
-          ask_,
-          'Path to the noet binary (must be an absolute path, e.g. ~/.cargo/bin/noet)',
-          '~/.cargo/bin/noet',
-        );
-      }
-      prefilledEnvEntries.push({ name: 'NOET_PATH', value: noetPathAnswer });
+      requiredEnvNames.push(config.note.session_cookie_env);
     } else if (service === 'hatena') {
       config.hatena = await collectHatenaBlock(ask_, existingDefaults?.hatena);
       requiredEnvNames.push(config.hatena.api_key_env);
@@ -1096,12 +1057,7 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       service,
       parserLibEntryPoint,
       requiredEnvNames,
-      {
-        commandExistsFn,
-        fileExistsFn,
-        env,
-        noetPath: prefilledEnvEntries.find((entry) => entry.name === 'NOET_PATH')?.value,
-      },
+      { commandExistsFn, fileExistsFn, env },
     );
     summary.push(...dependencyWarnings);
 

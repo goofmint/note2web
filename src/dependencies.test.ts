@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -218,149 +218,24 @@ describe('checkDependencies', () => {
     ).resolves.toBeUndefined();
   });
 
-  describe('note dependency check (NOET_PATH; no PATH fallback for "noet")', () => {
-    const buildNoteConfig = (): Config =>
-      buildConfig({
-        service: 'note',
-        git: undefined,
-        note: { workspace: '~/src/note-content' },
-        exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      });
-
-    it('reports a problem naming NOET_PATH when it is unset, and never falls back to a PATH lookup for "noet"', async () => {
-      const commands = new Set(['ruby', 'bundle', 'noet']); // "noet" IS on PATH, but must be ignored.
-      const error = await expectDependencyError(buildNoteConfig(), {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: {},
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      });
-
-      const messages = error.problems.map((problem) => problem.message).join('\n');
-      expect(messages).toMatch(/NOET_PATH/);
-      expect(messages).toMatch(/note2web init/);
-      expect(messages).toMatch(/~\/\.cargo\/bin\/noet/);
-      // PATH フォールバックは行わない契約(たとえ "noet" が PATH 上にあっても未設定は問題)。
-      expect(messages).not.toMatch(/was not found on PATH/);
-    });
-
-    it('reports a problem when NOET_PATH is the empty string', async () => {
-      const commands = new Set(['ruby', 'bundle']);
-      const error = await expectDependencyError(buildNoteConfig(), {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: { NOET_PATH: '' },
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      });
-
-      expect(error.problems.map((problem) => problem.message).join('\n')).toMatch(/NOET_PATH/);
-    });
-
-    it('reports a problem containing the resolved path when NOET_PATH points at a missing or non-executable file', async () => {
-      const commands = new Set(['ruby', 'bundle']);
-      const noetPath = '/opt/tools/noet';
-      const error = await expectDependencyError(buildNoteConfig(), {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: { NOET_PATH: noetPath },
-        // NoteStore.sqlite 側の読み取り可否チェック(fileReadableFn)は成功させ、
-        // noet バイナリの実行可否チェック(executableFileFn)だけを失敗させる。
-        fileReadableFn: () => Promise.resolve(true),
-        executableFileFn: () => Promise.resolve(false),
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      });
-
-      const messages = error.problems.map((problem) => problem.message).join('\n');
-      expect(messages).toContain(noetPath);
-      expect(messages).toMatch(/NOET_PATH/);
-      expect(messages).toMatch(/executable regular file/);
-    });
-
-    it('passes (no problem) when NOET_PATH is set and the file is an executable regular file', async () => {
-      const commands = new Set(['ruby', 'bundle']);
-      await expect(
-        checkDependencies(buildNoteConfig(), {
-          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-          env: { NOET_PATH: '/opt/tools/noet' },
-          fileReadableFn: () => Promise.resolve(true),
-          executableFileFn: () => Promise.resolve(true),
-          runSubprocessFn: fakeRubyBundleSubprocess(),
+  it('requires nothing beyond the common checks for note (session cookie is validated by config.ts; issue #86 removed the noet/NOET_PATH checks)', async () => {
+    const commands = new Set(['ruby', 'bundle']);
+    await expect(
+      checkDependencies(
+        buildConfig({
+          service: 'note',
+          git: undefined,
+          note: { session_cookie_env: 'NOTE_SESSION_COOKIE' },
+          exporter: { parser_path: parserPath, notes_container: '/dev/null' },
         }),
-      ).resolves.toBeUndefined();
-    });
-
-    it('expands a leading ~ in NOET_PATH before checking executability', async () => {
-      const commands = new Set(['ruby', 'bundle']);
-      const checkedPaths: string[] = [];
-      await checkDependencies(buildNoteConfig(), {
-        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-        env: { NOET_PATH: '~/bin/noet' },
-        fileReadableFn: () => Promise.resolve(true),
-        executableFileFn: (path) => {
-          checkedPaths.push(path);
-          return Promise.resolve(true);
-        },
-        runSubprocessFn: fakeRubyBundleSubprocess(),
-      });
-
-      const expanded = checkedPaths.find((path) => path.endsWith(join('bin', 'noet')));
-      expect(expanded).toBeDefined();
-      expect(expanded?.startsWith('~')).toBe(false);
-    });
-
-    // 相対パスは cwd 依存で launchd 実行時に解決先が変わるため拒否する
-    // (PR #84 CodeRabbit レビュー。PATH フォールバック廃止と同じ理由)。
-    it.each(['noet', './noet'])(
-      'reports a problem for the relative NOET_PATH %j without checking the filesystem',
-      async (relativePath) => {
-        const commands = new Set(['ruby', 'bundle']);
-        const executableChecked: string[] = [];
-        const error = await expectDependencyError(buildNoteConfig(), {
+        {
           commandExistsFn: (command) => Promise.resolve(commands.has(command)),
-          env: { NOET_PATH: relativePath },
-          fileReadableFn: () => Promise.resolve(true),
-          executableFileFn: (path) => {
-            executableChecked.push(path);
-            return Promise.resolve(true);
-          },
+          env: {},
           runSubprocessFn: fakeRubyBundleSubprocess(),
-        });
-
-        const messages = error.problems.map((problem) => problem.message).join('\n');
-        expect(messages).toMatch(/not an absolute path/);
-        expect(executableChecked).toHaveLength(0);
-      },
-    );
-
-    // 既定の executableFileFn(実ファイルシステム): 「実行可能な通常ファイル」以外を弾く
-    // (PR #84 CodeRabbit レビュー: ディレクトリ・実行権限の無いファイルの拒否)。
-    describe('default executableFileFn against the real filesystem', () => {
-      const runWithRealCheck = (noetPath: string): Promise<void> =>
-        checkDependencies(buildNoteConfig(), {
-          commandExistsFn: (command) => Promise.resolve(new Set(['ruby', 'bundle']).has(command)),
-          env: { NOET_PATH: noetPath },
           fileReadableFn: () => Promise.resolve(true),
-          // executableFileFn は注入しない = 既定実装(stat + R_OK|X_OK)を使う。
-          runSubprocessFn: fakeRubyBundleSubprocess(),
-        });
-
-      it('rejects a directory', async () => {
-        const dirPath = join(dir, 'noet-as-dir');
-        mkdirSync(dirPath);
-        await expect(runWithRealCheck(dirPath)).rejects.toThrow(/executable regular file/);
-      });
-
-      it('rejects a regular file without execute permission', async () => {
-        const filePath = join(dir, 'noet-not-executable');
-        writeFileSync(filePath, '#!/bin/sh\n');
-        chmodSync(filePath, 0o644);
-        await expect(runWithRealCheck(filePath)).rejects.toThrow(/executable regular file/);
-      });
-
-      it('accepts an executable regular file', async () => {
-        const filePath = join(dir, 'noet-executable');
-        writeFileSync(filePath, '#!/bin/sh\n');
-        chmodSync(filePath, 0o755);
-        await expect(runWithRealCheck(filePath)).resolves.toBeUndefined();
-      });
-    });
+        },
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it('expands a leading ~ in exporter.parser_path when locating upstream lib/AppleNoteStore.rb', async () => {

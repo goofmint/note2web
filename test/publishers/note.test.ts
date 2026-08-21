@@ -1,24 +1,37 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../../src/config.js';
-import type { Logger, WarnPayload } from '../../src/logger.js';
+import { createNotePublisher } from '../../src/publishers/note.js';
 import {
-  createNotePublisher,
-  NoteAmbiguousTitleMatchError,
-  type NoteRunner,
-} from '../../src/publishers/note.js';
+  NOTE_API_BASE_URL,
+  NoteAuthError,
+  type NoteHttpClient,
+  type NoteHttpRequest,
+  type NoteHttpResponse,
+} from '../../src/publishers/note-client.js';
+import { computeNoteBodyLength } from '../../src/publishers/note-html.js';
 import type { RenderedArticle } from '../../src/publishers/types.js';
+import { AssetUploadError } from '../../src/assets/uploader.js';
 import type { NoteState } from '../../src/state/store.js';
-import type { RunSubprocessOptions, RunSubprocessResult } from '../../src/subprocess.js';
 
 // ---------------------------------------------------------------------------
-// テスト用ヘルパー(`test/publishers/qiita.test.ts` の `makeMockRunner`、
-// `test/publishers/devto.test.ts` の `createFakeLogger` と同じパターンを踏襲する)。
+// テスト用ヘルパー(makeMockHttpClient/jsonResponse。SUBAGENT TASK の指示どおり vi.fn を
+// 使わず、記録可能・応答をスクリプト可能なフェイクを自前で組み立てる。
+// `test/publishers/devto.test.ts`/`qiita.test.ts` と同じパターン)。
 // ---------------------------------------------------------------------------
 
-function buildConfig(workspace: string): Config {
+const NOTE_UUID = '5c1c2c3d-0000-4000-8000-000000000001';
+const COOKIE_VALUE = 'super-secret-cookie-value-should-never-leak';
+const COOKIE_ENV: NodeJS.ProcessEnv = { NOTE_SESSION_COOKIE: COOKIE_VALUE };
+const S3_ACTION_URL = 'https://s3.example.com/upload-bucket';
+
+function jsonResponse(status: number, body: unknown): NoteHttpResponse {
+  return { status, body: JSON.stringify(body) };
+}
+
+function buildConfig(sessionCookieEnv = 'NOTE_SESSION_COOKIE'): Config {
   return {
     service: 'note',
     timezone: 'Asia/Tokyo',
@@ -30,19 +43,9 @@ function buildConfig(workspace: string): Config {
       access_key_id_env: 'NOTE_S3_ACCESS_KEY_ID',
       secret_access_key_env: 'NOTE_S3_SECRET_ACCESS_KEY',
     },
-    note: { workspace },
+    note: { session_cookie_env: sessionCookieEnv },
   };
 }
-
-const NOTE_UUID = '5c1c2c3d-0000-4000-8000-000000000001';
-
-/**
- * `noet` の解決に使う `NOET_PATH`(`resolveNoetCommand`、実機報告)。PATH フォールバックが
- * 廃止されたため、`publish()` を実際に呼ぶテストは全てこれを渡す必要がある——ホスト環境の
- * `process.env.NOET_PATH` に依存すると、CI/実行環境によって偶然通ったり失敗したりする
- * (テストが環境依存になる)のを避けるため、既定は本テストファイル内で固定する。
- */
-const NOET_ENV: NodeJS.ProcessEnv = { NOET_PATH: '/opt/tools/noet' };
 
 function buildArticle(overrides: Partial<RenderedArticle> = {}): RenderedArticle {
   return {
@@ -50,7 +53,8 @@ function buildArticle(overrides: Partial<RenderedArticle> = {}): RenderedArticle
     title: 'Hello World',
     artifact: '---\ntitle: "Hello World"\ntags: []\n---\n\nbody text\n',
     contentHash: 'sha256:deadbeef',
-    artifactPath: `${NOTE_UUID}.md`,
+    bodyMarkdown: 'body text',
+    tags: [],
     ...overrides,
   };
 }
@@ -65,74 +69,94 @@ function buildPrevState(overrides: Partial<NoteState> = {}): NoteState {
   };
 }
 
-function createFakeLogger(): { logger: Logger; warnings: WarnPayload[] } {
-  const warnings: WarnPayload[] = [];
-  const logger: Logger = {
-    runStart: () => {},
-    runEnd: () => {},
-    exportDone: () => {},
-    notePublished: () => {},
-    noteSkipped: () => {},
-    noteFailed: () => {},
-    assetUploaded: () => {},
-    warn: (payload) => {
-      warnings.push(payload);
-    },
+/** 応答をスクリプト可能なフェイク `NoteHttpClient`(記録つき)。 */
+function makeScriptedHttpClient(
+  script: Array<(request: NoteHttpRequest) => NoteHttpResponse | Promise<NoteHttpResponse>>,
+): { httpClient: NoteHttpClient; calls: NoteHttpRequest[] } {
+  const calls: NoteHttpRequest[] = [];
+  let index = 0;
+  const httpClient: NoteHttpClient = async (request) => {
+    calls.push(request);
+    const handler = script[index];
+    index += 1;
+    if (handler === undefined) {
+      throw new Error(
+        `test setup: no scripted response for call #${String(index)} (${request.method} ${request.url})`,
+      );
+    }
+    return handler(request);
   };
-  return { logger, warnings };
-}
-
-interface RecordedCall {
-  command: string;
-  args: string[];
-  cwd: string | undefined;
+  return { httpClient, calls };
 }
 
 /**
- * 記録可能・応答をスクリプト可能なモック runner(`test/publishers/qiita.test.ts` の
- * `makeMockRunner` と同じパターン)。`handler` が特定コマンドに対する結果を返せば使い、
- * `undefined` を返せば既定(成功・空出力)にフォールバックする。
+ * URL/method で振り分けるフェイク `NoteHttpClient`(記録つき)。個別のシナリオを1行ずつ書く
+ * `makeScriptedHttpClient` と違い、既定の一連の応答(current_user/draft/presigned/S3/publish)
+ * を素直に返すだけの単純なテストで使う。`presignedKeys` は presigned_post 呼び出しごとに
+ * 順番に返す `data.post.key` の一覧(複数画像テスト用)。
  */
-function makeMockRunner(
-  handler?: (
-    call: RecordedCall,
-  ) => Promise<RunSubprocessResult | undefined> | RunSubprocessResult | undefined,
-): { runner: NoteRunner; calls: RecordedCall[] } {
-  const calls: RecordedCall[] = [];
-  const runner: NoteRunner = async (options: RunSubprocessOptions) => {
-    const call: RecordedCall = { command: options.command, args: options.args, cwd: options.cwd };
-    calls.push(call);
-    const custom = await handler?.(call);
-    if (custom !== undefined) {
-      return custom;
+function makeDefaultHttpClient(
+  options: {
+    presignedKeys?: string[];
+    urlname?: string;
+    draftId?: string;
+    draftKey?: string;
+  } = {},
+): { httpClient: NoteHttpClient; calls: NoteHttpRequest[] } {
+  const { presignedKeys = ['img/generated-key.png'], urlname = 'example-user' } = options;
+  const draftId = options.draftId ?? '12345';
+  const draftKey = options.draftKey ?? 'nabcde';
+  let presignedCallIndex = 0;
+
+  const calls: NoteHttpRequest[] = [];
+  const httpClient: NoteHttpClient = async (request) => {
+    calls.push(request);
+    if (request.method === 'POST' && request.url === `${NOTE_API_BASE_URL}/api/v1/text_notes`) {
+      return jsonResponse(200, { id: draftId, key: draftKey });
     }
-    return { status: 'success', exitCode: 0, signal: null, stdout: '', stderr: '' };
+    if (
+      request.method === 'PUT' &&
+      request.url.startsWith(`${NOTE_API_BASE_URL}/api/v1/text_notes/`)
+    ) {
+      return jsonResponse(200, { status: 'published' });
+    }
+    if (request.method === 'GET' && request.url === `${NOTE_API_BASE_URL}/api/v2/current_user`) {
+      return jsonResponse(200, { data: { urlname } });
+    }
+    if (
+      request.method === 'POST' &&
+      request.url === `${NOTE_API_BASE_URL}/api/v3/images/upload/presigned_post`
+    ) {
+      const key = presignedKeys[presignedCallIndex] ?? presignedKeys[presignedKeys.length - 1];
+      presignedCallIndex += 1;
+      return jsonResponse(200, {
+        data: {
+          action: S3_ACTION_URL,
+          post: {
+            key,
+            policy: 'policy-value',
+            'x-amz-security-token': 'security-token-value',
+            'x-amz-signature': 'signature-value',
+          },
+        },
+      });
+    }
+    if (request.method === 'POST' && request.url === S3_ACTION_URL) {
+      return { status: 204, body: '' };
+    }
+    throw new Error(`test setup: unexpected request ${request.method} ${request.url}`);
   };
-  return { runner, calls };
+  return { httpClient, calls };
 }
 
-function success(stdout = ''): RunSubprocessResult {
-  return { status: 'success', exitCode: 0, signal: null, stdout, stderr: '' };
-}
+// ---------------------------------------------------------------------------
+// テスト用の添付ファイル配置(`<assetSourceDir>/files/<path>`、Exporter の出力規約と同じ)。
+// ---------------------------------------------------------------------------
 
-function failure(stderr = 'boom'): RunSubprocessResult {
-  return {
-    status: 'failure',
-    classification: 'exit_code',
-    exitCode: 1,
-    signal: null,
-    stdout: '',
-    stderr,
-  };
-}
-
-/** `noet list` の1行(タブ区切り `title\tkey\tstatus`。`src/publishers/note.ts` の `parseNoteList` 参照)。 */
-function listLine(title: string, key: string, status = 'published'): string {
-  return `${title}\t${key}\t${status}`;
-}
-
-function createUrl(key: string, user = 'example-user'): string {
-  return `https://note.com/${user}/n/${key}`;
+async function writeAttachmentFile(assetSourceDir: string, relPath: string): Promise<void> {
+  const absolutePath = join(assetSourceDir, 'files', relPath);
+  await mkdir(join(assetSourceDir, 'files'), { recursive: true });
+  await writeFile(absolutePath, `fixture bytes for ${relPath}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,469 +164,618 @@ function createUrl(key: string, user = 'example-user'): string {
 // ---------------------------------------------------------------------------
 
 describe('createNotePublisher', () => {
-  let workspaceRoot: string;
+  let assetSourceDir: string;
 
   beforeEach(async () => {
-    workspaceRoot = await mkdtemp(join(tmpdir(), 'note2web-note-test-'));
+    assetSourceDir = await mkdtemp(join(tmpdir(), 'note2web-note-test-'));
   });
 
   afterEach(async () => {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(assetSourceDir, { recursive: true, force: true });
   });
 
-  describe('publish() with a known remoteId (no listing)', () => {
-    it('writes the article file, then invokes "noet update <remoteId> <file>" directly, with no "noet list" call', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'update') {
-          return success(createUrl('existing-key'));
-        }
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      const article = buildArticle();
-      const result = await publisher.publish(article, buildPrevState({ remoteId: 'existing-key' }));
-
-      expect(calls).toHaveLength(1);
-      const call = calls[0];
-      if (call === undefined) throw new Error('test setup: runner was not called');
-      expect(call.command).toBe('/opt/tools/noet');
-      expect(call.args).toEqual([
-        'update',
-        'existing-key',
-        resolve(workspaceRoot, `${NOTE_UUID}.md`),
-      ]);
-      expect(call.cwd).toBe(workspaceRoot);
-
-      expect(result).toMatchObject({
-        result: 'updated',
-        remoteId: 'existing-key',
-        url: createUrl('existing-key'),
-      });
-
-      const onDisk = await readFile(resolve(workspaceRoot, article.artifactPath ?? ''), 'utf8');
-      expect(onDisk).toBe(article.artifact);
-    });
-
-    it('falls back to prev.url when "noet update" output has no extractable URL', async () => {
-      const { runner } = makeMockRunner(() => success('OK, updated.'));
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      const result = await publisher.publish(
-        buildArticle(),
-        buildPrevState({ remoteId: 'existing-key', url: createUrl('existing-key') }),
-      );
-
-      expect(result).toMatchObject({
-        result: 'updated',
-        remoteId: 'existing-key',
-        url: createUrl('existing-key'),
-      });
-    });
-  });
-
-  describe('publish() recovery path (no remoteId): "noet list" then create/update', () => {
-    it('creates when "noet list" output is completely empty (confirmed-empty account, design.md §5.7)', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success(createUrl('brand-new-key'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
+  // -------------------------------------------------------------------------
+  // 作成フロー(prev.remoteId 無し)。
+  // -------------------------------------------------------------------------
+  describe('publish() create flow (no prev.remoteId)', () => {
+    it('fetches current_user, reserves a draft, PUTs the full publish payload, and returns created + article URL', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
       const result = await publisher.publish(buildArticle(), null);
 
-      expect(calls.map((call) => call.args[0])).toEqual(['list', 'create']);
-      const createCall = calls[1];
-      if (createCall === undefined) throw new Error('test setup: create was not called');
-      expect(createCall.args).toEqual(['create', resolve(workspaceRoot, `${NOTE_UUID}.md`)]);
-      expect(createCall.cwd).toBe(workspaceRoot);
-
-      expect(result).toMatchObject({
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        `GET ${NOTE_API_BASE_URL}/api/v2/current_user`,
+        `POST ${NOTE_API_BASE_URL}/api/v1/text_notes`,
+        `PUT ${NOTE_API_BASE_URL}/api/v1/text_notes/12345`,
+      ]);
+      expect(result).toEqual({
         result: 'created',
-        remoteId: 'brand-new-key',
-        url: createUrl('brand-new-key'),
+        remoteId: '12345',
+        url: 'https://note.com/example-user/n/nabcde',
       });
     });
 
-    it('falls back to prev.url when prev exists with remoteId null and the update output has no URL', async () => {
-      // remoteId が null の既存状態(過去に失敗した等)からの回復パス。update 出力に URL が
-      // 無い場合、PublishResult.url は prev.url へフォールバックする。
-      const { runner } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success(listLine('Hello World', 'matched-key'));
-        if (call.args[0] === 'update') return success('updated without url output');
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
+    it('does not call the presigned/S3 endpoints for an article with no image placeholders', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
-      const result = await publisher.publish(
-        buildArticle({ title: 'Hello World' }),
-        buildPrevState({ remoteId: null, url: 'https://note.com/user/n/prev-url-key' }),
+      await publisher.publish(buildArticle({ bodyMarkdown: 'plain text, no images' }), null);
+
+      expect(calls.some((call) => call.url.includes('presigned_post'))).toBe(false);
+      expect(calls.some((call) => call.url === S3_ACTION_URL)).toBe(false);
+    });
+
+    it('sends the draft-reserve POST with no request body', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle(), null);
+
+      const draftCall = calls.find(
+        (call) => call.method === 'POST' && call.url.endsWith('/text_notes'),
       );
-
-      expect(result).toMatchObject({
-        result: 'updated',
-        remoteId: 'matched-key',
-        url: 'https://note.com/user/n/prev-url-key',
-      });
-    });
-
-    it('adopts the key and updates on exactly 1 title match', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success(listLine('Hello World', 'matched-key'));
-        if (call.args[0] === 'update') return success(createUrl('matched-key'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      const result = await publisher.publish(buildArticle({ title: 'Hello World' }), null);
-
-      expect(calls.map((call) => call.args[0])).toEqual(['list', 'update']);
-      const updateCall = calls[1];
-      if (updateCall === undefined) throw new Error('test setup: update was not called');
-      expect(updateCall.args).toEqual([
-        'update',
-        'matched-key',
-        resolve(workspaceRoot, `${NOTE_UUID}.md`),
-      ]);
-      expect(result).toMatchObject({ result: 'updated', remoteId: 'matched-key' });
-    });
-
-    it('throws NoteAmbiguousTitleMatchError on 2+ title matches, warns, and sends no create/update', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') {
-          return success([listLine('Dup', 'key-1'), listLine('Dup', 'key-2')].join('\n'));
-        }
-        throw new Error('test setup: no create/update should have been sent');
-      });
-      const { logger, warnings } = createFakeLogger();
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        logger,
-        env: NOET_ENV,
-      });
-
-      await expect(
-        publisher.publish(buildArticle({ noteUuid: 'dup-note', title: 'Dup' }), null),
-      ).rejects.toThrow(NoteAmbiguousTitleMatchError);
-
-      expect(calls.filter((call) => call.args[0] !== 'list')).toHaveLength(0);
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatchObject({ service: 'note', noteUuid: 'dup-note', title: 'Dup' });
-    });
-
-    it('throws (completeness-unconfirmable) when the title has 0 matches within a non-empty listing, without calling create', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success(listLine('Some Other Article', 'other-key'));
-        throw new Error('test setup: no create/update should have been sent');
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      await expect(publisher.publish(buildArticle({ title: 'Hello World' }), null)).rejects.toThrow(
-        /could not confirm/,
-      );
-      expect(calls.filter((call) => call.args[0] !== 'list')).toHaveLength(0);
-    });
-
-    it('throws (completeness-unconfirmable) when "noet list" output does not parse into the expected row shape', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('some unstructured human-readable text\n');
-        throw new Error('test setup: no create/update should have been sent');
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/could not confirm/);
-      expect(calls.filter((call) => call.args[0] !== 'list')).toHaveLength(0);
-    });
-
-    it('throws when "noet create" succeeds but no note.com URL can be extracted from its output', async () => {
-      const { runner } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success('Draft saved locally.');
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
-        /no note\.com article URL/,
-      );
-    });
-
-    it('fetches "noet list" only once per run and reuses the cache for later notes', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success(createUrl('cached-key'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      const first = await publisher.publish(
-        buildArticle({ noteUuid: 'u1', title: 'Same Title' }),
-        null,
-      );
-      const second = await publisher.publish(
-        buildArticle({ noteUuid: 'u2', title: 'Same Title' }),
-        null,
-      );
-
-      expect(calls.filter((call) => call.args[0] === 'list')).toHaveLength(1);
-      expect(first.result).toBe('created');
-      expect(second).toMatchObject({ result: 'updated', remoteId: 'cached-key' });
-      expect(calls.filter((call) => call.args[0] === 'create')).toHaveLength(1);
-    });
-
-    it('serializes concurrent publishes: two same-title notes via Promise.all cause exactly 1 "noet create"', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success(createUrl('concurrent-key'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
-
-      const [first, second] = await Promise.all([
-        publisher.publish(buildArticle({ noteUuid: 'c1', title: 'Concurrent Title' }), null),
-        publisher.publish(buildArticle({ noteUuid: 'c2', title: 'Concurrent Title' }), null),
-      ]);
-
-      expect(calls.filter((call) => call.args[0] === 'create')).toHaveLength(1);
-      expect(first.result).toBe('created');
-      expect(second).toMatchObject({ result: 'updated', remoteId: 'concurrent-key' });
+      expect(draftCall?.body).toBeUndefined();
     });
   });
 
-  describe('publish() failure paths', () => {
-    it('rejects an artifactPath that escapes the workspace via traversal, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
+  // -------------------------------------------------------------------------
+  // 更新フロー(prev.remoteId あり)。
+  // -------------------------------------------------------------------------
+  describe('publish() update flow (prev.remoteId present)', () => {
+    it('PUTs directly to the existing id, without a draft-reserve POST, and re-derives the key from prev.url', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      const prev = buildPrevState({
+        remoteId: '999',
+        url: 'https://note.com/other-user/n/existing-key',
+      });
+      const result = await publisher.publish(buildArticle(), prev);
+
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        `GET ${NOTE_API_BASE_URL}/api/v2/current_user`,
+        `PUT ${NOTE_API_BASE_URL}/api/v1/text_notes/999`,
+      ]);
+      expect(result).toEqual({
+        result: 'updated',
+        remoteId: '999',
+        url: 'https://note.com/example-user/n/existing-key',
+      });
+    });
+
+    it('uses the re-derived key ("existing-key") for the slug, not the current urlname', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(
+        buildArticle(),
+        buildPrevState({ remoteId: '999', url: 'https://note.com/other-user/n/existing-key' }),
+      );
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { slug: string };
+      expect(payload.slug).toBe('slug-existing-key');
+    });
+
+    it('throws a descriptive error when prev.remoteId is set but prev.url is missing', async () => {
+      const { httpClient } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await expect(
+        publisher.publish(buildArticle(), buildPrevState({ remoteId: '999', url: undefined })),
+      ).rejects.toThrow(/no stored "url"/);
+    });
+
+    it('throws a descriptive error when prev.url does not match the note.com article URL format', async () => {
+      const { httpClient } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await expect(
+        publisher.publish(
+          buildArticle(),
+          buildPrevState({ remoteId: '999', url: 'https://example.com/not-a-note-url' }),
+        ),
+      ).rejects.toThrow(/does not match the expected/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // urlname のキャッシュ(Publisher インスタンスごとに1回、認証チェックも兼ねる)。
+  // -------------------------------------------------------------------------
+  describe('urlname caching (getCurrentUser)', () => {
+    it('fetches current_user only once across multiple publish() calls', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle({ noteUuid: 'uuid-1' }), null);
+      await publisher.publish(buildArticle({ noteUuid: 'uuid-2' }), null);
+
+      expect(calls.filter((call) => call.url.endsWith('/current_user'))).toHaveLength(1);
+    });
+
+    it('serializes concurrent publish() calls (publishChain) so current_user is fetched exactly once even under Promise.all', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await Promise.all([
+        publisher.publish(buildArticle({ noteUuid: 'uuid-a' }), null),
+        publisher.publish(buildArticle({ noteUuid: 'uuid-b' }), null),
+      ]);
+
+      expect(calls.filter((call) => call.url.endsWith('/current_user'))).toHaveLength(1);
+      expect(calls.filter((call) => call.url.endsWith('/text_notes'))).toHaveLength(2);
+    });
+
+    it('does not cache a failed current_user lookup (retries on the next publish())', async () => {
+      let currentUserCalls = 0;
+      const { httpClient: failOnceClient } = makeScriptedHttpClient([
+        () => {
+          currentUserCalls += 1;
+          return Promise.resolve({ status: 500, body: 'boom' });
+        },
+      ]);
       const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
+        config: buildConfig(),
+        httpClient: failOnceClient,
+        env: COOKIE_ENV,
       });
 
-      const article = buildArticle({ artifactPath: '../../etc/evil.md' });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow();
+      expect(currentUserCalls).toBe(1);
+
+      // 2回目は current_user から成功するスクリプトへ差し替える(別 Publisher インスタンスで
+      // 確認: 失敗をキャッシュしていれば同じインスタンスの再試行でも current_user を
+      // 呼び直すはずなので、ここでは同一インスタンスに新しい httpClient は注入できない
+      // ため、代わりに「1回失敗しても urlnamePromise がキャッシュされていない」ことだけを
+      // 確認する目的で、同一 Publisher に対して2回目の publish を試み、2回目も
+      // current_user を叩いていることを確認する。
+      const { httpClient: secondClient } = makeDefaultHttpClient();
+      const publisher2 = createNotePublisher({
+        config: buildConfig(),
+        httpClient: secondClient,
+        env: COOKIE_ENV,
+      });
+      const result = await publisher2.publish(buildArticle(), null);
+      expect(result.result).toBe('created');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // cookie / 認証。
+  // -------------------------------------------------------------------------
+  describe('cookie / authentication', () => {
+    it('throws naming the env var when the session cookie env var is unset, without any HTTP calls', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: {} });
+
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOTE_SESSION_COOKIE/);
       expect(calls).toHaveLength(0);
     });
 
-    it('rejects an absolute artifactPath, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
+    it('throws naming the env var when the session cookie is the empty string, without any HTTP calls', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
       const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
+        config: buildConfig(),
+        httpClient,
+        env: { NOTE_SESSION_COOKIE: '' },
       });
 
-      const article = buildArticle({ artifactPath: '/etc/evil.md' });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOTE_SESSION_COOKIE/);
       expect(calls).toHaveLength(0);
     });
 
-    it('throws when article.artifactPath is undefined', async () => {
-      const { runner, calls } = makeMockRunner();
+    it.each([401, 403])(
+      'throws NoteAuthError with browser re-acquisition steps (and no cookie value) on HTTP %d from current_user',
+      async (status) => {
+        const { httpClient: authFailClient } = makeScriptedHttpClient([
+          () => Promise.resolve({ status, body: '' }),
+        ]);
+        const publisher = createNotePublisher({
+          config: buildConfig(),
+          httpClient: authFailClient,
+          env: COOKIE_ENV,
+        });
+
+        const error = await publisher.publish(buildArticle(), null).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(NoteAuthError);
+        const message = (error as Error).message;
+        expect(message).toMatch(/ブラウザで note\.com にログイン/);
+        expect(message).toMatch(/_note_session_v5/);
+        expect(message).not.toContain(COOKIE_VALUE);
+      },
+    );
+
+    it('never includes the cookie value in any thrown error message, even on a generic HTTP failure', async () => {
+      const { httpClient: failClient } = makeScriptedHttpClient([
+        () => Promise.resolve({ status: 500, body: `error mentioning nothing secret` }),
+      ]);
       const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
+        config: buildConfig(),
+        httpClient: failClient,
+        env: COOKIE_ENV,
       });
 
-      const article = buildArticle({ artifactPath: undefined });
-      await expect(publisher.publish(article, null)).rejects.toThrow(/artifactPath/);
-      expect(calls).toHaveLength(0);
+      const error = await publisher.publish(buildArticle(), null).catch((e: unknown) => e);
+      expect((error as Error).message).not.toContain(COOKIE_VALUE);
     });
 
-    it('throws a descriptive error (with the stderr detail line, no full command echo) on CLI failure, for create', async () => {
-      const { runner } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return failure('some noet CLI error detail');
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
-      });
+    it('sends the cookie only in the Cookie header (note.com API requests), never to the S3 presigned URL', async () => {
+      await writeAttachmentFile(assetSourceDir, 'sketch.png');
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
-      try {
-        await publisher.publish(buildArticle(), null);
-        expect.unreachable('publish() should have thrown');
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        expect(message).toContain('some noet CLI error detail');
-        // the full argv (e.g. the absolute file path) is not echoed into the error message.
-        expect(message).not.toContain(workspaceRoot);
+      await publisher.publish(
+        buildArticle({
+          bodyMarkdown: '![alt](note2web-asset://img-1)',
+          attachments: [{ identifier: 'img-1', path: 'sketch.png' }],
+          assetSourceDir,
+        }),
+        null,
+      );
+
+      for (const call of calls) {
+        if (call.url === S3_ACTION_URL) {
+          expect(call.headers.Cookie).toBeUndefined();
+        } else {
+          expect(call.headers.Cookie).toBe(`_note_session_v5=${COOKIE_VALUE}`);
+        }
       }
     });
+  });
 
-    it('throws a descriptive error on CLI failure, for update (known remoteId)', async () => {
-      const { runner } = makeMockRunner(() => failure('connection refused'));
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
+  // -------------------------------------------------------------------------
+  // 画像アップロード。
+  // -------------------------------------------------------------------------
+  describe('image upload', () => {
+    it('uploads a single referenced image via presigned POST + S3 multipart, copying all post fields with file last', async () => {
+      await writeAttachmentFile(assetSourceDir, 'sketch.png');
+      const { httpClient, calls } = makeDefaultHttpClient({
+        presignedKeys: ['img/uploaded-key.png'],
       });
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
-      await expect(
-        publisher.publish(buildArticle(), buildPrevState({ remoteId: 'some-key' })),
-      ).rejects.toThrow(/connection refused/);
+      await publisher.publish(
+        buildArticle({
+          bodyMarkdown: '![alt](note2web-asset://img-1)',
+          attachments: [{ identifier: 'img-1', path: 'sketch.png' }],
+          assetSourceDir,
+        }),
+        null,
+      );
+
+      const s3Call = calls.find((call) => call.url === S3_ACTION_URL);
+      expect(s3Call).toBeDefined();
+      const form = s3Call?.body as FormData;
+      const fieldNames = [...form.entries()].map(([key]) => key);
+      expect(fieldNames).toEqual([
+        'key',
+        'policy',
+        'x-amz-security-token',
+        'x-amz-signature',
+        'file',
+      ]);
+      expect(fieldNames.at(-1)).toBe('file');
+      // x-amz-security-token の欠落は403 InvalidAccessKeyId になるため必須(元記事)。
+      expect(form.get('x-amz-security-token')).toBe('security-token-value');
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as {
+        image_keys: string[];
+        free_body: string;
+      };
+      expect(payload.image_keys).toEqual(['uploaded-key.png']);
+      expect(payload.free_body).toContain('https://assets.st-note.com/img/uploaded-key.png');
     });
 
-    it('throws a descriptive error on CLI failure, for "noet list" itself', async () => {
-      const { runner } = makeMockRunner(() => failure('extension not connected'));
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: NOET_ENV,
+    it('uploads multiple images in order of appearance in the markdown (not attachment array order)', async () => {
+      await writeAttachmentFile(assetSourceDir, 'first.png');
+      await writeAttachmentFile(assetSourceDir, 'second.png');
+      const { httpClient, calls } = makeDefaultHttpClient({
+        presignedKeys: ['img/key-for-second.png', 'img/key-for-first.png'],
       });
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
-        /extension not connected/,
+      // 本文中では img-2(second.png)が img-1(first.png)より先に現れる。
+      const markdown = '![second](note2web-asset://img-2)\n\n![first](note2web-asset://img-1)\n';
+      await publisher.publish(
+        buildArticle({
+          bodyMarkdown: markdown,
+          attachments: [
+            { identifier: 'img-1', path: 'first.png' },
+            { identifier: 'img-2', path: 'second.png' },
+          ],
+          assetSourceDir,
+        }),
+        null,
       );
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { image_keys: string[] };
+      // 出現順(img-2 が先)どおりに image_keys が並ぶ。
+      expect(payload.image_keys).toEqual(['key-for-second.png', 'key-for-first.png']);
+    });
+
+    it('never retries the presigned_post POST on a connection error', async () => {
+      let presignedCalls = 0;
+      const { httpClient } = makeScriptedHttpClient([
+        () => jsonResponse(200, { data: { urlname: 'example-user' } }), // current_user
+        () => jsonResponse(200, { id: '1', key: 'nkey' }), // draft
+        () => {
+          presignedCalls += 1;
+          throw new TypeError('fetch failed');
+        },
+      ]);
+      await writeAttachmentFile(assetSourceDir, 'sketch.png');
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await expect(
+        publisher.publish(
+          buildArticle({
+            bodyMarkdown: '![alt](note2web-asset://img-1)',
+            attachments: [{ identifier: 'img-1', path: 'sketch.png' }],
+            assetSourceDir,
+          }),
+          null,
+        ),
+      ).rejects.toThrow();
+      expect(presignedCalls).toBe(1);
+    });
+
+    it('throws AssetUploadError for an unsupported image extension, without calling presigned_post', async () => {
+      await writeAttachmentFile(assetSourceDir, 'photo.heic');
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      const error = await publisher
+        .publish(
+          buildArticle({
+            bodyMarkdown: '![alt](note2web-asset://img-heic)',
+            attachments: [{ identifier: 'img-heic', path: 'photo.heic' }],
+            assetSourceDir,
+          }),
+          null,
+        )
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).identifier).toBe('img-heic');
+      expect(calls.some((call) => call.url.includes('presigned_post'))).toBe(false);
+    });
+
+    it('throws when the markdown references an image placeholder but assetSourceDir is unset (wiring bug guard)', async () => {
+      const { httpClient } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await expect(
+        publisher.publish(
+          buildArticle({
+            bodyMarkdown: '![alt](note2web-asset://img-1)',
+            attachments: [{ identifier: 'img-1', path: 'sketch.png' }],
+            assetSourceDir: undefined,
+          }),
+          null,
+        ),
+      ).rejects.toThrow(/assetSourceDir is unset/);
     });
   });
 
+  // -------------------------------------------------------------------------
+  // 4つの 500 罠。
+  // -------------------------------------------------------------------------
+  describe('the four 500-traps', () => {
+    it('trap 1: image_keys lists every uploaded image key, in order of appearance', async () => {
+      await writeAttachmentFile(assetSourceDir, 'a.png');
+      const { httpClient, calls } = makeDefaultHttpClient({ presignedKeys: ['img/trap1-key.png'] });
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(
+        buildArticle({
+          bodyMarkdown: '![alt](note2web-asset://img-1)',
+          attachments: [{ identifier: 'img-1', path: 'a.png' }],
+          assetSourceDir,
+        }),
+        null,
+      );
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { image_keys: string[] };
+      expect(payload.image_keys).toEqual(['trap1-key.png']);
+      expect(payload.image_keys.length).toBeGreaterThan(0);
+    });
+
+    it('trap 1: image_keys is an empty array (not omitted) for an article with no images', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle({ bodyMarkdown: 'no images here' }), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { image_keys: unknown };
+      expect(payload.image_keys).toEqual([]);
+    });
+
+    it('trap 2: lead_form and line_add_friend are never null and match the exact required shape', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle(), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as {
+        lead_form: unknown;
+        line_add_friend: unknown;
+        line_add_friend_access_token: unknown;
+      };
+      expect(payload.lead_form).toEqual({ is_active: false, consent_url: '' });
+      expect(payload.line_add_friend).toEqual({
+        is_active: false,
+        keyword: '',
+        add_friend_url: '',
+      });
+      expect(payload.line_add_friend_access_token).toBe('');
+    });
+
+    it('trap 3: body_length is the visible-text Unicode code point count, not the HTML length', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      const markdown = '# 見出し\n\n本文テキストです。**強調**も含みます。\n';
+      await publisher.publish(buildArticle({ bodyMarkdown: markdown }), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as {
+        body_length: number;
+        free_body: string;
+      };
+      expect(payload.body_length).toBe(computeNoteBodyLength(markdown));
+      // HTML 文字列(タグ込み)の長さとは明確に異なる(HTML の方が長い)。
+      expect(payload.body_length).toBeLessThan(payload.free_body.length);
+    });
+
+    it('trap 4: slug defaults to "slug-<note_key>" and is never empty (create flow)', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient({ draftKey: 'freshkey123' });
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle(), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { slug: string };
+      expect(payload.slug).toBe('slug-freshkey123');
+      expect(payload.slug.length).toBeGreaterThan(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // hashtags の wire 形式(実機確認課題 (a))。
+  // -------------------------------------------------------------------------
+  describe('hashtags builder', () => {
+    it('wraps each tag as {name: "#tag"}, normalizing to exactly one leading "#"', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle({ tags: ['#TypeScript', 'plain-tag'] }), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { hashtags: { name: string }[] };
+      expect(payload.hashtags).toEqual([{ name: '#TypeScript' }, { name: '#plain-tag' }]);
+    });
+
+    it('sends an empty array when the article has no tags', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle({ tags: [] }), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as { hashtags: unknown };
+      expect(payload.hashtags).toEqual([]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 公開ペイロードの固定フィールド(status/send_notifications_flag 等)。
+  // -------------------------------------------------------------------------
+  describe('publish payload fixed fields', () => {
+    it('sends status "published" and send_notifications_flag false on every publish', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle(), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      const payload = JSON.parse(putCall?.body as string) as {
+        status: string;
+        send_notifications_flag: boolean;
+        pay_body: string;
+        price: number;
+        magazine_ids: unknown;
+        magazine_keys: unknown;
+        author_ids: unknown;
+        circle_permissions: unknown;
+        discount_campaigns: unknown;
+        pro_coupon_keys: unknown;
+      };
+      expect(payload.status).toBe('published');
+      expect(payload.send_notifications_flag).toBe(false);
+      expect(payload.pay_body).toBe('');
+      expect(payload.price).toBe(0);
+      expect(payload.magazine_ids).toEqual([]);
+      expect(payload.magazine_keys).toEqual([]);
+      expect(payload.author_ids).toEqual([]);
+      expect(payload.circle_permissions).toEqual([]);
+      expect(payload.discount_campaigns).toEqual([]);
+      expect(payload.pro_coupon_keys).toEqual([]);
+    });
+
+    it('sends the Content-Type: application/json header for the publish PUT', async () => {
+      const { httpClient, calls } = makeDefaultHttpClient();
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await publisher.publish(buildArticle(), null);
+
+      const putCall = calls.find((call) => call.method === 'PUT');
+      expect(putCall?.headers['Content-Type']).toBe('application/json');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PUT の接続系エラー1回リトライ。
+  // -------------------------------------------------------------------------
+  describe('publish PUT retry-on-connection-error', () => {
+    it('retries the publish PUT exactly once on a connection error, then succeeds', async () => {
+      let putAttempts = 0;
+      const { httpClient, calls } = makeScriptedHttpClient([
+        () => jsonResponse(200, { data: { urlname: 'example-user' } }), // current_user
+        () => jsonResponse(200, { id: '1', key: 'nkey' }), // draft
+        () => {
+          putAttempts += 1;
+          throw new TypeError('fetch failed');
+        },
+        () => {
+          putAttempts += 1;
+          return jsonResponse(200, { status: 'published' });
+        },
+      ]);
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      const result = await publisher.publish(buildArticle(), null);
+
+      expect(putAttempts).toBe(2);
+      expect(calls).toHaveLength(4);
+      expect(result.result).toBe('created');
+    });
+
+    it('does not retry the draft-reserve POST on a connection error', async () => {
+      let draftAttempts = 0;
+      const { httpClient } = makeScriptedHttpClient([
+        () => jsonResponse(200, { data: { urlname: 'example-user' } }), // current_user
+        () => {
+          draftAttempts += 1;
+          throw new TypeError('fetch failed');
+        },
+      ]);
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
+
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow();
+      expect(draftAttempts).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Publisher 構築。
+  // -------------------------------------------------------------------------
   describe('createNotePublisher() construction', () => {
-    it('has no prepare/finalize (API/CLI mode)', () => {
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot) });
+    it('has no prepare/finalize (API mode)', () => {
+      const publisher = createNotePublisher({ config: buildConfig() });
       expect(publisher.prepare).toBeUndefined();
       expect(publisher.finalize).toBeUndefined();
     });
 
     it('throws immediately when config.note is undefined', () => {
-      const config = buildConfig(workspaceRoot);
+      const config = buildConfig();
       const brokenConfig = { ...config, note: undefined };
       expect(() => createNotePublisher({ config: brokenConfig })).toThrow(/config\.note/);
     });
-  });
-
-  // -------------------------------------------------------------------------
-  // NOET_PATH の解決(実機報告: cargo install の noet が launchd の PATH に無い)。
-  // PATH フォールバックは廃止済みのため、未設定/空は明確なエラーになる
-  // (`src/publishers/note.ts` の `resolveNoetCommand` 参照)。
-  // -------------------------------------------------------------------------
-  describe('NOET_PATH resolution (resolveNoetCommand)', () => {
-    it('uses the absolute NOET_PATH value as the "noet" command for every invocation', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success(createUrl('key-1'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { NOET_PATH: '/opt/tools/noet' },
-      });
-
-      await publisher.publish(buildArticle(), null);
-
-      expect(calls.length).toBeGreaterThan(0);
-      for (const call of calls) {
-        expect(call.command).toBe('/opt/tools/noet');
-      }
-    });
-
-    it('expands a leading "~" in NOET_PATH against the home directory', async () => {
-      const { runner, calls } = makeMockRunner((call) => {
-        if (call.args[0] === 'list') return success('');
-        if (call.args[0] === 'create') return success(createUrl('key-1'));
-        return undefined;
-      });
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { NOET_PATH: '~/bin/noet' },
-      });
-
-      await publisher.publish(buildArticle(), null);
-
-      const expected = join(homedir(), 'bin', 'noet');
-      expect(calls.length).toBeGreaterThan(0);
-      for (const call of calls) {
-        expect(call.command).toBe(expected);
-      }
-    });
-
-    it('rejects (no PATH fallback) when NOET_PATH is unset, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: {},
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOET_PATH/);
-      expect(calls).toHaveLength(0);
-    });
-
-    it('rejects (no PATH fallback) when NOET_PATH is the empty string, without invoking the runner', async () => {
-      const { runner, calls } = makeMockRunner();
-      const publisher = createNotePublisher({
-        config: buildConfig(workspaceRoot),
-        runner,
-        env: { NOET_PATH: '' },
-      });
-
-      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOET_PATH/);
-      expect(calls).toHaveLength(0);
-    });
-
-    // 相対パスは cwd 依存で launchd 実行時に解決先が変わるため拒否する
-    // (PR #84 CodeRabbit レビュー。PATH フォールバック廃止と同じ理由)。
-    it.each(['noet', './noet'])(
-      'rejects the relative NOET_PATH %j (absolute path required), without invoking the runner',
-      async (relativePath) => {
-        const { runner, calls } = makeMockRunner();
-        const publisher = createNotePublisher({
-          config: buildConfig(workspaceRoot),
-          runner,
-          env: { NOET_PATH: relativePath },
-        });
-
-        await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
-          /not an absolute path/,
-        );
-        expect(calls).toHaveLength(0);
-      },
-    );
   });
 });

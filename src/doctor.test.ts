@@ -366,31 +366,29 @@ describe('runDoctorChecks', () => {
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
 
-    it('reports NOET_PATH as unset for note, without falling back to a PATH lookup for "noet"', async () => {
+    it('passes for note using only the reused common/service checks (issue #86: no more noet/NOET_PATH checks)', async () => {
       const runSubprocessFn = vi.fn<
         (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
       >(() => Promise.resolve(success()));
 
-      const error = await expectDoctorError(
-        buildConfig({
-          service: 'note',
-          git: undefined,
-          note: { workspace: '~/src/note-content' },
-          exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-        }),
-        {
-          commandExistsFn: (command) =>
-            Promise.resolve(command === 'ruby' || command === 'bundle' || command === 'noet'),
-          fileReadableFn: () => Promise.resolve(true),
-          env: {},
-          runSubprocessFn,
-          dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
-        },
-      );
+      await expect(
+        runDoctorChecks(
+          buildConfig({
+            service: 'note',
+            git: undefined,
+            note: { session_cookie_env: 'NOTE_SESSION_COOKIE' },
+            exporter: { parser_path: parserPath, notes_container: '/dev/null' },
+          }),
+          {
+            commandExistsFn: (command) => Promise.resolve(allCommandsPresent.has(command)),
+            env: {},
+            runSubprocessFn,
+            dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
+            fileReadableFn: () => Promise.resolve(true),
+          },
+        ),
+      ).resolves.toBeUndefined();
 
-      const messages = error.problems.map((problem) => problem.message).join('\n');
-      expect(messages).toMatch(/NOET_PATH/);
-      expect(messages).not.toMatch(/was not found on PATH/);
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
   });

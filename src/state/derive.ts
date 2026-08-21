@@ -39,6 +39,14 @@ export const DEVTO_TARGET = 'dev.to';
  */
 export const QIITA_TARGET = 'qiita.com';
 
+/**
+ * note.com の `target`(design.md §8「note: workspace」→ issue #86 で API ホスト固定値へ変更)。
+ * noet サブプロセス方式の廃止により `note.workspace` 設定自体が無くなった(note.com 非公式
+ * API を直接叩く固定ホスト、`src/publishers/note.ts`)ため、`QIITA_TARGET` と同じ理由で
+ * サービス共通の固定値とする。
+ */
+export const NOTE_TARGET = 'note.com';
+
 /** `value` が `undefined` であれば内部不変条件違反として例外を投げる(スキーマが保証するはずの値)。 */
 function requireConfigBlock<T>(value: T | undefined, blockKey: string, service: string): T {
   if (value === undefined) {
@@ -52,9 +60,9 @@ function requireConfigBlock<T>(value: T | undefined, blockKey: string, service: 
 
 /**
  * 状態 JSON の `target`(design.md §8)を現在の設定から導出する。
- * 「配信先の識別子。Git モード: repo_path、note: workspace、はてな: blog_id、
- * qiita/devto: API ホスト」(design.md §8。issue #82 で qiita は workspace → API ホスト
- * 固定値へ変更)。
+ * 「配信先の識別子。Git モード: repo_path、はてな: blog_id、qiita/devto/note: API ホスト」
+ * (design.md §8。issue #82 で qiita は workspace → API ホスト固定値へ、issue #86 で
+ * note も workspace → API ホスト固定値へ変更)。
  */
 export function deriveTarget(config: Config): string {
   switch (config.service) {
@@ -66,7 +74,8 @@ export function deriveTarget(config: Config): string {
       requireConfigBlock(config.qiita, 'qiita', config.service);
       return QIITA_TARGET;
     case 'note':
-      return requireConfigBlock(config.note, 'note', config.service).workspace;
+      requireConfigBlock(config.note, 'note', config.service);
+      return NOTE_TARGET;
     case 'hatena':
       return requireConfigBlock(config.hatena, 'hatena', config.service).blog_id;
     case 'devto':

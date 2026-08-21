@@ -69,6 +69,7 @@
  * 唯一 StateStore を所有する)をぼかしてしまうため採用しない。
  */
 
+import type { Attachment } from '../model/note.js';
 import type { NoteState } from '../state/store.js';
 
 /**
@@ -130,6 +131,25 @@ export interface RenderedArticle {
    * `tags` キーへ Renderer 自身が直接書き込むため、この専用フィールドは使わない。
    */
   tags?: string[];
+  /**
+   * note.com 専用の逸脱(issue #86 Phase 4)。当該ノートの添付・描画一覧(`Note#attachments`
+   * をそのまま)。note.com 向けの画像は他サービスと異なり `assets/uploader.ts` の段階では
+   * アップロードされず、本文中の `note2web-asset://<identifier>` プレースホルダも未解決の
+   * まま残る(`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」参照)——note.com は
+   * 自身の presigned アップロード API へ画像バイト列を直接送る必要があるため、Publisher
+   * (`src/publishers/note.ts`)がバイト列そのものへアクセスできるよう、添付一覧と実体の
+   * 場所(`assetSourceDir`)を `RenderedArticle` 経由でそのまま引き渡す。`prepare?`/
+   * `finalize?` と同様、design.md §5.7 に明記の無い拡張であることをここに明記する。
+   * note.com 以外の Renderer は設定しない(`undefined` のまま)。
+   */
+  attachments?: readonly Attachment[];
+  /**
+   * note.com 専用の逸脱(issue #86 Phase 4)。`attachments[].path` の解決基準ディレクトリ
+   * (Exporter が返した一時出力ディレクトリ。`<assetSourceDir>/files/<path>` が実ファイル)。
+   * `attachments` と対で設定する(`src/publishers/note.ts` の `resolveAttachmentAbsolutePath`
+   * 呼び出しに必要)。note.com 以外の Renderer は設定しない。
+   */
+  assetSourceDir?: string;
 }
 
 /** `Publisher.publish` の戻り値(design.md §5.7)。 */

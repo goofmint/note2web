@@ -93,9 +93,12 @@ const devtoSchema = z
   })
   .strict();
 
+// note.com 非公式 API を直叩きする API モード(issue #86: noet サブプロセス起動を廃止)。
+// devtoSchema/qiitaSchema と同形(セッション cookie の環境変数名参照のみ)——`noet` の
+// ワークスペースディレクトリという概念自体が無くなったため `workspace` は持たない。
 const noteSchema = z
   .object({
-    workspace: z.string().min(1),
+    session_cookie_env: z.string().min(1),
   })
   .strict();
 

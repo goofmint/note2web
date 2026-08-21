@@ -1,6 +1,12 @@
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { deriveTarget, DEVTO_TARGET, QIITA_TARGET, resolveStatePath } from './derive.js';
+import {
+  deriveTarget,
+  DEVTO_TARGET,
+  NOTE_TARGET,
+  QIITA_TARGET,
+  resolveStatePath,
+} from './derive.js';
 import type { Config } from '../config.js';
 
 function buildConfig(overrides: Partial<Config> = {}): Config {
@@ -80,12 +86,19 @@ describe('deriveTarget', () => {
     expect(QIITA_TARGET).toBe('qiita.com');
   });
 
-  it('uses note.workspace for note', () => {
+  it('uses a fixed constant for note (no user-configured identifier exists in the schema, issue #86)', () => {
     expect(
       deriveTarget(
-        buildConfig({ service: 'note', git: undefined, note: { workspace: '/workspaces/note' } }),
+        buildConfig({
+          service: 'note',
+          git: undefined,
+          note: { session_cookie_env: 'NOTE_SESSION_COOKIE' },
+        }),
       ),
-    ).toBe('/workspaces/note');
+      // リテラルで固定する: NOTE_TARGET 定数自身と比較すると定数値の変更を検知できない
+      // (QIITA_TARGET のテストと同じ理由)。
+    ).toBe('note.com');
+    expect(NOTE_TARGET).toBe('note.com');
   });
 
   it('uses hatena.blog_id for hatena', () => {

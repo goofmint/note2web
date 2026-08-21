@@ -32,6 +32,7 @@ import { renderHugoArticle } from './hugo.js';
 import { renderJekyllArticle } from './jekyll.js';
 import { isGitModeService } from './mode.js';
 import { createNotePublisher, renderNoteArticle } from './note.js';
+import type { NoteHttpClient } from './note-client.js';
 import { createQiitaPublisher, renderQiitaArticle } from './qiita.js';
 import { renderGenericArticle, type NoteRenderer } from './render.js';
 import type { Publisher } from './types.js';
@@ -67,6 +68,16 @@ export interface CreatePublisherOptions {
    * 未指定のままだと本番実行でその `warn` が一切発行されない)。
    */
   logger?: Logger;
+  /**
+   * note.com API 呼び出しの注入点(issue #86。テスト用)。既定は `createNotePublisher` 自身の
+   * 既定値(本物の `fetch`)。note 以外のサービスでは無視される。
+   */
+  noteHttpClient?: NoteHttpClient;
+  /**
+   * 環境変数の参照元(issue #86。`note.session_cookie_env` 等の解決元、テスト用)。既定は
+   * `process.env`(`createNotePublisher` 自身の既定値と同じ)。note 以外のサービスでは無視される。
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -93,7 +104,12 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
     return createHatenaPublisher({ config, logger: options.logger });
   }
   if (config.service === 'note' && config.note !== undefined) {
-    return createNotePublisher({ config, logger: options.logger });
+    return createNotePublisher({
+      config,
+      logger: options.logger,
+      httpClient: options.noteHttpClient,
+      env: options.env,
+    });
   }
   throw new PublisherNotImplementedError(config.service);
 }
@@ -127,12 +143,13 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  *   frontmatter ファイルは書かないが、`artifact` に AtomPub `<entry>` XML そのものを
  *   持たせ、それを冪等判定のハッシュにも POST/PUT のリクエストボディにもそのまま使う
  *   (design.md §5.7 HatenaPublisher 行)。
- * - `note`: `renderNoteArticle`(`src/publishers/note.ts`、T-25)——`noet` が実際に読む
- *   `title`/`tags` の2キーのみの最小限 frontmatter を書く。本文中の画像参照は
- *   `renderNoteArticle` に渡る前に `assets/uploader.ts` の `processNoteBody` が
- *   `<config.note.workspace>/images/` へのローカル相対パスへ解決済みのため、ここでは
- *   画像の検出・拒否は行わない(design.md §5.7 NotePublisher 行「画像」節、利用者決定
- *   2026-08-21)。
+ * - `note`: `renderNoteArticle`(`src/publishers/note.ts`、issue #86)——API モードのため
+ *   frontmatter ファイルは書かないが、`title`/`tags` を含めたハッシュで冪等判定を成立させ、
+ *   `bodyMarkdown`/`tags`/`attachments`/`assetSourceDir` を `RenderedArticle` の専用
+ *   フィールドへ渡す(note.com 非公式 API を直叩きする方式へ移行。本文中の画像プレース
+ *   ホルダは `assets/uploader.ts` の `processNoteBody` が意図的に未解決のまま残し、
+ *   実際の画像アップロード・本文 HTML への変換・外部 URL 画像の拒否は配信時点
+ *   (`createNotePublisher` の `publish()`)まで遅延する)。
  * - それ以外: 型上到達不能(`ServiceName` は上記7値で尽きる)。`renderGenericArticle`
  *   (`src/publishers/render.ts`、T-14)を防御的なフォールバックとして返す——`runSync` 自身の
  *   既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と渡さない場合
