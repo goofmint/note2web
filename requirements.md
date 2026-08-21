@@ -114,7 +114,7 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 | `gh` | 外部 CLI | PR の作成・マージ | — |
 | Qiita API v2 | 公式 API | Qiita への配信(issue #82: 外部 CLI `@qiita/qiita-cli` から API 直叩きへ変更。`publish` コマンドが投稿前に利用者の全記事を無条件同期しタイムアウトする問題を避けるため) | タグは1〜5個必須。半角スペースを含むタグは送信時に分割され、個数上限を超えて 403 になる。画像アップロード API は存在しない |
 | `devto-cli` / Forem API v1 | 外部 CLI / API | dev.to への配信 | タグは最大4個。`canonical_url` を指定できる |
-| `noet` | 外部 CLI（Rust製、MIT） | note.com への配信 | note.com に公式 API は存在せず、非公式 API を利用。画像は `noet` 自身のアップロード機能（ローカルファイル参照。対応形式 jpg/jpeg/png/gif/webp のみ）経由で配信する（design.md §5.7「画像」節、利用者決定 2026-08-21） |
+| `noet` | 外部 CLI（Rust製、MIT） | note.com への配信 | note.com に公式 API は存在しない。現行の `noet` は非公式 API も直接は呼ばず、ローカルの Chrome 拡張機能と WebSocket（`ws://127.0.0.1:9876`）で通信し、拡張機能側がログイン済みの実ブラウザ上で DOM 操作を行う構成（design.md §13-4）。画像は `noet` 自身のアップロード機能（ローカルファイル参照。対応形式 jpg/jpeg/png/gif/webp のみ）経由で配信する（design.md §5.7「画像」節、利用者決定 2026-08-21） |
 | はてなブログ AtomPub | 公式 API | はてなブログへの配信 | 認証は WSSE / Basic / OAuth に対応。Markdown 形式で入稿できるかは未確認（未決事項） |
 | Cloudflare R2 / Amazon S3 | オブジェクトストレージ | アセットのアップロード先 | — |
 | Zenn（Git 連携） | Git リポジトリ出力 | Zenn への配信（投稿 API が存在しないため、これ以外の方法はない） | slug は `a-z0-9`・ハイフン・アンダースコアの12〜50字。一度公開されると変更できない。type は `tech` または `idea` のみ |

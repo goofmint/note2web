@@ -59,10 +59,11 @@
  * 使う。一方 **note.com の画像添付(Whiteboard Sketch)** は、利用者決定(2026-08-21、
  * design.md §5.7「画像」節)により noet 自身の画像アップロード機能(ローカル相対パス経由)
  * を使うようになったため、他の4ノートと同じく created として扱われる——`<workspace>/
- * images/` へ画像がコピーされ、本文の参照が `./images/<identifier><ext>` に解決されている
+ * images/` へ画像がコピーされ、本文の参照が `./images/<identifier>-<内容ハッシュ><ext>` に解決されている
  * ことをこのファイルの note.com セクションで確認する。
  */
 
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1314,7 +1315,7 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   // note.com: CLI モード(noet)。利用者決定(2026-08-21、design.md §5.7「画像」節)に
   // より、画像ノート(Whiteboard Sketch)も含め5件全てが noet 経由で created になる
   // ——画像は R2/S3 ではなく `<workspace>/images/` へローカルコピーされ、本文中の
-  // 参照は `./images/<identifier><ext>` という相対パスに解決される。
+  // 参照は `./images/<identifier>-<内容ハッシュ先頭16桁><ext>` という相対パスに解決される。
   // -------------------------------------------------------------------------
 
   describe('note (CLI mode via noet, createNotePublisher + renderNoteArticle) — design.md §5.7 local image copy', () => {
@@ -1368,10 +1369,27 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
     // Whiteboard Sketch の描画(`embedded_objects[0]`)の識別子・拡張子(`test/fixtures/
     // parser-output/json/all_notes_1.json` の "203" ノート参照)。`processNoteBody` の
     // ローカルコピー経路(`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)により
-    // `<workspace>/images/<identifier>.png` へコピーされ、本文の参照もこの相対パスに
-    // なるはず。
+    // `<workspace>/images/<identifier>-<内容ハッシュ先頭16桁>.png` へコピーされ、本文の
+    // 参照もこの相対パスになるはず(ハッシュ入りファイル名は PR #85 CodeRabbit レビュー:
+    // 画像バイトの差し替えを contentHash の変化として再配信判定に乗せるため)。
     const WHITEBOARD_IMAGE_IDENTIFIER = '88888888-8888-4888-8888-888888888888';
-    const WHITEBOARD_IMAGE_RELATIVE_REF = `./images/${WHITEBOARD_IMAGE_IDENTIFIER}.png`;
+    const WHITEBOARD_IMAGE_FIXTURE_PATH = join(
+      FIXTURE_ROOT,
+      'files',
+      'Accounts',
+      '11111111-1111-4111-8111-111111111111',
+      'FallbackImages',
+      WHITEBOARD_IMAGE_IDENTIFIER,
+      'AAAAAAAAAAAAAAAAAAAAAA==',
+      'FallbackImage.png',
+    );
+    const whiteboardImageFileName = (): string => {
+      const hash = createHash('sha256')
+        .update(readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH))
+        .digest('hex')
+        .slice(0, 16);
+      return `${WHITEBOARD_IMAGE_IDENTIFIER}-${hash}.png`;
+    };
 
     it('creates all 5 notes via noet, including the image note (Whiteboard Sketch) via a local image copy under workspace/images/, then is fully idempotent', async () => {
       const config = buildConfig();
@@ -1436,28 +1454,17 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       expect(Object.keys(onDisk1.assets)).toHaveLength(0);
       expect(uploader1.putObjectCalls).toHaveLength(0);
 
-      // 画像実体が `<workspace>/images/<identifier>.png` へコピーされている。
-      const copiedImagePath = join(workspace, 'images', `${WHITEBOARD_IMAGE_IDENTIFIER}.png`);
+      // 画像実体が `<workspace>/images/<identifier>-<内容ハッシュ>.png` へコピーされている。
+      const copiedImagePath = join(workspace, 'images', whiteboardImageFileName());
       expect(existsSync(copiedImagePath)).toBe(true);
-      const originalBytes = readFileSync(
-        join(
-          FIXTURE_ROOT,
-          'files',
-          'Accounts',
-          '11111111-1111-4111-8111-111111111111',
-          'FallbackImages',
-          WHITEBOARD_IMAGE_IDENTIFIER,
-          'AAAAAAAAAAAAAAAAAAAAAA==',
-          'FallbackImage.png',
-        ),
-      );
+      const originalBytes = readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH);
       expect(readFileSync(copiedImagePath)).toEqual(originalBytes);
 
-      // ワークスペースに書き出された記事 Markdown が `./images/<identifier>.png` という
-      // 相対パス参照を含む(noet 自身がこれを解決してアップロードする契約。モジュール
+      // ワークスペースに書き出された記事 Markdown が `./images/<identifier>-<内容ハッシュ>.png`
+      // という相対パス参照を含む(noet 自身がこれを解決してアップロードする契約。モジュール
       // 冒頭 JSDoc 参照)。
       const writtenArticle = readFileSync(join(workspace, `${WHITEBOARD_SKETCH_UUID}.md`), 'utf8');
-      expect(writtenArticle).toContain(WHITEBOARD_IMAGE_RELATIVE_REF);
+      expect(writtenArticle).toContain(`./images/${whiteboardImageFileName()}`);
 
       // --- run 2(冪等性)---------------------------------------------------------
       const parser2 = makeFixtureRunner();

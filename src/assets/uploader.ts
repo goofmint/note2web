@@ -452,9 +452,47 @@ export async function processNoteBody(
         );
       }
 
+      // `identifier` は parser JSON 由来(`data-apple-notes-zidentifier`)の外部入力であり、
+      // そのままファイル名に使うとパス区切り文字等で `images/` の外へ書き出されかねない。
+      // 実際の値は UUID(英数字とハイフン)なので、その文字集合だけを許可する
+      // (PR #85 CodeRabbit レビュー)。
+      if (!/^[A-Za-z0-9-]+$/.test(identifier)) {
+        throw new AssetUploadError(
+          `image attachment identifier "${identifier}" contains characters outside the expected ` +
+            'UUID alphabet (A-Z, a-z, 0-9, "-"); refusing to use it as a filename component',
+          { noteUuid, identifier },
+        );
+      }
+
+      let imageBytes: Buffer;
+      try {
+        imageBytes = await readFile(absolutePath);
+      } catch (error) {
+        throw new AssetUploadError(
+          `failed to read attachment file for identifier "${identifier}": ${absolutePath}`,
+          { noteUuid, identifier, cause: error },
+        );
+      }
+
+      // ファイル名に内容ハッシュ(先頭16桁)を含める(PR #85 CodeRabbit レビュー): 参照
+      // ファイル名がバイト内容に追随することで、同じ identifier のまま画像だけ差し替えた
+      // 場合も本文 Markdown(→ contentHash)が変わり、既存のスキップ判定のまま
+      // `noet update` による再配信が発動する。R2 経路がキーに内容ハッシュを使うのと同じ
+      // 性質を、ローカルコピー経路にも持たせるための措置。差し替え前の古いハッシュの
+      // ファイルは `images/` に残るが無害(下記の掃除しない方針と同じ)。
+      const imageHash = createHash('sha256').update(imageBytes).digest('hex').slice(0, 16);
       const imagesDir = join(noteWorkspace, 'images');
-      const destFileName = `${identifier}${lowerExt}`;
-      const destPath = join(imagesDir, destFileName);
+      const destFileName = `${identifier}-${imageHash}${lowerExt}`;
+      const destPath = resolve(imagesDir, destFileName);
+      // 封じ込めの防御的検証: 上の identifier 検証により通常は起こり得ないが、コピー先が
+      // `images/` の外を指していないことをパス解決後にも確認する(PR #85 CodeRabbit レビュー)。
+      if (!destPath.startsWith(resolve(imagesDir) + sep)) {
+        throw new AssetUploadError(
+          `internal error: resolved image copy destination "${destPath}" escapes the images ` +
+            `directory "${imagesDir}"`,
+          { noteUuid, identifier },
+        );
+      }
       try {
         await mkdir(imagesDir, { recursive: true });
         await copyFile(absolutePath, destPath);

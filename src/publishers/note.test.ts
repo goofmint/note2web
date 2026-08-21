@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderNoteArticle } from './note.js';
+import { NoteExternalImageError, renderNoteArticle } from './note.js';
 import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
 import { computeContentHash } from '../transform/frontmatter.js';
@@ -125,10 +125,12 @@ describe('renderNoteArticle tags', () => {
 // 画像(利用者決定 2026-08-21、モジュール冒頭 JSDoc「2. 画像」参照)。
 // ---------------------------------------------------------------------------
 //
-// `renderNoteArticle` 自身は画像の検出・拒否を一切行わない——`assets/uploader.ts` の
-// `processNoteBody` が事前にローカル相対パス(`./images/<identifier><ext>`)へ解決済みの
-// 本文を渡してくる前提のため、ここでは単にその本文をそのまま frontmatter に埋め込んで
-// 通過することだけを確認する。
+// `renderNoteArticle` は添付経由の画像を検出・拒否しない——`assets/uploader.ts` の
+// `processNoteBody` が事前にローカル相対パス(`./images/<identifier>-<内容ハッシュ><ext>`)へ
+// 解決済みの本文を渡してくる前提。唯一の追加検証は外部 URL(`http(s)://`)の画像参照
+// (添付を伴わない `<img src>` 由来)を `NoteExternalImageError` として拒否すること
+// (PR #85 CodeRabbit レビュー。noet が http(s) 参照をスキップし、note.com 上で
+// リテラル表示になってしまうため)。
 
 describe('renderNoteArticle with an already-resolved local image reference', () => {
   it('publishes normally: a "./images/<identifier><ext>" reference passes through unchanged', () => {
@@ -139,5 +141,23 @@ describe('renderNoteArticle with an already-resolved local image reference', () 
     expect(article.artifact).toContain(
       '![alt text](./images/88888888-8888-4888-8888-888888888888.png)',
     );
+  });
+
+  it.each(['https://example.com/a.png', 'http://example.com/a.png'])(
+    'throws NoteExternalImageError for an external-URL image reference (%s)',
+    (url) => {
+      const note = buildNote();
+      const markdown = `text\n\n![alt](${url})\n`;
+      expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+        NoteExternalImageError,
+      );
+    },
+  );
+
+  it('does not treat a plain external link (no "!") as an image reference', () => {
+    const note = buildNote();
+    const markdown = 'see [the docs](https://example.com/a.png) for details\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('[the docs](https://example.com/a.png)');
   });
 });

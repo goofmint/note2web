@@ -590,7 +590,7 @@ describe('AssetUploader', () => {
       rmSync(noteWorkspace, { recursive: true, force: true });
     });
 
-    it('(a) copies an image attachment into <workspace>/images/<identifier><ext> and rewrites the reference to a relative path, without touching R2', async () => {
+    it('(a) copies an image attachment into <workspace>/images/<identifier>-<contentHash16><ext> and rewrites the reference to a relative path, without touching R2', async () => {
       const bytes = writeAttachmentFile('sketch.png', 'note-local-image-bytes');
       const attachments: Attachment[] = [{ identifier: 'img-1', path: 'sketch.png' }];
       const markdown = `![alt](${makeAssetPlaceholder('img-1')})`;
@@ -610,17 +610,75 @@ describe('AssetUploader', () => {
         client,
       });
 
-      const copiedPath = join(noteWorkspace, 'images', 'img-1.png');
+      // ファイル名には内容ハッシュの先頭16桁が入る(PR #85 CodeRabbit レビュー: 画像
+      // バイトの差し替えが本文 Markdown → contentHash の変化として再配信判定に乗るため)。
+      const expectedName = `img-1-${sha256Hex(bytes).slice(0, 16)}.png`;
+      const copiedPath = join(noteWorkspace, 'images', expectedName);
       expect(existsSync(copiedPath)).toBe(true);
       expect(readFileSync(copiedPath)).toEqual(bytes);
 
-      expect(result.markdown).toBe('![alt](./images/img-1.png)');
+      expect(result.markdown).toBe(`![alt](./images/${expectedName})`);
       expect(result.markdown).not.toContain('note2web-asset://');
 
       // R2 へは一切アップロードされず、StateStore のアセット状態にも記録されない
       // (`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)。
       expect(client.putObject).not.toHaveBeenCalled();
       expect(existsSync(statePath)).toBe(false);
+    });
+
+    it('(a2) the relative reference changes when the image bytes change under the same identifier (re-publish detection)', async () => {
+      const attachments: Attachment[] = [{ identifier: 'img-1', path: 'sketch.png' }];
+      const markdown = `![alt](${makeAssetPlaceholder('img-1')})`;
+      const store = await freshStore();
+      const client = makeFakeClient();
+      const run = () =>
+        processNoteBody({
+          markdown,
+          attachments,
+          exportDir,
+          noteUuid: NOTE_UUID_A,
+          service: 'note',
+          assets: ASSETS_CONFIG,
+          noteWorkspace,
+          state: store,
+          client,
+        });
+
+      writeAttachmentFile('sketch.png', 'first-image-bytes');
+      const first = await run();
+      writeAttachmentFile('sketch.png', 'second-image-bytes');
+      const second = await run();
+
+      // 同じ identifier のまま画像だけ差し替えると本文の参照ファイル名が変わる
+      // → 記事の contentHash が変わり、既存のスキップ判定のまま再配信が発動する。
+      expect(first.markdown).not.toBe(second.markdown);
+    });
+
+    it('(a3) rejects an identifier containing path separators before writing anything (PR #85 review)', async () => {
+      writeAttachmentFile('sketch.png', 'traversal-bytes');
+      const evilIdentifier = '../evil';
+      const attachments: Attachment[] = [{ identifier: evilIdentifier, path: 'sketch.png' }];
+      const markdown = `![alt](${makeAssetPlaceholder(evilIdentifier)})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      await expect(
+        processNoteBody({
+          markdown,
+          attachments,
+          exportDir,
+          noteUuid: NOTE_UUID_A,
+          service: 'note',
+          assets: ASSETS_CONFIG,
+          noteWorkspace,
+          state: store,
+          client,
+        }),
+      ).rejects.toThrow(/UUID alphabet/);
+      // ワークスペースの外にも中にも何も書かれていない。
+      expect(existsSync(join(noteWorkspace, 'images'))).toBe(false);
+      expect(existsSync(join(noteWorkspace, '..', 'evil.png'))).toBe(false);
     });
 
     it('(b) still uploads a non-image attachment to R2 and replaces it with the public URL (unchanged behavior)', async () => {

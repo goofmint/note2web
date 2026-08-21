@@ -145,6 +145,38 @@ function stripLeadingHash(tag: string): string {
 }
 
 /**
+ * 外部 URL を指す Markdown 画像参照(`![alt](http(s)://…)`)のパターン
+ * (`renderNoteArticle` の JSDoc 参照)。添付経由の画像は `processNoteBody` が
+ * `./images/...` のローカル相対パスへ解決済みなので、ここに掛かるのは添付を伴わない
+ * `<img src="外部URL">` 由来の参照だけ。
+ */
+const EXTERNAL_IMAGE_REFERENCE_PATTERN = /!\[[^\]]*\]\(\s*https?:\/\//;
+
+/**
+ * 本文に外部 URL の画像参照が含まれていることを表す(note.com の ProseMirror は外部 URL の
+ * 画像記法を画像として解釈せず、noet も `http(s)://` 参照をアップロード対象からスキップする
+ * ため、公開するとリテラルなテキストとして表示されてしまう。design.md §5.7「画像」節、
+ * PR #85 CodeRabbit レビュー)。`src/sync.ts` の `processNote` がこの例外を捕捉し、
+ * 当該ノートのみ `'failed'` として隔離する(NFR-06)。
+ */
+export class NoteExternalImageError extends Error {
+  /** 検証に失敗したノートの UUID。 */
+  readonly noteUuid: string;
+
+  constructor(noteUuid: string) {
+    super(
+      `note.com cannot render images referenced by external URL (design.md §5.7): note.com's ` +
+        `ProseMirror editor shows markdown image syntax with an http(s) URL as literal text, and ` +
+        `noet skips http(s) references when uploading images; note "${noteUuid}" contains at ` +
+        'least one external-URL image reference (likely an <img src="…"> without an Apple Notes ' +
+        'attachment) — remove the image, or publish this note to a different service instead',
+    );
+    this.name = 'NoteExternalImageError';
+    this.noteUuid = noteUuid;
+  }
+}
+
+/**
  * note.com 向け `NoteRenderer`(design.md §5.7 NotePublisher 節、§13-4、T-25)。
  * `config` は参照しない——note.com のファイルパスは常に `<uuid>.md`(Publisher が
  * `config.note.workspace` からの相対パスとして解決する)固定で、frontmatter の内容も
@@ -152,16 +184,25 @@ function stripLeadingHash(tag: string): string {
  * しない——note.com の frontmatter は ID の書き戻し欄を持たない(モジュール冒頭 JSDoc
  * 「記事 ID(key)の取得」参照。ID の追跡は Publisher 側の状態 JSON `remoteId` のみで行う)。
  *
- * 画像を検出・拒否する処理はここには無い(モジュール冒頭 JSDoc「2. 画像」参照)。
- * `markdown` は `assets/uploader.ts` の `processNoteBody` を経由済みで、note.com 向けの
- * 画像参照は既に `./images/<identifier><ext>` というローカル相対パスに解決されている
- * (未対応の拡張子はその段階で `AssetUploadError` として弾かれている)ため、
- * `renderNoteArticle` はそのまま frontmatter を組み立てて返すだけでよい。
+ * 画像について(モジュール冒頭 JSDoc「2. 画像」参照): `markdown` は `assets/uploader.ts` の
+ * `processNoteBody` を経由済みで、note.com 向けの添付画像参照は既に
+ * `./images/<identifier>-<内容ハッシュ><ext>` というローカル相対パスに解決されている
+ * (未対応の拡張子はその段階で `AssetUploadError` として弾かれている)。ここで追加検証
+ * するのは**外部 URL(`http(s)://`)の画像参照**のみ——添付経由ではない `<img src="外部URL">`
+ * が本文にあった場合、変換パイプラインはそれを `![](https://…)` として素通しするが、noet の
+ * `extract_image_references` は `http(s)://` 参照をアップロード対象からスキップするため、
+ * note.com 上ではリテラルなテキストとして表示されてしまう(design.md §5.7「画像」節)。
+ * 静かに壊れた記事を公開しないよう、`NoteExternalImageError` として当該ノートを失敗させる
+ * (PR #85 CodeRabbit レビュー)。
  */
 export const renderNoteArticle: NoteRenderer = ({
   note,
   markdown,
 }: RenderNoteInput): RenderedArticle => {
+  if (EXTERNAL_IMAGE_REFERENCE_PATTERN.test(markdown)) {
+    throw new NoteExternalImageError(note.uuid);
+  }
+
   const entries: FrontmatterEntry[] = [
     [NOTE_FRONTMATTER_KEY_ORDER[0], note.title],
     [NOTE_FRONTMATTER_KEY_ORDER[1], note.tags.map(stripLeadingHash)],
