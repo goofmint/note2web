@@ -108,6 +108,35 @@ describe('note session cookie validation (buildNoteHeaders, via getCurrentUser/c
     expect(requests).toHaveLength(0);
   });
 
+  it.each([
+    ['an empty value', ''],
+    [
+      'a value that is only the "_note_session_v5=" name/"=" prefix (empty after stripping)',
+      '_note_session_v5=',
+    ],
+    [
+      'a value containing the Cookie delimiter ";" (multi-cookie paste)',
+      'actual-value; other_cookie=x',
+    ],
+  ])(
+    'throws a clear configuration error for %s, without making any HTTP call',
+    async (_label, cookie) => {
+      const { httpClient, requests } = makeCapturingHttpClient({ status: 200, body: '{}' });
+
+      let thrown: unknown;
+      try {
+        await createDraft(httpClient, cookie);
+        expect.unreachable('createDraft should have thrown');
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(/session cookie value/);
+      expect((thrown as Error).message).not.toMatch(/connection-layer failure/);
+      expect(requests).toHaveLength(0);
+    },
+  );
+
   it('never includes the cookie value in the control-character error message', async () => {
     const { httpClient } = makeCapturingHttpClient({ status: 200, body: '{}' });
     const cookieValue = 'super-secret-cookie-value-should-never-leak';

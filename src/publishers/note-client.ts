@@ -175,21 +175,26 @@ const NOTE_SESSION_COOKIE_CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
  *   1. 値が `_note_session_v5=` で始まる場合、そのプレフィックスを取り除く(cookie の
  *      「名前=値」のペアをまるごとコピーしてしまった、というありがちな貼り付けミスへの
  *      親切な対応)。
- *   2. 取り除いた後の値に制御文字が残っている場合、値そのものを一切含まない明確な設定エラー
+ *   2. 取り除いた後の値が次のいずれかに該当する場合、値そのものを一切含まない明確な設定エラー
  *      を投げる(接続系エラーとは分類しない——`sendNoteRequest` の呼び出し前に検証するため、
- *      HTTP リクエスト自体が発生しない)。
- * 戻り値は `_note_session_v5=` の名前・`=`・末尾の改行を含まない、cookie の値のみ。
+ *      HTTP リクエスト自体が発生しない):
+ *        - 空(cookie 名だけをコピーした等、認証に使えない値)
+ *        - Cookie 区切り文字 `;` を含む(`value; other=x` のような複数 cookie の貼り付けを
+ *          そのまま通すと、意図しない cookie を note.com へ送信してしまうため)
+ *        - 制御文字を含む
+ * 戻り値は `_note_session_v5=` の名前・`=`・末尾の改行を含まない、単一 cookie の値のみ。
  */
 function sanitizeNoteSessionCookieValue(cookie: string): string {
   const value = cookie.startsWith(NOTE_SESSION_COOKIE_NAME_PREFIX)
     ? cookie.slice(NOTE_SESSION_COOKIE_NAME_PREFIX.length)
     : cookie;
-  if (NOTE_SESSION_COOKIE_CONTROL_CHAR_PATTERN.test(value)) {
+  if (value === '' || value.includes(';') || NOTE_SESSION_COOKIE_CONTROL_CHAR_PATTERN.test(value)) {
     throw new Error(
-      'NoteClient: the note.com session cookie value (note.session_cookie_env) contains control ' +
-        'characters (e.g. a trailing newline left over from copy-paste); copy only the cookie ' +
-        'VALUE — without the "_note_session_v5=" name/"=" prefix and without a trailing newline — ' +
-        'from DevTools → Application → Cookies.',
+      'NoteClient: the note.com session cookie value (note.session_cookie_env) is empty, ' +
+        'contains a Cookie delimiter (";"), or contains control characters (e.g. a trailing ' +
+        'newline left over from copy-paste); copy only the VALUE of the single ' +
+        '"_note_session_v5" cookie — without the name/"=" prefix, without other cookies, and ' +
+        'without a trailing newline — from DevTools → Application → Cookies.',
     );
   }
   return value;
