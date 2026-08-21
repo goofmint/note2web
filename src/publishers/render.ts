@@ -76,6 +76,14 @@ export interface RenderNoteInput {
    * 型としては任意のままにする。
    */
   logger?: Logger;
+  /**
+   * Exporter が返した一時出力ディレクトリ(issue #86 Phase 4 拡張)。`renderNoteArticle`
+   * (`src/publishers/note.ts`)専用——`RenderedArticle.assetSourceDir` へそのまま渡し、
+   * note.com 向けの画像アップロード(Publisher 側)がここを基準に添付ファイルの実体を
+   * 解決する(`src/publishers/types.ts` の `RenderedArticle.assetSourceDir` 参照)。他の
+   * Renderer は使わない。
+   */
+  exportDir?: string;
 }
 
 /** sync フローに注入する Renderer の関数シグネチャ。 */

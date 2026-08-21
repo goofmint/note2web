@@ -16,8 +16,8 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
   - Hugo（Git リポジトリ出力）
   - Jekyll（Git リポジトリ出力）
   - Qiita（Qiita API v2 を直接呼び出し。issue #82: 当初は外部 CLI `@qiita/qiita-cli` を想定していたが、`publish` が投稿前に利用者の全記事を無条件同期しタイムアウトする問題のため API 直叩きへ変更）
-  - dev.to（外部 CLI `devto-cli`、または Forem API v1）
-  - note.com（外部 CLI `noet`）
+  - dev.to（Forem API v1 を直接呼び出し）
+  - note.com（非公式 API を直接呼び出し。issue #86: 当初は外部 CLI `noet` を想定していたが、`noet` が無人サブプロセス実行と相容れないブラウザ拡張機能連携アーキテクチャへ移行していたため、非公式 API 直叩きへ変更)
   - はてなブログ（はてなブログ AtomPub）
 - 変換後コンテンツのハッシュ値に基づく冪等な再配信判定
 - 設定 YAML・状態 JSON の読み書き
@@ -65,13 +65,13 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 - **FR-11**: 表は Markdown の表に変換する。
 - **FR-12**: チェックリストは Markdown のチェックリストに変換する。
 - **FR-13**: 手書きは画像化し、アセットとして扱う。
-- **FR-14**: 添付バイナリは R2 / S3 にアップロードし、本文中の参照をアップロード先の URL に差し替える。**例外(note.com)**: `service: note` の対応形式画像(jpg/jpeg/png/gif/webp)は R2 / S3 へ送らず、`noet` ワークスペースの `images/` へコピーして本文参照をローカル相対パスに差し替える(`noet` 自身が note.com へアップロードするため。design.md §5.7「画像」節)。note.com の非画像添付、および他サービスの画像は従来どおり R2 / S3 を使う。
+- **FR-14**: 添付バイナリは R2 / S3 にアップロードし、本文中の参照をアップロード先の URL に差し替える。**例外(note.com)**: `service: note` の対応形式画像(jpg/jpeg/png/gif/webp)は R2 / S3 へ送らず、note.com 自身の presigned アップロード API(`POST /api/v3/images/upload/presigned_post` → S3 マルチパート POST)へ配信時点で直接アップロードする(issue #86。design.md §5.7 NotePublisher 節)。本文中の画像プレースホルダはアセット解決段階(`assets/uploader.ts`)では未解決のまま残り、Publisher が本文 HTML への変換時に `<figure><img></figure>` へ解決する。note.com の非画像添付、および他サービスの画像は従来どおり R2 / S3 を使う。
 
 ### 冪等性・状態管理
 
 - **FR-15**: 再配信の要否は、変換後の Markdown + frontmatter のコンテンツハッシュのみで判定する。ノートの更新日時は判定に使わない。
 - **FR-16**: 状態は JSON で保持する。状態ファイルは設定ファイルごとに独立させる。
-- **FR-17**: アセットは content hash をキーにしたパスに配置し、アップロード済みかどうかは状態 JSON で判定する。アップロード済みのアセットは再アップロードしない。**例外(note.com)**: FR-14 の例外に該当するローカル画像コピーは状態 JSON に記録しない(ファイル名に内容ハッシュを含めて実行のたびに決定的へ再コピーする使い捨てであり、アップロードの主体は `noet` のため)。
+- **FR-17**: アセットは content hash をキーにしたパスに配置し、アップロード済みかどうかは状態 JSON で判定する。アップロード済みのアセットは再アップロードしない。**例外(note.com)**: FR-14 の例外に該当する note.com 向け画像アップロードは状態 JSON に記録しない(note.com の presigned API へ配信のたびに直接アップロードする使い捨ての操作であり、R2/S3 の重複排除の対象外)。この結果生じる制約として、画像バイトだけを差し替え、本文・タイトル・タグが不変の場合、FR-15 の skip 判定により再配信されず、note.com 側には旧画像が残ったままになる。回避策として、状態 JSON の当該ノートの `contentHash` を手動で変更する(または本文を微修正する)ことで強制的に再配信させること(design.md §5.7 NotePublisher 節)。
 - **FR-18**: 公開後にノートが削除・移動されても、サービス側の記事はそのまま残す。孤児エントリの検出・報告は行わない。
 
 ### Git リポジトリ出力モード（Zenn / Hugo / Jekyll）
@@ -86,23 +86,23 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 ### API / 外部 CLI 配信モード
 
 - **FR-25**: Qiita へは Qiita API v2 を直接呼び出して配信する（issue #82。新規は `POST /api/v2/items`、更新は `PATCH /api/v2/items/{item_id}`。認証は `Authorization: Bearer <トークン>` ヘッダ）。
-- **FR-26**: dev.to へは外部 CLI `devto-cli`、または Forem API v1 で配信する。
-- **FR-27**: note.com へは外部 CLI `noet` を呼び出して配信する。
+- **FR-26**: dev.to へは Forem API v1 を直接呼び出して配信する。
+- **FR-27**: note.com へは非公式 API(「note非公式APIを徹底調査|2026年版エンドポイント一覧完全版」https://note.com/marie_222/n/n6a10366298b0 に基づく wire contract)を直接叩いて配信する(issue #86。外部 CLI `noet` への依存は撤去済み)。認証は note.com のセッション cookie(`_note_session_v5`。設定 `note.session_cookie_env` が指す環境変数)。
 - **FR-28**: はてなブログへは、はてなブログ AtomPub で配信する。
 
 ### 設定・実行
 
 - **FR-29**: 設定ファイルはサービスごとに個別の YAML とする。1つの設定ファイル = 1つの配信先サービス。
 - **FR-30**: API キー等の秘匿情報は YAML に直書きさせず、環境変数を参照する形式にする。keychain は使わない。
-- **FR-31**: cron / launchd からの定期実行を前提とし、「エクスポート → 変換 → 公開」の一連の処理を対話なしで完遂する。**例外(note.com)**: `noet` は同一マシン上でログイン済みの実 Chrome ブラウザ + noet 拡張機能が稼働していることを前提とするため、note.com のみ完全な無人実行は適用できない。前提を満たさない実行では `noet` 呼び出しが失敗し、当該ノートは状態を更新せず `failed` として隔離され(他ノートの処理は継続)、次回実行で再試行される(design.md §5.7 NotePublisher)。
+- **FR-31**: cron / launchd からの定期実行を前提とし、「エクスポート → 変換 → 公開」の一連の処理を対話なしで完遂する。**note.com の例外は issue #86 で撤廃した**: 非公式 API を直接叩く方式へ移行したことで、セッション cookie が有効な限り note.com も他サービスと同じく完全な無人実行が可能になった。cookie が失効している(または未設定の)実行では該当ノートの配信のみが `failed` として隔離され(他ノートの処理は継続)、次回実行で再試行される——利用者がブラウザから cookie を再取得して env ファイルへ設定するまでは失敗し続ける点のみが他サービスとの違いとして残る(design.md §5.7 NotePublisher)。
 
 ## 5. 非機能要件
 
 - **NFR-01（ログ）**: 「何を（どのノートを）・いつ・どのサービスに配信し、成否がどうだったか」が後から追えるログを出力する。スキップ（ハッシュ一致による再配信不要）もログから判別できること。フォーマット・出力先は未決（「10. 未決事項」参照）。
 - **NFR-02（実行環境）**: macOS 上で動作する。Apple Notes のデータにローカルでアクセスできる環境を前提とする。
-- **NFR-03（無人実行）**: 実行中にパスワード入力・確認プロンプト等の対話を要求しない。認証情報はすべて環境変数から取得する。note.com のみ FR-31 の例外どおり、ログイン済みの実ブラウザ + noet 拡張機能という環境前提があり、認証情報を環境変数で渡す手段が存在しない(`noet` の構造上の制約。design.md §13-4)。
+- **NFR-03（無人実行）**: 実行中にパスワード入力・確認プロンプト等の対話を要求しない。認証情報はすべて環境変数から取得する。note.com も他サービスと同様、セッション cookie(`note.session_cookie_env` が指す環境変数)を通じて認証情報を渡す(issue #86。旧 noet 依存時代に存在した「環境変数で認証情報を渡す手段が無い」という構造的制約は解消済み)。
 - **NFR-04（権限）**: Apple Notes のデータおよび出力先 Git リポジトリへの読み書きに必要な権限は、事前設定を前提とする。必要な権限・事前設定はドキュメントに明記する。
-- **NFR-05（依存関係）**: 外部 CLI（`gh`、`devto-cli`、`noet`）および `apple_cloud_notes_parser` の実行環境（Ruby）が必要。Qiita・dev.to は外部 CLI を使わず HTTP API を直接呼び出す（issue #82 以降、Qiita は API 直叩きへ変更）。実行時に必要な依存が欠けている場合は、明確なエラーメッセージを出して失敗する。
+- **NFR-05（依存関係）**: 外部 CLI（`gh`）および `apple_cloud_notes_parser` の実行環境（Ruby）が必要。Qiita・dev.to・note.com は外部 CLI を使わず HTTP API を直接呼び出す（issue #82 で Qiita、issue #86 で note.com がそれぞれ API 直叩きへ変更。`noet` への依存は撤去済み）。実行時に必要な依存が欠けている場合は、明確なエラーメッセージを出して失敗する。
 - **NFR-06（エラー時の挙動）**: あるノートの配信に失敗しても状態 JSON を「配信済み」に更新しない。次回実行時に再試行される。
 - **NFR-07（ライセンス）**: OSS として公開する。依存ライブラリ・CLI のライセンスと矛盾しないこと。
 
@@ -113,8 +113,8 @@ Apple Notes（macOS のメモアプリ）を Single Source of Truth とし、各
 | `threeplanetssoftware/apple_cloud_notes_parser` | Ruby ライブラリ（MIT） | Apple Notes の読み取り・エクスポート | 表・チェックリスト・手書きの出力形式は未確認（未決事項） |
 | `gh` | 外部 CLI | PR の作成・マージ | — |
 | Qiita API v2 | 公式 API | Qiita への配信(issue #82: 外部 CLI `@qiita/qiita-cli` から API 直叩きへ変更。`publish` コマンドが投稿前に利用者の全記事を無条件同期しタイムアウトする問題を避けるため) | タグは1〜5個必須。半角スペースを含むタグは送信時に分割され、個数上限を超えて 403 になる。画像アップロード API は存在しない |
-| `devto-cli` / Forem API v1 | 外部 CLI / API | dev.to への配信 | タグは最大4個。`canonical_url` を指定できる |
-| `noet` | 外部 CLI（Rust製、MIT） | note.com への配信 | note.com に公式 API は存在しない。現行の `noet` は非公式 API も直接は呼ばず、ローカルの Chrome 拡張機能と WebSocket（`ws://127.0.0.1:9876`）で通信し、拡張機能側がログイン済みの実ブラウザ上で DOM 操作を行う構成（design.md §13-4）。画像は `noet` 自身のアップロード機能（ローカルファイル参照。対応形式 jpg/jpeg/png/gif/webp のみ）経由で配信する（design.md §5.7「画像」節、利用者決定 2026-08-21） |
+| Forem API v1 | 公式 API | dev.to への配信 | タグは最大4個。`canonical_url` を指定できる |
+| note.com 非公式 API | 非公式 API（仕様変更・遮断のリスクあり） | note.com への配信(issue #86。旧外部 CLI `noet` は撤去済み) | note.com に公式 API は存在しない。「note非公式APIを徹底調査\|2026年版エンドポイント一覧完全版」（https://note.com/marie_222/n/n6a10366298b0）の調査結果を wire contract として直接叩く。認証はブラウザから手動取得したセッション cookie（`_note_session_v5`）。非公式のため予告なく仕様変更・遮断されるおそれがあり、低頻度の個人利用にとどめること（design.md §5.7 NotePublisher 節） |
 | はてなブログ AtomPub | 公式 API | はてなブログへの配信 | 認証は WSSE / Basic / OAuth に対応。Markdown 形式で入稿できるかは未確認（未決事項） |
 | Cloudflare R2 / Amazon S3 | オブジェクトストレージ | アセットのアップロード先 | — |
 | Zenn（Git 連携） | Git リポジトリ出力 | Zenn への配信（投稿 API が存在しないため、これ以外の方法はない） | slug は `a-z0-9`・ハイフン・アンダースコアの12〜50字。一度公開されると変更できない。type は `tech` または `idea` のみ |
@@ -176,7 +176,6 @@ API キー等の秘匿情報は値を直書きせず、環境変数を参照す�
 - ログの出力形式（テキスト / JSON 等）と出力先（標準出力 / ファイル等）
 - 設定ファイルと状態 JSON のデフォルトの配置場所
 - 本体の実装言語（`apple_cloud_notes_parser` が Ruby であることを踏まえて検討）
-- dev.to の配信方式として `devto-cli` と Forem API v1 のどちらを採用するか
 - はてなブログ AtomPub の認証方式（WSSE / Basic / OAuth）のうちどれを採用するか
 - タグがサービス側の制約を満たさない場合の挙動（Qiita でタグが0個または6個以上、dev.to で5個以上のノートをどう扱うか）
 - コンテンツハッシュのアルゴリズム

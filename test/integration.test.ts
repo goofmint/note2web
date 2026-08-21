@@ -63,11 +63,10 @@
  * ことをこのファイルの note.com セクションで確認する。
  */
 
-import { createHash } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../src/config.js';
@@ -99,7 +98,8 @@ import {
   type HatenaHttpRequest,
   type HatenaHttpResponse,
 } from '../src/publishers/hatena.js';
-import { createNotePublisher, type NoteRunner } from '../src/publishers/note.js';
+import { createNotePublisher } from '../src/publishers/note.js';
+import { NOTE_API_BASE_URL, type NoteHttpClient } from '../src/publishers/note-client.js';
 import type { Publisher } from '../src/publishers/types.js';
 import type { NoteRenderer } from '../src/publishers/render.js';
 import type { StateFile } from '../src/state/store.js';
@@ -1318,91 +1318,96 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   // 参照は `./images/<identifier>-<内容ハッシュ先頭16桁><ext>` という相対パスに解決される。
   // -------------------------------------------------------------------------
 
-  describe('note (CLI mode via noet, createNotePublisher + renderNoteArticle) — design.md §5.7 local image copy', () => {
-    let workspace: string;
-
-    beforeEach(async () => {
-      workspace = await mkdtemp(join(tmpdir(), 'note2web-it-note-workspace-'));
-    });
-    afterEach(async () => {
-      await rm(workspace, { recursive: true, force: true });
-    });
-
+  describe('note (issue #86: note.com 非公式 API 直叩き, createNotePublisher + renderNoteArticle)', () => {
     function buildConfig(): Config {
       return {
         service: 'note',
         timezone: 'Asia/Tokyo',
         source: { folders: ALL_FOLDERS },
         assets: ASSETS_CONFIG,
-        note: { workspace },
+        note: { session_cookie_env: 'NOTE_SESSION_COOKIE' },
       };
     }
+
+    const NOTE_S3_ACTION_URL = 'https://s3.example.com/note-upload-bucket';
+
+    interface RecordedNoteCall {
+      method: NoteHttpRequestMethod;
+      url: string;
+      isFormData: boolean;
+    }
+
+    type NoteHttpRequestMethod = 'GET' | 'POST' | 'PUT';
 
     /**
-     * `noet list`(空)/`noet create <file>`(note.com 記事 URL を stdout に返す)を模倣する
-     * fake runner(モジュール冒頭 JSDoc・`src/publishers/note.ts` の `NOTE_URL_PATTERN` 参照)。
-     * `noet update` はこのテストでは呼ばれない(全て初回配信のため)。
+     * note.com 非公式 API を模倣する fake `NoteHttpClient`(`test/publishers/note.test.ts` の
+     * `makeDefaultHttpClient` と同じ形。draft の id/key、presigned の画像 key は呼び出しごとに
+     * 連番で発行する)。
      */
-    function makeNoetRunner(): { runner: NoteRunner; calls: RunSubprocessOptions[] } {
-      const calls: RunSubprocessOptions[] = [];
-      const runner: NoteRunner = async (options: RunSubprocessOptions) => {
-        calls.push(options);
-        if (options.args[0] === 'list') {
-          return { status: 'success', exitCode: 0, signal: null, stdout: '', stderr: '' };
+    function makeNoteHttpClient(): { client: NoteHttpClient; calls: RecordedNoteCall[] } {
+      const calls: RecordedNoteCall[] = [];
+      let nextDraftNum = 1;
+      let nextImageNum = 1;
+      const client: NoteHttpClient = async (request) => {
+        calls.push({
+          method: request.method,
+          url: request.url,
+          isFormData: typeof request.body !== 'string' && request.body !== undefined,
+        });
+        if (
+          request.method === 'GET' &&
+          request.url === `${NOTE_API_BASE_URL}/api/v2/current_user`
+        ) {
+          return { status: 200, body: JSON.stringify({ data: { urlname: 'example' } }) };
         }
-        if (options.args[0] === 'create') {
-          const filePath = options.args[1] ?? '';
-          const key = basename(filePath, '.md');
+        if (request.method === 'POST' && request.url === `${NOTE_API_BASE_URL}/api/v1/text_notes`) {
+          const id = String(1000 + nextDraftNum);
+          const key = `note-key-${String(nextDraftNum)}`;
+          nextDraftNum += 1;
+          return { status: 200, body: JSON.stringify({ id, key }) };
+        }
+        if (
+          request.method === 'PUT' &&
+          request.url.startsWith(`${NOTE_API_BASE_URL}/api/v1/text_notes/`)
+        ) {
+          return { status: 200, body: JSON.stringify({ status: 'published' }) };
+        }
+        if (
+          request.method === 'POST' &&
+          request.url === `${NOTE_API_BASE_URL}/api/v3/images/upload/presigned_post`
+        ) {
+          const key = `img/uploaded-${String(nextImageNum)}.png`;
+          nextImageNum += 1;
           return {
-            status: 'success',
-            exitCode: 0,
-            signal: null,
-            stdout: `https://note.com/example/n/${String(key)}\n`,
-            stderr: '',
+            status: 200,
+            body: JSON.stringify({
+              data: {
+                action: NOTE_S3_ACTION_URL,
+                post: { key, 'x-amz-security-token': 'security-token-value' },
+              },
+            }),
           };
         }
-        return { status: 'success', exitCode: 0, signal: null, stdout: '', stderr: '' };
+        if (request.method === 'POST' && request.url === NOTE_S3_ACTION_URL) {
+          return { status: 204, body: '' };
+        }
+        throw new Error(`test setup: unexpected note.com request ${request.method} ${request.url}`);
       };
-      return { runner, calls };
+      return { client, calls };
     }
 
-    // Whiteboard Sketch の描画(`embedded_objects[0]`)の識別子・拡張子(`test/fixtures/
-    // parser-output/json/all_notes_1.json` の "203" ノート参照)。`processNoteBody` の
-    // ローカルコピー経路(`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)により
-    // `<workspace>/images/<identifier>-<内容ハッシュ先頭16桁>.png` へコピーされ、本文の
-    // 参照もこの相対パスになるはず(ハッシュ入りファイル名は PR #85 CodeRabbit レビュー:
-    // 画像バイトの差し替えを contentHash の変化として再配信判定に乗せるため)。
-    const WHITEBOARD_IMAGE_IDENTIFIER = '88888888-8888-4888-8888-888888888888';
-    const WHITEBOARD_IMAGE_FIXTURE_PATH = join(
-      FIXTURE_ROOT,
-      'files',
-      'Accounts',
-      '11111111-1111-4111-8111-111111111111',
-      'FallbackImages',
-      WHITEBOARD_IMAGE_IDENTIFIER,
-      'AAAAAAAAAAAAAAAAAAAAAA==',
-      'FallbackImage.png',
-    );
-    const whiteboardImageFileName = (): string => {
-      const hash = createHash('sha256')
-        .update(readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH))
-        .digest('hex')
-        .slice(0, 16);
-      return `${WHITEBOARD_IMAGE_IDENTIFIER}-${hash}.png`;
-    };
-
-    it('creates all 5 notes via noet, including the image note (Whiteboard Sketch) via a local image copy under workspace/images/, then is fully idempotent', async () => {
+    it('creates all 5 notes via the note.com API, including the image note (Whiteboard Sketch) via presigned upload, then is fully idempotent (zero HTTP calls on the unchanged second run)', async () => {
       const config = buildConfig();
 
       // --- run 1 ---------------------------------------------------------------
       const parser1 = makeFixtureRunner();
-      const noet1 = makeNoetRunner();
+      const noteApi1 = makeNoteHttpClient();
       const { logger: logger1, events: events1 } = createFakeLogger();
       const publisher1 = createNotePublisher({
         config,
-        runner: noet1.runner,
+        httpClient: noteApi1.client,
         logger: logger1,
-        env: { NOET_PATH: '/opt/tools/noet' },
+        env: { NOTE_SESSION_COOKIE: 'fake-session-cookie-value' },
       });
       const uploader1 = createFakeUploaderClient();
       const renderNote = resolveRenderer('note');
@@ -1420,9 +1425,8 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
         }),
       });
 
-      // 利用者決定(2026-08-21、design.md §5.7「画像」節): 画像ノート(Whiteboard Sketch)
-      // も noet 自身の画像アップロード機能(ローカル相対パス経由)で created になり、
-      // 5件全てが成功する。
+      // note.com 非公式 API を直叩きするため(issue #86)、noet 時代のような認証前提の構造的
+      // 制約は無く、画像ノート(Whiteboard Sketch)を含む5件全てが created になる。
       expect(result1).toMatchObject({
         exitCode: SUCCESS,
         published: 5,
@@ -1433,48 +1437,42 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
         expect(events1).toContain(`note_published:${uuid}:created`);
       }
 
-      // Whiteboard Sketch も他ノートと同じく `noet create` が呼ばれている。
-      const createCalls = noet1.calls.filter((c) => c.args[0] === 'create');
-      expect(createCalls).toHaveLength(5);
-      expect(createCalls.some((c) => c.args[1]?.includes(WHITEBOARD_SKETCH_UUID) === true)).toBe(
-        true,
-      );
-      // `noet list`(0件確定)が run 内で1回だけ実行され、以後の照合はキャッシュを使う
-      // (`ensureListFetched` の per-run キャッシュ。モジュール冒頭 JSDoc「3. 記事一覧の完全性」)。
-      expect(noet1.calls.filter((c) => c.args[0] === 'list')).toHaveLength(1);
+      // 5件それぞれについて draft 予約(POST)→ 公開(PUT)が1組ずつ発行されている。
+      expect(
+        noteApi1.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/text_notes')),
+      ).toHaveLength(5);
+      expect(
+        noteApi1.calls.filter((c) => c.method === 'PUT' && c.url.includes('/text_notes/')),
+      ).toHaveLength(5);
+      // urlname(current_user)は Publisher インスタンスごとに1回だけ(run 内5ノート分の
+      // publish() が直列化され、最初の1回だけ取得・以後キャッシュされる)。
+      expect(noteApi1.calls.filter((c) => c.url.endsWith('/current_user'))).toHaveLength(1);
+      // Whiteboard Sketch の1枚だけが presigned アップロード経路を通る(他4ノートは画像無し)。
+      expect(noteApi1.calls.filter((c) => c.url.includes('presigned_post'))).toHaveLength(1);
+      const s3Call = noteApi1.calls.find((c) => c.url === NOTE_S3_ACTION_URL);
+      expect(s3Call).toBeDefined();
+      expect(s3Call?.isFormData).toBe(true);
 
       const onDisk1 = readStateFile(statePath);
       for (const uuid of ALL_UUIDS) {
-        expect(onDisk1.notes[uuid]?.remoteId).toMatch(/^[A-Za-z0-9_-]+$/);
-        expect(onDisk1.notes[uuid]?.url).toMatch(/^https:\/\/note\.com\/example\/n\//);
+        expect(onDisk1.notes[uuid]?.remoteId).toMatch(/^\d+$/);
+        expect(onDisk1.notes[uuid]?.url).toMatch(/^https:\/\/note\.com\/example\/n\/note-key-\d+$/);
       }
-      // note.com 向けの画像はローカルコピー経路を通るため R2/S3 へは一切アップロードされず、
-      // `StateStore` のアセット状態にも記録されない(`assets/uploader.ts` 冒頭 JSDoc
-      // 「note.com 向けの例外」)。
+      // note.com 向けの画像は note.com 自身の presigned アップロード API へ直接送るため、
+      // R2/S3(`UploaderClient`)へは一切アップロードされず、`StateStore` のアセット状態にも
+      // 記録されない(`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)。
       expect(Object.keys(onDisk1.assets)).toHaveLength(0);
       expect(uploader1.putObjectCalls).toHaveLength(0);
 
-      // 画像実体が `<workspace>/images/<identifier>-<内容ハッシュ>.png` へコピーされている。
-      const copiedImagePath = join(workspace, 'images', whiteboardImageFileName());
-      expect(existsSync(copiedImagePath)).toBe(true);
-      const originalBytes = readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH);
-      expect(readFileSync(copiedImagePath)).toEqual(originalBytes);
-
-      // ワークスペースに書き出された記事 Markdown が `./images/<identifier>-<内容ハッシュ>.png`
-      // という相対パス参照を含む(noet 自身がこれを解決してアップロードする契約。モジュール
-      // 冒頭 JSDoc 参照)。
-      const writtenArticle = readFileSync(join(workspace, `${WHITEBOARD_SKETCH_UUID}.md`), 'utf8');
-      expect(writtenArticle).toContain(`./images/${whiteboardImageFileName()}`);
-
       // --- run 2(冪等性)---------------------------------------------------------
       const parser2 = makeFixtureRunner();
-      const noet2 = makeNoetRunner();
+      const noteApi2 = makeNoteHttpClient();
       const { logger: logger2, events: events2 } = createFakeLogger();
       const publisher2 = createNotePublisher({
         config,
-        runner: noet2.runner,
+        httpClient: noteApi2.client,
         logger: logger2,
-        env: { NOET_PATH: '/opt/tools/noet' },
+        env: { NOTE_SESSION_COOKIE: 'fake-session-cookie-value' },
       });
       const uploader2 = createFakeUploaderClient();
 
@@ -1500,8 +1498,9 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       for (const uuid of ALL_UUIDS) {
         expect(events2).toContain(`note_skipped:${uuid}`);
       }
-      // 5件全て skip されたため noet は一切呼ばれない(境界呼び出しゼロ)。
-      expect(noet2.calls).toHaveLength(0);
+      // 5件全て skip されたため note.com API は一切呼ばれない(境界呼び出しゼロ。urlname の
+      // 取得も含め、publish() 自体が呼ばれないため current_user すら叩かれない)。
+      expect(noteApi2.calls).toHaveLength(0);
       expect(uploader2.putObjectCalls).toHaveLength(0);
     });
   });

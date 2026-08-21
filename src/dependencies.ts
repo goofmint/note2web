@@ -9,6 +9,7 @@
  *   - `QIITA_TOKEN` 相当(`qiita.token_env`)
  *   - `DEVTO_API_KEY` 相当(`devto.api_key_env`)
  *   - `HATENA_API_KEY` 相当(`hatena.api_key_env`)
+ *   - note.com のセッション cookie(`note.session_cookie_env`。issue #86)
  *
  * 本モジュールが追加でチェックするのは、config スキーマに現れない依存
  * (コマンドの実在・`GH_TOKEN` のような固定名の環境変数・parser 本体の実在)のみ:
@@ -32,15 +33,10 @@
  *     モード」へ移行したため、この節にあった `node`/`npx` コマンド確認・
  *     `@qiita/qiita-cli` の解決確認・engine 確認は不要になった)
  *   - devto: 上記の共通チェックのみ(`DEVTO_API_KEY` は config.ts が既にチェック済み)
- *   - note: `NOET_PATH`(`noet` バイナリの絶対パスを指す固定名の環境変数、実機報告)が
- *     必須(未設定/空は problem として報告する — PATH フォールバックは意図的に行わない。
- *     `src/publishers/note.ts` の `resolveNoetCommand` 参照)。値が設定されていれば
- *     `expandHome` 後のパスが絶対パスであること・実行可能な通常ファイルであることのみを
- *     確認し、`noet` コマンドの PATH 探索
- *     (`requireCommand('noet', ...)`)はもはや行わない。design.md は「認証設定」も要求するが、
- *     現行の設定スキーマ(`src/config.ts` の `noteSchema`)は `workspace` のみで認証用の
- *     `*_env` を持たない — §13-4 の実装時確認課題であり、T-14 の時点では追加できるチェックが
- *     無い)
+ *   - note: 上記の共通チェックのみ(issue #86: noet サブプロセス方式を廃止し note.com
+ *     非公式 API を直叩きする方式へ移行したため、`NOET_PATH`・`noet` バイナリの実在確認は
+ *     不要になった。セッション cookie(`note.session_cookie_env`)は config.ts が既に
+ *     チェック済み)
  *   - hatena: 上記の共通チェックのみ(`HATENA_API_KEY` は config.ts が既にチェック済み)
  *
  * `gh auth status` の実行・対象リポジトリへの push/PR 作成権限確認は本モジュールでは
@@ -52,9 +48,9 @@
  * `GH_TOKEN` の存在・`gh auth status`・…権限を確認」は両コマンドでの実施を要求している)。
  */
 
-import { access, stat } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
 import {
@@ -152,11 +148,6 @@ export interface CheckDependenciesOptions {
    * issue #69)。既定は実 `fs.access(path, constants.R_OK)`。
    */
   fileReadableFn?: (path: string) => Promise<boolean>;
-  /**
-   * 「実行可能な通常ファイルか」の確認の注入点(`NOET_PATH` の検証に使う。PR #84
-   * CodeRabbit レビュー)。既定は `stat` の regular file 判定 + `fs.access(path, R_OK | X_OK)`。
-   */
-  executableFileFn?: (path: string) => Promise<boolean>;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /**
@@ -186,25 +177,6 @@ async function defaultFileReadable(path: string): Promise<boolean> {
 }
 
 /**
- * `executableFileFn` の既定実装(PR #84 CodeRabbit レビュー)。「実行可能な通常ファイル」
- * であること——`stat` で regular file であること + 読み取り・実行権限(`R_OK | X_OK`)——
- * まで確認する。ディレクトリや実行権限の無いファイルを `NOET_PATH` に指定した場合を、
- * 実際の `noet` 起動失敗より手前(doctor/sync 冒頭)で検出するため。
- */
-async function defaultExecutableFile(path: string): Promise<boolean> {
-  try {
-    const stats = await stat(path);
-    if (!stats.isFile()) {
-      return false;
-    }
-    await access(path, fsConstants.R_OK | fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * design.md §6 の依存表に基づき、`config.service` に必要な依存だけを検証する
  * (「不要な依存は要求しない」)。不足があれば `DependencyCheckError` を投げる
  * (欠如1件につき `DependencyProblem` 1件。全件をまとめて報告し、1件見つかった時点で
@@ -218,7 +190,6 @@ export async function checkDependencies(
     commandExistsFn = commandExists,
     fileExistsFn = defaultFileExists,
     fileReadableFn = defaultFileReadable,
-    executableFileFn = defaultExecutableFile,
     env = process.env,
     runSubprocessFn = runSubprocess,
   } = options;
@@ -405,46 +376,10 @@ export async function checkDependencies(
       break;
     }
     case 'note': {
-      // 実機報告: `noet` は `cargo install` で導入されることが多く、その場合
-      // `~/.cargo/bin/noet` に置かれる。launchd の PATH(`buildLaunchdPath`、
-      // `src/init.ts`)はこのディレクトリを含まないため、PATH 探索
-      // (`requireCommand('noet', ...)`)は無人実行の前提と噛み合わない——本チェックは
-      // `noet` を PATH から探すことをやめ、`NOET_PATH`(絶対パス、`~` 展開に対応)が
-      // 設定されていることと、そのパスが実在し読み取り可能であることのみを確認する。
-      // `NOET_PATH` が未設定/空の場合、`src/publishers/note.ts` の `resolveNoetCommand` は
-      // PATH へフォールバックせず例外を投げる契約のため、ここでも同じ理由で
-      // problem として報告する(doctor/sync 冒頭で早期に検出する)。
-      const noetPathValue = env.NOET_PATH;
-      if (noetPathValue === undefined || noetPathValue === '') {
-        problems.push({
-          message:
-            'environment variable "NOET_PATH" is not set (design.md §5.7 NotePublisher); ' +
-            'set NOET_PATH in the env file (~/.config/note2web/env, written by "note2web init"; ' +
-            'default ~/.cargo/bin/noet) to the absolute path of the noet binary — falling back to ' +
-            'a PATH lookup is intentionally not supported',
-        });
-      } else {
-        const noetPath = expandHome(noetPathValue);
-        if (!isAbsolute(noetPath)) {
-          // 相対パスは cwd に依存し、対話シェルと launchd で解決先が変わる——PATH
-          // フォールバックを廃止したのと同じ理由で暗黙の環境依存を持ち込まないよう、
-          // 絶対パス(または `~` 始まり)以外は拒否する(PR #84 CodeRabbit レビュー)。
-          problems.push({
-            message:
-              `NOET_PATH="${noetPathValue}" is not an absolute path (design.md §5.7 ` +
-              'NotePublisher); a relative value would resolve against the current working ' +
-              'directory and vary between interactive and launchd runs — set NOET_PATH to the ' +
-              'absolute path of the noet binary (e.g. ~/.cargo/bin/noet)',
-          });
-        } else if (!(await executableFileFn(noetPath))) {
-          problems.push({
-            message:
-              `noet binary not found or not an executable regular file at ` +
-              `NOET_PATH="${noetPath}" (design.md §5.7 NotePublisher; set NOET_PATH in the env ` +
-              'file to the correct absolute path of the noet binary, e.g. ~/.cargo/bin/noet)',
-          });
-        }
-      }
+      // issue #86: noet サブプロセス方式を廃止し note.com 非公式 API 直叩きへ移行したため、
+      // `NOET_PATH`・`noet` バイナリの実在確認は不要になった。認証はセッション cookie
+      // (`config.note.session_cookie_env` が指す環境変数)で行うが、これは config.ts の
+      // `*_env` 汎用チェックが既に検証済みのため、本モジュールで追加するチェックは無い。
       break;
     }
     case 'hatena': {

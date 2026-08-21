@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NoteExternalImageError, renderNoteArticle } from './note.js';
+import { renderNoteArticle } from './note.js';
 import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
 import { computeContentHash } from '../transform/frontmatter.js';
@@ -31,18 +31,19 @@ function buildNote(overrides: Partial<Note> = {}): Note {
   };
 }
 
-// note.com は API/CLI モード。renderNoteArticle は config を参照しないため最小限の値で足りる。
+// note.com は API モード。renderNoteArticle は config を参照しないため最小限の値で足りる。
 const CONFIG = {
   timezone: 'Asia/Tokyo',
   service: 'note',
-  note: { workspace: '~/src/note-content' },
+  note: { session_cookie_env: 'NOTE_SESSION_COOKIE' },
 } as Config;
 
 // ---------------------------------------------------------------------------
-// golden test: frontmatter の確定的な直列化(design.md §5.7 NotePublisher 節、§13-4)。
+// golden test: frontmatter 相当の確定的な直列化(issue #86。dev.to/Qiita と同じ
+// 「title/tags のみをハッシュ対象にする」方式)。
 // ---------------------------------------------------------------------------
 
-describe('golden: renderNoteArticle frontmatter', () => {
+describe('golden: renderNoteArticle artifact/contentHash', () => {
   const note = buildNote({
     uuid: '5C1C2C3D-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
     title: 'こんにちは、note',
@@ -53,15 +54,14 @@ describe('golden: renderNoteArticle frontmatter', () => {
   const expectedArtifact =
     '---\n' +
     'title: "こんにちは、note"\n' +
-    'tags: ["TypeScript","note記事"]\n' +
+    'tags: ["#TypeScript","#note記事"]\n' +
     '---\n' +
     '\n' +
     markdown;
 
-  // design.md §12: 同一入力ノートに対する期待直列化文字列とハッシュ値を golden として固定する。
   const expectedHash = computeContentHash(expectedArtifact);
 
-  it('serializes the minimal frontmatter block + body exactly (key order title/tags only, per §13-4)', () => {
+  it('serializes title/tags (unmodified, "#" not stripped here — Publisher.publish() shapes hashtags at wire time)', () => {
     const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.artifact).toBe(expectedArtifact);
   });
@@ -80,124 +80,52 @@ describe('golden: renderNoteArticle frontmatter', () => {
 });
 
 // ---------------------------------------------------------------------------
-// artifactPath(design.md §5.7 NotePublisher「`<uuid>.md`」、workspace 相対)。
+// API モード専用フィールド(bodyMarkdown/tags/attachments/assetSourceDir、
+// `src/publishers/types.ts` 参照)。
 // ---------------------------------------------------------------------------
 
-describe('renderNoteArticle artifactPath', () => {
-  it('is "<uuid>.md" (relative; NotePublisher resolves against config.note.workspace)', () => {
-    const note = buildNote({ uuid: '5c1c2c3d-0000-4000-8000-000000000001' });
-    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
-    expect(article.artifactPath).toBe('5c1c2c3d-0000-4000-8000-000000000001.md');
-  });
-
-  it('does not lowercase the uuid (unlike Zenn slugs)', () => {
-    const note = buildNote({ uuid: '5C1C2C3D-0000-4000-8000-000000000001' });
-    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
-    expect(article.artifactPath).toBe('5C1C2C3D-0000-4000-8000-000000000001.md');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// tags(モジュール冒頭 JSDoc「frontmatter」: 先頭の "#" を1つ除去する実装判断)。
-// ---------------------------------------------------------------------------
-
-describe('renderNoteArticle tags', () => {
-  it('strips exactly one leading "#" from each tag', () => {
-    const note = buildNote({ tags: ['#typescript', '#note'] });
-    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
-    expect(article.artifact).toContain('tags: ["typescript","note"]');
-  });
-
-  it('produces an empty tags array for a note with no tags', () => {
-    const note = buildNote({ tags: [] });
-    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
-    expect(article.artifact).toContain('tags: []');
-  });
-
-  it('leaves a tag without a leading "#" unchanged (defensive)', () => {
-    const note = buildNote({ tags: ['already-plain'] });
-    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
-    expect(article.artifact).toContain('tags: ["already-plain"]');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 画像(利用者決定 2026-08-21、モジュール冒頭 JSDoc「2. 画像」参照)。
-// ---------------------------------------------------------------------------
-//
-// `renderNoteArticle` は添付経由の画像を検出・拒否しない——`assets/uploader.ts` の
-// `processNoteBody` が事前にローカル相対パス(`./images/<identifier>-<内容ハッシュ><ext>`)へ
-// 解決済みの本文を渡してくる前提。唯一の追加検証は外部 URL(`http(s)://`)の画像参照
-// (添付を伴わない `<img src>` 由来)を `NoteExternalImageError` として拒否すること
-// (PR #85 CodeRabbit レビュー。noet が http(s) 参照をスキップし、note.com 上で
-// リテラル表示になってしまうため)。
-
-describe('renderNoteArticle with an already-resolved local image reference', () => {
-  it('publishes normally: a "./images/<identifier><ext>" reference passes through unchanged', () => {
+describe('renderNoteArticle API-mode fields', () => {
+  it('sets bodyMarkdown to the raw converted markdown (unresolved image placeholders included)', () => {
     const note = buildNote();
-    const markdown =
-      'text before\n\n![alt text](./images/88888888-8888-4888-8888-888888888888.png)\n';
+    const markdown = 'text\n\n![alt](note2web-asset://img-1)\n';
     const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    expect(article.artifact).toContain(
-      '![alt text](./images/88888888-8888-4888-8888-888888888888.png)',
-    );
+    expect(article.bodyMarkdown).toBe(markdown);
   });
 
-  it.each(['https://example.com/a.png', 'http://example.com/a.png'])(
-    'throws NoteExternalImageError for an external-URL image reference (%s)',
-    (url) => {
-      const note = buildNote();
-      const markdown = `text\n\n![alt](${url})\n`;
-      expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-        NoteExternalImageError,
-      );
-    },
-  );
-
-  it('throws NoteExternalImageError for a reference-style external image (![alt][ref] + definition)', () => {
-    const note = buildNote();
-    const markdown = '![alt][pic]\n\n[pic]: https://example.com/a.png\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteExternalImageError,
-    );
+  it('sets tags to Note#tags unmodified ("#" not stripped)', () => {
+    const note = buildNote({ tags: ['#typescript', 'no-hash'] });
+    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.tags).toEqual(['#typescript', 'no-hash']);
   });
 
-  it('throws NoteExternalImageError for an angle-bracketed external image URL', () => {
+  it('does not set artifactPath (API mode, no file output)', () => {
     const note = buildNote();
-    const markdown = '![alt](<https://example.com/a b.png>)\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteExternalImageError,
-    );
+    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.artifactPath).toBeUndefined();
   });
 
-  // 正規表現ではなく構文解析で検査するため、コードブロック・インラインコード中の
-  // リテラルな画像構文には反応しない(PR #85 CodeRabbit レビュー)。
-  it('does not throw for a literal image syntax inside a fenced code block', () => {
-    const note = buildNote();
-    const markdown = '```md\n![example](https://example.com/a.png)\n```\n';
-    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    expect(article.artifact).toContain('![example](https://example.com/a.png)');
+  it('passes note.attachments through to RenderedArticle.attachments unmodified', () => {
+    const attachments = [{ identifier: 'img-1', path: 'sketch.png' }];
+    const note = buildNote({ attachments });
+    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.attachments).toBe(attachments);
   });
 
-  it('does not throw for a literal image syntax inside inline code', () => {
+  it('sets assetSourceDir from RenderNoteInput.exportDir', () => {
     const note = buildNote();
-    const markdown = 'use `![alt](https://example.com/a.png)` syntax\n';
-    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    expect(article.artifact).toContain('`![alt](https://example.com/a.png)`');
+    const article = renderNoteArticle({
+      note,
+      markdown: 'body',
+      config: CONFIG,
+      prev: null,
+      exportDir: '/tmp/export-dir-123',
+    });
+    expect(article.assetSourceDir).toBe('/tmp/export-dir-123');
   });
 
-  it('does not treat a plain external link (no "!") as an image reference', () => {
+  it('leaves assetSourceDir undefined when exportDir is not provided', () => {
     const note = buildNote();
-    const markdown = 'see [the docs](https://example.com/a.png) for details\n';
-    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    expect(article.artifact).toContain('[the docs](https://example.com/a.png)');
-  });
-
-  it('includes the offending URL in the error message', () => {
-    const note = buildNote();
-    const markdown = '![alt](https://example.com/broken.png)\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      /https:\/\/example\.com\/broken\.png/,
-    );
+    const article = renderNoteArticle({ note, markdown: 'body', config: CONFIG, prev: null });
+    expect(article.assetSourceDir).toBeUndefined();
   });
 });
