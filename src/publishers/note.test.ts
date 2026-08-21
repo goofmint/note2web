@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NoteImagesUnsupportedError, renderNoteArticle } from './note.js';
+import { renderNoteArticle } from './note.js';
 import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
 import { computeContentHash } from '../transform/frontmatter.js';
@@ -122,63 +122,22 @@ describe('renderNoteArticle tags', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 画像非対応(design.md §13-6「option (b)」、モジュール冒頭 JSDoc「2. 画像」)。
+// 画像(利用者決定 2026-08-21、モジュール冒頭 JSDoc「2. 画像」参照)。
 // ---------------------------------------------------------------------------
+//
+// `renderNoteArticle` 自身は画像の検出・拒否を一切行わない——`assets/uploader.ts` の
+// `processNoteBody` が事前にローカル相対パス(`./images/<identifier><ext>`)へ解決済みの
+// 本文を渡してくる前提のため、ここでは単にその本文をそのまま frontmatter に埋め込んで
+// 通過することだけを確認する。
 
-describe('renderNoteArticle image detection (design.md §13-6, option (b))', () => {
-  it('throws NoteImagesUnsupportedError for an inline image reference', () => {
+describe('renderNoteArticle with an already-resolved local image reference', () => {
+  it('publishes normally: a "./images/<identifier><ext>" reference passes through unchanged', () => {
     const note = buildNote();
-    const markdown = 'text before\n\n![alt text](https://assets.example.com/notes/ab/ab12.png)\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
+    const markdown =
+      'text before\n\n![alt text](./images/88888888-8888-4888-8888-888888888888.png)\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain(
+      '![alt text](./images/88888888-8888-4888-8888-888888888888.png)',
     );
-  });
-
-  it('throws NoteImagesUnsupportedError for a reference-style image', () => {
-    const note = buildNote();
-    const markdown = '![alt text][img1]\n\n[img1]: https://assets.example.com/notes/ab/ab12.png\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
-    );
-  });
-
-  it('throws NoteImagesUnsupportedError for a shortcut reference-style image', () => {
-    const note = buildNote();
-    const markdown = '![alt text]\n\n[alt text]: https://assets.example.com/notes/ab/ab12.png\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
-    );
-  });
-
-  it('does not throw for a note with no image references', () => {
-    const note = buildNote();
-    const markdown = 'plain text, a [regular link](https://example.com/) is fine.\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).not.toThrow();
-  });
-
-  it('NoteImagesUnsupportedError carries the offending noteUuid', () => {
-    const note = buildNote({ uuid: 'note-uuid-under-test' });
-    const markdown = '![img](https://assets.example.com/x.png)\n';
-    try {
-      renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-      expect.unreachable('renderNoteArticle should have thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(NoteImagesUnsupportedError);
-      const typedError = error as NoteImagesUnsupportedError;
-      expect(typedError.noteUuid).toBe('note-uuid-under-test');
-      expect(typedError.message).toContain('note-uuid-under-test');
-    }
-  });
-
-  it('throws before rendering, so no RenderedArticle is ever produced for an image note', () => {
-    const note = buildNote();
-    const markdown = '![img](https://assets.example.com/x.png)\n';
-    let rendered: unknown;
-    try {
-      rendered = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    } catch {
-      // 例外経路: 成果物は生成されない。
-    }
-    expect(rendered).toBeUndefined();
   });
 });

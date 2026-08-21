@@ -15,6 +15,7 @@ import {
   AssetUploadError,
   buildAssetKey,
   joinPublicUrl,
+  NOET_SUPPORTED_IMAGE_EXTENSIONS,
   processNoteBody,
   type AssetUploaderLogger,
 } from '../src/assets/uploader.js';
@@ -575,6 +576,140 @@ describe('AssetUploader', () => {
       expect(client.putObject).toHaveBeenCalledTimes(1);
       const call = client.putObject.mock.calls[0]?.[0] as PutObjectParams;
       expect(call.body).toEqual(targetBytes);
+    });
+  });
+
+  describe('note.com service: local image copy vs. unchanged R2 path (design.md §5.7「画像」節、利用者決定 2026-08-21)', () => {
+    let noteWorkspace: string;
+
+    beforeEach(() => {
+      noteWorkspace = mkdtempSync(join(tmpdir(), 'note2web-asset-uploader-note-workspace-'));
+    });
+
+    afterEach(() => {
+      rmSync(noteWorkspace, { recursive: true, force: true });
+    });
+
+    it('(a) copies an image attachment into <workspace>/images/<identifier><ext> and rewrites the reference to a relative path, without touching R2', async () => {
+      const bytes = writeAttachmentFile('sketch.png', 'note-local-image-bytes');
+      const attachments: Attachment[] = [{ identifier: 'img-1', path: 'sketch.png' }];
+      const markdown = `![alt](${makeAssetPlaceholder('img-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const result = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: 'note',
+        assets: ASSETS_CONFIG,
+        noteWorkspace,
+        state: store,
+        client,
+      });
+
+      const copiedPath = join(noteWorkspace, 'images', 'img-1.png');
+      expect(existsSync(copiedPath)).toBe(true);
+      expect(readFileSync(copiedPath)).toEqual(bytes);
+
+      expect(result.markdown).toBe('![alt](./images/img-1.png)');
+      expect(result.markdown).not.toContain('note2web-asset://');
+
+      // R2 へは一切アップロードされず、StateStore のアセット状態にも記録されない
+      // (`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)。
+      expect(client.putObject).not.toHaveBeenCalled();
+      expect(existsSync(statePath)).toBe(false);
+    });
+
+    it('(b) still uploads a non-image attachment to R2 and replaces it with the public URL (unchanged behavior)', async () => {
+      const bytes = writeAttachmentFile('report.pdf', 'note-non-image-bytes');
+      const attachments: Attachment[] = [{ identifier: 'doc-1', path: 'report.pdf' }];
+      const markdown = `[report](${makeAssetPlaceholder('doc-1')})`;
+      const hex = sha256Hex(bytes);
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const result = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: 'note',
+        assets: ASSETS_CONFIG,
+        noteWorkspace,
+        state: store,
+        client,
+      });
+
+      expect(client.putObject).toHaveBeenCalledTimes(1);
+      const expectedUrl = `https://assets.example.com/notes/${hex.slice(0, 2)}/${hex}.pdf`;
+      expect(result.markdown).toBe(`[report](${expectedUrl})`);
+      // ワークスペースの images/ ディレクトリは作られない(非画像はローカルコピー経路を通らない)。
+      expect(existsSync(join(noteWorkspace, 'images'))).toBe(false);
+    });
+
+    it('(c) throws AssetUploadError naming the extension and the noet-supported set for an image extension noet cannot upload', async () => {
+      // `.heic` は isImageExtension が画像として認識するが(CONTENT_TYPE_BY_EXTENSION に
+      // image/heic として存在)、noet の read_image_as_base64 が対応する拡張子の集合
+      // (NOET_SUPPORTED_IMAGE_EXTENSIONS)には含まれない。
+      expect(NOET_SUPPORTED_IMAGE_EXTENSIONS.has('.heic')).toBe(false);
+      writeAttachmentFile('photo.heic', 'note-unsupported-ext-bytes');
+      const attachments: Attachment[] = [{ identifier: 'img-heic', path: 'photo.heic' }];
+      const markdown = `![alt](${makeAssetPlaceholder('img-heic')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: 'note',
+        assets: ASSETS_CONFIG,
+        noteWorkspace,
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('img-heic');
+      expect((error as Error).message).toContain('.heic');
+      for (const ext of NOET_SUPPORTED_IMAGE_EXTENSIONS) {
+        expect((error as Error).message).toContain(ext);
+      }
+      expect(client.putObject).not.toHaveBeenCalled();
+      expect(existsSync(join(noteWorkspace, 'images'))).toBe(false);
+    });
+
+    it('(d) throws AssetUploadError when service is "note" with an image placeholder but noteWorkspace is undefined (wiring bug guard)', async () => {
+      writeAttachmentFile('sketch.png', 'note-missing-workspace-bytes');
+      const attachments: Attachment[] = [{ identifier: 'img-1', path: 'sketch.png' }];
+      const markdown = `![alt](${makeAssetPlaceholder('img-1')})`;
+
+      const store = await freshStore();
+      const client = makeFakeClient();
+
+      const error = await processNoteBody({
+        markdown,
+        attachments,
+        exportDir,
+        noteUuid: NOTE_UUID_A,
+        service: 'note',
+        assets: ASSETS_CONFIG,
+        // noteWorkspace は意図的に省略する。
+        state: store,
+        client,
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(AssetUploadError);
+      expect((error as AssetUploadError).noteUuid).toBe(NOTE_UUID_A);
+      expect((error as AssetUploadError).identifier).toBe('img-1');
+      expect(client.putObject).not.toHaveBeenCalled();
     });
   });
 

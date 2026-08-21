@@ -19,19 +19,32 @@
  * 完全無人(cron/launchd)で回すこと自体が構造的に不可能である点は README 相当の
  * ドキュメント(design.md §4・§6)に明記済み。
  *
- * **2. 画像: (b) 画像を含むノートは note.com 向けでは明示的に failed とする**(design.md
- * §13-6 が検討した2案のうち、noet の `--images` 経路が「統合テスト未実施」の未検証機能
- * であることを理由に、より安全側の (b) を採用。issue #30 自体の記述——「R2/S3 の URL の
- * まま送る」——は T-24 スパイク前の古い前提であり、design.md §13-6 の調査結果(note.com の
- * ProseMirror エディタは `![]()` を画像として解釈せずリテラルテキスト表示する)により
- * 上書きされている。§13-6「推奨対応」・tasks.md §5 の指示どおり、この T-25 実装では
- * design.md を issue のstale本文より優先する)。`renderNoteArticle` は本文
- * Markdown に画像参照記法(`![...]`。インライン `![alt](url)`・参照形式
- * `![alt][ref]`・ショートカット参照 `![alt]` のいずれも同じ `![` 始まりのため単一の
- * 正規表現で検出できる)が含まれる場合、`NoteImagesUnsupportedError` を投げる。
- * `src/sync.ts` の `processNote` は `renderNote` 呼び出しを独立した try/catch で
- * 囲んでおり、当該ノートのみを `'failed'` として隔離する(`QiitaNoTagsRemainingError` と
- * 同じパターン)。
+ * **2. 画像: (a) noet 自身の画像アップロード機能を、ローカルファイル参照で使う**(利用者
+ * 決定 2026-08-21。旧 §13-6 の2択のうち、当初採用していた (b)(画像を含むノートを
+ * note.com 向けでは明示的に failed とする)から方針転換した)。noet(kako-jun/noet, commit
+ * `e3a8562`)は `noet create`/`update` の実行時、本文 Markdown 中の画像参照
+ * (`extract_image_references`、正規表現 `!\[([^\]]*)\]\(([^)]+)\)`)を自動検出し、参照が
+ * `http://`/`https://` で始まらない場合(= ローカルファイルパス)は Markdown ファイルの
+ * 親ディレクトリ基準で実ファイルを解決し、note.com へ自前でアップロードしたうえで本文中の
+ * 参照を `st-note.com` の URL に置換してくれる(`apps/cli/src/commands/extension.rs` →
+ * `image_handler.rs::process_images`。alt テキストがそのまま note.com 側のキャプションに
+ * なる)。逆に `http(s)://` で始まる参照(R2/S3 の公開 URL 等)は**スキップ**され
+ * アップロードされない——note.com の ProseMirror エディタはそもそも `![]()` を画像として
+ * 解釈せずリテラルテキスト表示するため(§13-6 の調査結果は変わらず有効)、R2/S3 の URL を
+ * そのまま送る経路には意味が無い。したがって note.com 向けの画像添付は
+ * `assets/uploader.ts` の `processNoteBody` が(`service === 'note'` かつ画像の場合)R2/S3
+ * ではなく `<config.note.workspace>/images/<identifier><ext>` へのローカルコピーへ差し替え、
+ * `renderNoteArticle` に渡る本文には最初から `![alt](./images/<identifier><ext>)` という
+ * 相対パス参照だけが現れる(`renderNoteArticle` 自身は画像を検出・拒否しない——検証は
+ * アセット解決段階(`assets/uploader.ts`)で完結している)。**サポートされる画像形式は
+ * jpg/jpeg/png/gif/webp のみ**(noet の `read_image_as_base64`)で、それ以外の拡張子は
+ * アセット解決段階で `AssetUploadError` として弾かれ、当該ノートのみ `'failed'` になる。
+ * この noet の画像アップロード経路自体は upstream で「実装完了(コンパイル済み)、
+ * 統合テスト未実施」(`docs/IMAGE_FEATURE_STATUS.md`)のままであり、note2web 側でも
+ * 実機検証はできていない(§12 参照)——失敗した場合は他の失敗と同様にそのノートのみが
+ * `'failed'` として隔離され、次回実行で再試行される。また画像を多数含む記事では、
+ * 拡張機能側の1コマンドあたり60秒タイムアウト(`extension_client.rs` `COMMAND_TIMEOUT`)に
+ * 接近しうる点も変わらない(§5.7 レート制御の記述参照)。
  *
  * **3. 記事一覧の完全性(design.md §5.7・§13-4「照合の安全条件」)**: `noet list` は
  * `/notes` ページの DOM スクレイプであり、ページング処理を持たず初期表示分のみを対象と
@@ -120,44 +133,6 @@ import {
 } from '../transform/frontmatter.js';
 
 // ---------------------------------------------------------------------------
-// Renderer: 画像非対応の検出とエラー型(モジュール冒頭 JSDoc「2. 画像」参照)。
-// ---------------------------------------------------------------------------
-
-/**
- * Markdown の画像記法の開始(`![`)を検出する。インライン形式(`![alt](url)`)・参照形式
- * (`![alt][ref]`)・ショートカット参照形式(`![alt]`)のいずれも `![` で始まるため、
- * 続きの構文を区別せず単一パターンで検出する(安全側に倒し、見逃しよりも過検出を選ぶ
- * ——モジュール冒頭 JSDoc「2. 画像」参照)。本 note2web の BodyTransformer
- * (`src/transform/body.ts`、remark-stringify 既定)は実際にはインライン形式しか
- * 生成しないため参照形式の実例は無いはずだが、防御的に含める。
- */
-const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]/;
-
-/**
- * ノートの本文 Markdown に画像参照が含まれていたことを表す(design.md §13-6「画像を
- * 含むノードは note.com 向けでは明示的に failed とし、エラーメッセージで非対応を伝える」
- * ——option (b))。`src/sync.ts` の `processNote` が `renderNote` 呼び出しを囲む
- * try/catch で捕捉し、当該ノートのみを `'failed'` として隔離する
- * (`QiitaNoTagsRemainingError` と同じパターン)。
- */
-export class NoteImagesUnsupportedError extends Error {
-  /** 画像を含んでいたノートの UUID。 */
-  readonly noteUuid: string;
-
-  constructor(noteUuid: string) {
-    super(
-      `note.com does not support images via note2web (design.md §13-6): note.com's ProseMirror ` +
-        "editor renders markdown image syntax as literal text rather than an image, and noet's " +
-        '"--images" upload path is unverified ("統合テスト未実施", noet\'s ' +
-        `docs/IMAGE_FEATURE_STATUS.md); note "${noteUuid}" contains at least one image reference ` +
-        '— remove the image(s) from this note, or publish it to a different service instead',
-    );
-    this.name = 'NoteImagesUnsupportedError';
-    this.noteUuid = noteUuid;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Renderer 本体(モジュール冒頭 JSDoc「frontmatter」参照)。
 // ---------------------------------------------------------------------------
 
@@ -177,17 +152,16 @@ function stripLeadingHash(tag: string): string {
  * しない——note.com の frontmatter は ID の書き戻し欄を持たない(モジュール冒頭 JSDoc
  * 「記事 ID(key)の取得」参照。ID の追跡は Publisher 側の状態 JSON `remoteId` のみで行う)。
  *
- * 本文に画像参照が含まれる場合、frontmatter を組み立てる前に
- * `NoteImagesUnsupportedError` を投げる(モジュール冒頭 JSDoc「2. 画像」参照)。
+ * 画像を検出・拒否する処理はここには無い(モジュール冒頭 JSDoc「2. 画像」参照)。
+ * `markdown` は `assets/uploader.ts` の `processNoteBody` を経由済みで、note.com 向けの
+ * 画像参照は既に `./images/<identifier><ext>` というローカル相対パスに解決されている
+ * (未対応の拡張子はその段階で `AssetUploadError` として弾かれている)ため、
+ * `renderNoteArticle` はそのまま frontmatter を組み立てて返すだけでよい。
  */
 export const renderNoteArticle: NoteRenderer = ({
   note,
   markdown,
 }: RenderNoteInput): RenderedArticle => {
-  if (MARKDOWN_IMAGE_PATTERN.test(markdown)) {
-    throw new NoteImagesUnsupportedError(note.uuid);
-  }
-
   const entries: FrontmatterEntry[] = [
     [NOTE_FRONTMATTER_KEY_ORDER[0], note.title],
     [NOTE_FRONTMATTER_KEY_ORDER[1], note.tags.map(stripLeadingHash)],
