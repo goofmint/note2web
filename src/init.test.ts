@@ -784,6 +784,39 @@ describe('runInit', () => {
         expect(envContent).toContain('NOET_PATH=~/.cargo/bin/noet');
       });
 
+      it('re-prompts until an absolute path is entered (relative NOET_PATH is rejected, PR #84 review)', async () => {
+        const promptFn = makePromptFn({
+          ...SERVICE_ANSWERS.note,
+          'Generate the launchd': 'y',
+          // 1回目は相対パス(拒否されて問い直し)、2回目は絶対パス。
+          'Path to the noet binary': ['./noet', '/opt/tools/noet'],
+        });
+        const fs = createFakeFs();
+
+        await runInit(
+          buildOptions({
+            promptFn,
+            fileExistsFn: fs.fileExistsFn,
+            readFileFn: fs.readFileFn,
+            writeFileFn: fs.writeFileFn,
+            mkdirFn: fs.mkdirFn,
+            chmodFn: fs.chmodFn,
+            env: {},
+          }),
+        );
+
+        // 問い直しのプロンプト文言(絶対パス要求)が実際に表示されている。
+        const askedQuestions = promptFn.mock.calls.map(([question]) => question);
+        expect(
+          askedQuestions.some((question) => question.includes('must be an absolute path')),
+        ).toBe(true);
+
+        const envPath = `${HOME_DIR}/.config/note2web/env`;
+        const envContent = fs.files.get(envPath) ?? '';
+        expect(envContent).toContain('NOET_PATH=/opt/tools/noet');
+        expect(envContent).not.toContain('NOET_PATH=./noet');
+      });
+
       it('leaves an existing NOET_PATH line untouched on re-run (append-only contract)', async () => {
         const envPath = `${HOME_DIR}/.config/note2web/env`;
         const promptFn = makePromptFn({

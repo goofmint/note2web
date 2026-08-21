@@ -35,7 +35,8 @@
  *   - note: `NOET_PATH`(`noet` バイナリの絶対パスを指す固定名の環境変数、実機報告)が
  *     必須(未設定/空は problem として報告する — PATH フォールバックは意図的に行わない。
  *     `src/publishers/note.ts` の `resolveNoetCommand` 参照)。値が設定されていれば
- *     `expandHome` 後のパスの実在・読み取り可否のみを確認し、`noet` コマンドの PATH 探索
+ *     `expandHome` 後のパスが絶対パスであること・実行可能な通常ファイルであることのみを
+ *     確認し、`noet` コマンドの PATH 探索
  *     (`requireCommand('noet', ...)`)はもはや行わない。design.md は「認証設定」も要求するが、
  *     現行の設定スキーマ(`src/config.ts` の `noteSchema`)は `workspace` のみで認証用の
  *     `*_env` を持たない — §13-4 の実装時確認課題であり、T-14 の時点では追加できるチェックが
@@ -51,9 +52,9 @@
  * `GH_TOKEN` の存在・`gh auth status`・…権限を確認」は両コマンドでの実施を要求している)。
  */
 
-import { access } from 'node:fs/promises';
+import { access, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Config } from './config.js';
 import { PRECONDITION_FAILURE } from './exit-codes.js';
 import {
@@ -151,6 +152,11 @@ export interface CheckDependenciesOptions {
    * issue #69)。既定は実 `fs.access(path, constants.R_OK)`。
    */
   fileReadableFn?: (path: string) => Promise<boolean>;
+  /**
+   * 「実行可能な通常ファイルか」の確認の注入点(`NOET_PATH` の検証に使う。PR #84
+   * CodeRabbit レビュー)。既定は `stat` の regular file 判定 + `fs.access(path, R_OK | X_OK)`。
+   */
+  executableFileFn?: (path: string) => Promise<boolean>;
   /** 環境変数の参照元。既定は `process.env`。 */
   env?: NodeJS.ProcessEnv;
   /**
@@ -180,6 +186,25 @@ async function defaultFileReadable(path: string): Promise<boolean> {
 }
 
 /**
+ * `executableFileFn` の既定実装(PR #84 CodeRabbit レビュー)。「実行可能な通常ファイル」
+ * であること——`stat` で regular file であること + 読み取り・実行権限(`R_OK | X_OK`)——
+ * まで確認する。ディレクトリや実行権限の無いファイルを `NOET_PATH` に指定した場合を、
+ * 実際の `noet` 起動失敗より手前(doctor/sync 冒頭)で検出するため。
+ */
+async function defaultExecutableFile(path: string): Promise<boolean> {
+  try {
+    const stats = await stat(path);
+    if (!stats.isFile()) {
+      return false;
+    }
+    await access(path, fsConstants.R_OK | fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * design.md §6 の依存表に基づき、`config.service` に必要な依存だけを検証する
  * (「不要な依存は要求しない」)。不足があれば `DependencyCheckError` を投げる
  * (欠如1件につき `DependencyProblem` 1件。全件をまとめて報告し、1件見つかった時点で
@@ -193,6 +218,7 @@ export async function checkDependencies(
     commandExistsFn = commandExists,
     fileExistsFn = defaultFileExists,
     fileReadableFn = defaultFileReadable,
+    executableFileFn = defaultExecutableFile,
     env = process.env,
     runSubprocessFn = runSubprocess,
   } = options;
@@ -399,12 +425,23 @@ export async function checkDependencies(
         });
       } else {
         const noetPath = expandHome(noetPathValue);
-        if (!(await fileReadableFn(noetPath))) {
+        if (!isAbsolute(noetPath)) {
+          // 相対パスは cwd に依存し、対話シェルと launchd で解決先が変わる——PATH
+          // フォールバックを廃止したのと同じ理由で暗黙の環境依存を持ち込まないよう、
+          // 絶対パス(または `~` 始まり)以外は拒否する(PR #84 CodeRabbit レビュー)。
           problems.push({
             message:
-              `noet binary not found at NOET_PATH="${noetPath}" (design.md §5.7 NotePublisher; ` +
-              'set NOET_PATH in the env file to the correct absolute path of the noet binary, ' +
-              'e.g. ~/.cargo/bin/noet)',
+              `NOET_PATH="${noetPathValue}" is not an absolute path (design.md §5.7 ` +
+              'NotePublisher); a relative value would resolve against the current working ' +
+              'directory and vary between interactive and launchd runs — set NOET_PATH to the ' +
+              'absolute path of the noet binary (e.g. ~/.cargo/bin/noet)',
+          });
+        } else if (!(await executableFileFn(noetPath))) {
+          problems.push({
+            message:
+              `noet binary not found or not an executable regular file at ` +
+              `NOET_PATH="${noetPath}" (design.md §5.7 NotePublisher; set NOET_PATH in the env ` +
+              'file to the correct absolute path of the noet binary, e.g. ~/.cargo/bin/noet)',
           });
         }
       }

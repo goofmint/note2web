@@ -25,7 +25,7 @@
  */
 
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
@@ -1033,11 +1033,21 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       // `NOET_PATH` に絶対パスを持たせて解決する(`src/publishers/note.ts` の
       // `resolveNoetCommand`、`src/dependencies.ts` の `case 'note'`)——PATH への
       // フォールバックは行わないため、この値は必須(空文字を許さない)として尋ねる。
-      const noetPathAnswer = await askRequired(
+      // 相対パスは cwd 依存で launchd 実行時に解決先が変わるため受け付けない
+      // (`src/dependencies.ts` の `case 'note'` と同じ規則。PR #84 CodeRabbit レビュー)。
+      // 絶対パス(`~` 始まりの展開後を含む)が入力されるまで問い直す。
+      let noetPathAnswer = await askRequired(
         ask_,
         'Path to the noet binary (written to the env file as NOET_PATH)',
         '~/.cargo/bin/noet',
       );
+      while (!isAbsolute(expandHome(noetPathAnswer))) {
+        noetPathAnswer = await askRequired(
+          ask_,
+          'Path to the noet binary (must be an absolute path, e.g. ~/.cargo/bin/noet)',
+          '~/.cargo/bin/noet',
+        );
+      }
       prefilledEnvEntries.push({ name: 'NOET_PATH', value: noetPathAnswer });
     } else if (service === 'hatena') {
       config.hatena = await collectHatenaBlock(ask_, existingDefaults?.hatena);

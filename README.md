@@ -172,7 +172,7 @@ note:
 
 note.com は現行の `noet` の実装上、環境変数や設定ファイルによる認証を受け付けません(後述)。`note:` ブロックに認証用のキーは存在しません。
 
-**`noet` バイナリの解決先(`NOET_PATH`、必須)**: `noet` は `cargo install` で導入されることが多く、その場合 `~/.cargo/bin/noet` に置かれます。launchd 経由の無人実行では、生成される plist の `PATH` が rbenv/asdf/rvm の shim と OS 標準ディレクトリのみを対象にしており `~/.cargo/bin` を含まないため、対話シェルでは通っている PATH でも launchd 環境だけ `noet` が見つからず `required command "noet" was not found on PATH` で失敗することがあります。note2web はこれを PATH 探索ではなく、環境変数 `NOET_PATH` に `noet` バイナリの絶対パスを設定することで解決します(`~` 展開に対応)。`note2web init` が対話で尋ね(既定 `~/.cargo/bin/noet`)、[env ファイル](#env-ファイルの自動読み込みdoctor--sync-共通)へ値入りで書き込みます。**`NOET_PATH` は必須です。未設定・空文字の場合 `doctor`/`sync` は exit 2 で失敗します——`noet` が PATH 上にあってもフォールバックはしません**(対話シェルでは偶然動いて launchd でだけ壊れる、という不可視の環境依存を避けるための意図的な仕様です)。
+**`noet` バイナリの解決先(`NOET_PATH`、必須)**: `noet` は `cargo install` で導入されることが多く、その場合 `~/.cargo/bin/noet` に置かれます。launchd 経由の無人実行では、生成される plist の `PATH` が rbenv/asdf/rvm の shim と OS 標準ディレクトリのみを対象にしており `~/.cargo/bin` を含まないため、対話シェルでは通っている PATH でも launchd 環境だけ `noet` が見つからず `required command "noet" was not found on PATH` で失敗することがあります。note2web はこれを PATH 探索ではなく、環境変数 `NOET_PATH` に `noet` バイナリの絶対パスを設定することで解決します(`~` 展開に対応)。`note2web init` が対話で尋ね(既定 `~/.cargo/bin/noet`)、[env ファイル](#env-ファイルの自動読み込みdoctor--sync-共通)へ値入りで書き込みます。**`NOET_PATH` は必須です。未設定・空文字の場合 `doctor`/`sync` は exit 2 で失敗します——`noet` が PATH 上にあってもフォールバックはしません**(対話シェルでは偶然動いて launchd でだけ壊れる、という不可視の環境依存を避けるための意図的な仕様です)。同じ理由で**相対パスも受け付けません**(cwd 依存になるため。`init` は絶対パスが入力されるまで問い直します)。`doctor`/`sync` 冒頭のチェックでは、指定先が実行可能な通常ファイルであることまで確認します。
 
 ### はてなブログ
 

@@ -247,7 +247,18 @@ function resolveNoetCommand(env: NodeJS.ProcessEnv): string {
         'Falling back to PATH lookup is intentionally not supported (design.md §5.7)',
     );
   }
-  return expandHome(raw);
+  const resolved = expandHome(raw);
+  if (!isAbsolute(resolved)) {
+    // 相対パスは cwd に依存し、対話シェルと launchd で解決先が変わる——PATH フォール
+    // バックを廃止したのと同じ理由で暗黙の環境依存を持ち込まないよう拒否する
+    // (PR #84 CodeRabbit レビュー。`src/dependencies.ts` の `case 'note'` と同じ規則)。
+    throw new Error(
+      `NotePublisher: NOET_PATH="${raw}" is not an absolute path; a relative value would ` +
+        'resolve against the current working directory. Set NOET_PATH to the absolute path of ' +
+        'the noet binary (e.g. ~/.cargo/bin/noet, design.md §5.7)',
+    );
+  }
+  return resolved;
 }
 
 /** design.md §7 の `note` ブロック(`workspace` のみ)。 */

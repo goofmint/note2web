@@ -585,5 +585,24 @@ describe('createNotePublisher', () => {
       await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOET_PATH/);
       expect(calls).toHaveLength(0);
     });
+
+    // 相対パスは cwd 依存で launchd 実行時に解決先が変わるため拒否する
+    // (PR #84 CodeRabbit レビュー。PATH フォールバック廃止と同じ理由)。
+    it.each(['noet', './noet'])(
+      'rejects the relative NOET_PATH %j (absolute path required), without invoking the runner',
+      async (relativePath) => {
+        const { runner, calls } = makeMockRunner();
+        const publisher = createNotePublisher({
+          config: buildConfig(workspaceRoot),
+          runner,
+          env: { NOET_PATH: relativePath },
+        });
+
+        await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
+          /not an absolute path/,
+        );
+        expect(calls).toHaveLength(0);
+      },
+    );
   });
 });
