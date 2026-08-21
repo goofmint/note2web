@@ -308,35 +308,23 @@ describe('createNotePublisher', () => {
     });
 
     it('does not cache a failed current_user lookup (retries on the next publish())', async () => {
-      let currentUserCalls = 0;
-      const { httpClient: failOnceClient } = makeScriptedHttpClient([
-        () => {
-          currentUserCalls += 1;
-          return Promise.resolve({ status: 500, body: 'boom' });
-        },
+      // 単一の Publisher インスタンス・単一のスクリプト付き httpClient で確認する: 1回目の
+      // publish() は current_user が 500 で失敗し、2回目の publish()(同じインスタンス)は
+      // current_user が成功して draft 予約 → PUT まで進む。urlnamePromise が失敗をキャッシュ
+      // していれば2回目も current_user を再度叩かないはずなので、calls の件数で検証する。
+      const { httpClient, calls } = makeScriptedHttpClient([
+        () => Promise.resolve({ status: 500, body: 'boom' }),
+        () => Promise.resolve(jsonResponse(200, { data: { urlname: 'example-user' } })),
+        () => Promise.resolve(jsonResponse(200, { id: '12345', key: 'nabcde' })),
+        () => Promise.resolve(jsonResponse(200, { status: 'published' })),
       ]);
-      const publisher = createNotePublisher({
-        config: buildConfig(),
-        httpClient: failOnceClient,
-        env: COOKIE_ENV,
-      });
+      const publisher = createNotePublisher({ config: buildConfig(), httpClient, env: COOKIE_ENV });
 
       await expect(publisher.publish(buildArticle(), null)).rejects.toThrow();
-      expect(currentUserCalls).toBe(1);
+      expect(calls.filter((call) => call.url.endsWith('/current_user'))).toHaveLength(1);
 
-      // 2回目は current_user から成功するスクリプトへ差し替える(別 Publisher インスタンスで
-      // 確認: 失敗をキャッシュしていれば同じインスタンスの再試行でも current_user を
-      // 呼び直すはずなので、ここでは同一インスタンスに新しい httpClient は注入できない
-      // ため、代わりに「1回失敗しても urlnamePromise がキャッシュされていない」ことだけを
-      // 確認する目的で、同一 Publisher に対して2回目の publish を試み、2回目も
-      // current_user を叩いていることを確認する。
-      const { httpClient: secondClient } = makeDefaultHttpClient();
-      const publisher2 = createNotePublisher({
-        config: buildConfig(),
-        httpClient: secondClient,
-        env: COOKIE_ENV,
-      });
-      const result = await publisher2.publish(buildArticle(), null);
+      const result = await publisher.publish(buildArticle(), null);
+      expect(calls.filter((call) => call.url.endsWith('/current_user'))).toHaveLength(2);
       expect(result.result).toBe('created');
     });
   });
@@ -629,6 +617,9 @@ describe('createNotePublisher', () => {
         free_body: string;
       };
       expect(payload.body_length).toBe(computeNoteBodyLength(markdown));
+      // 固定値でも回帰を検知する(「見出し」(3) + 「本文テキストです。」(9) + 「強調」(2) +
+      // 「も含みます。」(6) = 20 コードポイント)。
+      expect(payload.body_length).toBe(20);
       // HTML 文字列(タグ込み)の長さとは明確に異なる(HTML の方が長い)。
       expect(payload.body_length).toBeLessThan(payload.free_body.length);
     });

@@ -169,7 +169,35 @@ describe('renderNoteBodyHtml: degradations', () => {
   it('degrades a raw HTML block to escaped literal text (not executed)', () => {
     const { html } = render('<div class="raw">hello</div>\n');
     expect(html).toContain('&lt;div');
-    expect(html).not.toMatch(/<div(?!\s+class="raw">hello<\/div>)/);
+    expect(html).not.toContain('<div');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// リンクのスキーム制限(javascript:/data: 等はプレーンテキスト化)。
+// ---------------------------------------------------------------------------
+
+describe('renderNoteBodyHtml: link scheme allowlist', () => {
+  it('renders an http(s) link as <a href>', () => {
+    const { html } = render('[text](https://example.com/)');
+    expect(html).toBe('<p name="id-0" id="id-0"><a href="https://example.com/">text</a></p>');
+  });
+
+  it('renders a mailto link as <a href>', () => {
+    const { html } = render('[mail me](mailto:me@example.com)');
+    expect(html).toBe('<p name="id-0" id="id-0"><a href="mailto:me@example.com">mail me</a></p>');
+  });
+
+  it('renders a javascript: link as plain text, not an anchor', () => {
+    const { html } = render('[click me](javascript:alert(1))');
+    expect(html).toBe('<p name="id-0" id="id-0">click me</p>');
+    expect(html).not.toContain('<a ');
+  });
+
+  it('renders a data: link as plain text, not an anchor', () => {
+    const { html } = render('[payload](data:text/html,%3Cscript%3E)');
+    expect(html).toBe('<p name="id-0" id="id-0">payload</p>');
+    expect(html).not.toContain('<a ');
   });
 });
 
@@ -267,5 +295,15 @@ describe('computeNoteBodyLength / body_length', () => {
     const markdown = '# Heading\n\nSome paragraph text.\n';
     const { html, bodyLength } = render(markdown);
     expect(bodyLength).toBeLessThan(html.length);
+  });
+
+  it('excludes an image alt text from the visible-text count (includeImageAlt: false)', () => {
+    const markdown = '![this is alt text](note2web-asset://img-1)\n\nvisible body text.\n';
+    const { bodyLength } = render(markdown, new Map([['img-1', 'key-1']]));
+    // "visible body text." のみが可視テキストとしてカウントされ、alt("this is alt text")は
+    // 含まれない。固定値で回帰を検知する(alt を含めれば 34 になってしまうところ)。
+    expect(bodyLength).toBe('visible body text.'.length);
+    expect(bodyLength).toBe(18);
+    expect(bodyLength).toBe(computeNoteBodyLength(markdown));
   });
 });

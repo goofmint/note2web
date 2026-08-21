@@ -23,6 +23,12 @@
  *   (b) 書き込み系リクエストに追加ヘッダが要るか — `buildNoteHeaders` に `Origin`/`Referer`/
  *       `X-Requested-With` を固定で付与している(一箇所に集約)
  *   (c) presigned レスポンスから `<KEY>` を導出する方法 — `deriveImageKey` に分離してある
+ *   (e) presigned POST 発行リクエスト(`POST /api/v3/images/upload/presigned_post`)のボディの形
+ *       — `uploadImage` に集約。元記事はこのエンドポイントの存在は述べているが、リクエスト
+ *       ボディの具体的なフィールド名までは示していないため、初期実装は `{ filename,
+ *       content_type }`(アップロードするファイル名と MIME タイプ)という推測を採用する。
+ *       実機確認で異なるフィールド名・追加フィールドが必要と判明した場合、`uploadImage` 内の
+ *       この1箇所だけを差し替えればよい
  */
 
 // ---------------------------------------------------------------------------
@@ -150,19 +156,61 @@ function assertNoteApiOk(response: NoteHttpResponse, description: string): void 
 }
 
 // ---------------------------------------------------------------------------
+// cookie 値のバリデーション(コピペミス対策)。
+// ---------------------------------------------------------------------------
+
+/** 利用者が cookie 名ごとコピーしてしまった場合に取り除くプレフィックス。 */
+const NOTE_SESSION_COOKIE_NAME_PREFIX = '_note_session_v5=';
+
+/**
+ * 制御文字(`\r`/`\n` 等、DevTools からのコピー時に紛れ込みがちな末尾改行を含む)を検出する。
+ * `Cookie` ヘッダへそのまま混入するとヘッダインジェクション等の原因になるため、これらを含む
+ * 値は `Cookie` ヘッダを組み立てる前に拒否する。
+ */
+// eslint-disable-next-line no-control-regex -- 制御文字の検出そのものが目的の意図的なパターン。
+const NOTE_SESSION_COOKIE_CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f]/;
+
+/**
+ * `Cookie` ヘッダへ渡す前に cookie 値を検証・正規化する。
+ *   1. 値が `_note_session_v5=` で始まる場合、そのプレフィックスを取り除く(cookie の
+ *      「名前=値」のペアをまるごとコピーしてしまった、というありがちな貼り付けミスへの
+ *      親切な対応)。
+ *   2. 取り除いた後の値に制御文字が残っている場合、値そのものを一切含まない明確な設定エラー
+ *      を投げる(接続系エラーとは分類しない——`sendNoteRequest` の呼び出し前に検証するため、
+ *      HTTP リクエスト自体が発生しない)。
+ * 戻り値は `_note_session_v5=` の名前・`=`・末尾の改行を含まない、cookie の値のみ。
+ */
+function sanitizeNoteSessionCookieValue(cookie: string): string {
+  const value = cookie.startsWith(NOTE_SESSION_COOKIE_NAME_PREFIX)
+    ? cookie.slice(NOTE_SESSION_COOKIE_NAME_PREFIX.length)
+    : cookie;
+  if (NOTE_SESSION_COOKIE_CONTROL_CHAR_PATTERN.test(value)) {
+    throw new Error(
+      'NoteClient: the note.com session cookie value (note.session_cookie_env) contains control ' +
+        'characters (e.g. a trailing newline left over from copy-paste); copy only the cookie ' +
+        'VALUE — without the "_note_session_v5=" name/"=" prefix and without a trailing newline — ' +
+        'from DevTools → Application → Cookies.',
+    );
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
 // ヘッダ組み立て(実機確認課題 (b): 追加ヘッダの要否を一箇所に集約)。
 // ---------------------------------------------------------------------------
 
 /**
  * 全リクエスト共通のヘッダを組み立てる(`Cookie` + 実機確認課題(b)の追加ヘッダ)。
- * cookie の値は `Cookie` ヘッダ以外(argv・ログ・例外メッセージ等)には一切現れない。
+ * cookie の値は `sanitizeNoteSessionCookieValue` で検証・正規化してから使う。cookie の値は
+ * `Cookie` ヘッダ以外(argv・ログ・例外メッセージ等)には一切現れない。
  */
 function buildNoteHeaders(
   cookie: string,
   extra: Record<string, string> = {},
 ): Record<string, string> {
+  const value = sanitizeNoteSessionCookieValue(cookie);
   return {
-    Cookie: `_note_session_v5=${cookie}`,
+    Cookie: `_note_session_v5=${value}`,
     // 実機確認課題(b): 書き込み系エンドポイントがこれらのヘッダを要求するかは未確認。
     // ブラウザからの通常アクセスを模す一般的なヘッダとして固定で付与する。
     Origin: 'https://note.com',
@@ -240,12 +288,20 @@ export interface NoteDraft {
   key: string;
 }
 
+/**
+ * 元記事は具体的な JSON 構造までは示していないため、`parseCurrentUserResponse` と同じ寛容な
+ * 解析方針を踏襲し、よくある `{ data: { id, key } }` の入れ子と、フラットな `{ id, key }`
+ * の両方を許容する。
+ */
 function parseDraftResponse(body: string): NoteDraft {
   const record = asRecord(
     parseJsonBody(body, 'POST /api/v1/text_notes'),
     'POST /api/v1/text_notes',
   );
-  const { id, key } = record;
+  const nested = record.data;
+  const candidate =
+    nested !== null && typeof nested === 'object' ? (nested as Record<string, unknown>) : record;
+  const { id, key } = candidate;
   if (typeof id !== 'number' && typeof id !== 'string') {
     throw new Error('NoteClient: draft-reserve response is missing a numeric/string "id"');
   }
@@ -461,6 +517,11 @@ export async function getCurrentUser(
  * (`x-amz-security-token` の欠落は 403 InvalidAccessKeyId になるため必須)、`file` パートを
  * **最後**に追加して `data.action`(S3 URL)へ POST する。成功は 204(または他の 2xx)。
  * いずれの POST も自動リトライしない(モジュール冒頭「送信」節参照)。
+ *
+ * presigned POST 発行リクエストのボディは `{ filename, content_type }`(実機確認課題 (e)、
+ * モジュール冒頭 JSDoc 参照)——元記事はエンドポイントの存在のみを述べ、リクエストボディの
+ * フィールド名までは示していないため、アップロード対象のファイル名と MIME タイプをそのまま
+ * 送る形を初期実装として採用する。
  */
 export async function uploadImage(
   httpClient: NoteHttpClient,
@@ -474,7 +535,7 @@ export async function uploadImage(
     method: 'POST',
     url: `${NOTE_API_BASE_URL}/api/v3/images/upload/presigned_post`,
     headers: buildNoteHeaders(cookie, { 'Content-Type': 'application/json' }),
-    body: '{}',
+    body: JSON.stringify({ filename, content_type: contentType }),
     retryOnConnectionError: false,
     description: 'POST /api/v3/images/upload/presigned_post',
   });

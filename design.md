@@ -267,6 +267,7 @@ interface Publisher {
   - (c) presigned レスポンスから `<KEY>` を導出する方法 — 初期実装は `data.post.key` の末尾の `img/` 以降を取る(`src/publishers/note-client.ts` の `deriveImageKey`)
   - (d) `<img>` の width/height 属性 — 画像デコーダを持たずピクセル寸法が分からないため初期実装では省略。note.com 側が要求する場合は将来対応
 - **認証失敗の扱い**: 401/403 相当のレスポンスは `NoteAuthError`(`src/publishers/note-client.ts`)として、cookie の値を含めずブラウザでの再取得手順(DevTools → Application → Cookies → `_note_session_v5`)のみをメッセージに含めて投げる。cookie の値そのものは `Cookie` ヘッダ以外(argv・ログ・エラーメッセージ)に一切現れない(FR-30)
+- **状態ファイル移行手順(旧 note.workspace 時代)**: issue #86 以前の状態 JSON は `target` に旧 noet ワークスペース(`note.workspace`)のパス文字列を記録していた。現行実装の `target` は固定値 `"note.com"`(`src/state/derive.ts` の `NOTE_TARGET`)であるため、この不一致により既存の状態ファイルをそのまま使うと §8 の検証(`target` 不一致 → exit 2)に引っかかる。既存の `remoteId` を失わず引き継ぎ重複記事の作成を避けたい場合は、状態 JSON の `target` フィールドを手動で `"note.com"` に書き換えてから再実行すること(Qiita の移行手順(§5.7 QiitaPublisher 節「移行後の状態ファイル互換性」)と同じ書き方。README「note.com」節にも同じ移行注記を記載)
 
 #### HatenaPublisher
 

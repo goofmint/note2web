@@ -201,8 +201,6 @@ export function isImageExtension(ext: string): boolean {
 // プレースホルダの走査(`transform/body.ts` の `makeAssetPlaceholder` 契約と共有)。
 // ---------------------------------------------------------------------------
 
-const PLACEHOLDER_PREFIX = 'note2web-asset://';
-
 /**
  * `makeAssetPlaceholder` が生成する `note2web-asset://<identifier>` を検出する。
  * `identifier` は Markdown の画像/リンク URL の位置に現れる(`transform/body.ts` の
@@ -391,6 +389,11 @@ export async function processNoteBody(
     attachments.map((attachment) => [attachment.identifier, attachment] as const),
   );
   const resolvedUrlByIdentifier = new Map<string, string>();
+  // note.com 向けに意図的に未解決のまま残す identifier の集合(下記ループの note.com 分岐で
+  // 収集する)。置換ステップ・末尾の不変条件検査は、この集合に含まれる identifier だけを
+  // 例外として扱う——`service === 'note'` で一律にスキップしていた旧実装と異なり、note.com
+  // 向けであっても集合に無い identifier が未解決のまま残っていれば不変条件違反として検出する。
+  const intentionallyUnresolved = new Set<string>();
 
   // 重複排除・クラッシュ安全性(design.md §5.6 書き込みポイント`#1`)の両方のため、
   // 並列化せず逐次アップロードする(モジュール先頭 JSDoc 参照)。
@@ -411,7 +414,16 @@ export async function processNoteBody(
     // (`src/publishers/note.ts`)が `RenderedArticle.attachments`/`assetSourceDir` から
     // 直接行う。`resolvedUrlByIdentifier` へ登録しないことで、下記の置換ステップが
     // このプレースホルダをそのまま温存する。
+    //
+    // `isImageExtension` はここでの「note.com 向けは未解決のまま残す」判定に使う集合であり、
+    // 意図的に `src/publishers/note.ts` の `NOTE_SUPPORTED_IMAGE_EXTENSIONS`(note.com の
+    // presigned アップロード API が実際に受け付ける拡張子)よりも**広い**(例: `.heic` は
+    // `isImageExtension` では true だが `NOTE_SUPPORTED_IMAGE_EXTENSIONS` には含まれない)。
+    // 差分の拡張子はここでは未解決のまま素通りし、Publisher 側
+    // (`uploadArticleImages`)がノート単位の分かりやすいエラーとして拒否する(意図的な設計。
+    // `test/publishers/note.test.ts` の photo.heic のテストで検証済み)。
     if (service === 'note' && isImageExtension(ext)) {
+      intentionallyUnresolved.add(identifier);
       continue;
     }
 
@@ -484,7 +496,7 @@ export async function processNoteBody(
   const replaced = markdown.replace(PLACEHOLDER_PATTERN, (fullMatch, identifier: string) => {
     const url = resolvedUrlByIdentifier.get(identifier);
     if (url === undefined) {
-      if (service === 'note') {
+      if (intentionallyUnresolved.has(identifier)) {
         // note.com 向けの画像プレースホルダは意図的に未解決のまま温存する(上記ループの
         // note.com 分岐参照)。プレースホルダそのものをそのまま返す(置換しない)。
         return fullMatch;
@@ -500,13 +512,18 @@ export async function processNoteBody(
   });
 
   // 受け入れ条件(design.md §5.5「全プレースホルダ解決後にプレースホルダが1つも残っていない
-  // ことを確認する」)。note.com は画像プレースホルダを意図的に未解決のまま残すため、この
-  // 不変条件検査自体の対象外とする(上記参照)。
-  if (service !== 'note' && replaced.includes(PLACEHOLDER_PREFIX)) {
-    throw new AssetUploadError(
-      'unresolved note2web-asset:// placeholder remained in the body after replacement',
-      { noteUuid },
-    );
+  // ことを確認する」)。`intentionallyUnresolved`(note.com 向けの画像プレースホルダ)に含まれる
+  // identifier だけを例外として許容し、それ以外の identifier が未解決のまま残っていれば
+  // note.com 向けであっても不変条件違反として検出する(`service === 'note'` で一律にこの検査
+  // 自体をスキップしていた旧実装より狭い、identifier 単位の例外)。
+  for (const match of replaced.matchAll(PLACEHOLDER_PATTERN)) {
+    const identifier = match[1];
+    if (identifier === undefined || !intentionallyUnresolved.has(identifier)) {
+      throw new AssetUploadError(
+        'unresolved note2web-asset:// placeholder remained in the body after replacement',
+        { noteUuid, identifier },
+      );
+    }
   }
 
   return { markdown: replaced };

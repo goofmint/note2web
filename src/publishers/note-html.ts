@@ -41,12 +41,18 @@
  * エスケープ済みの文字列としてのみ表示される。GFM のタスクリスト(`- [x] …`)はチェック
  * ボックス要素ではなく `<li>` 先頭の `[x] `/`[ ] ` というプレーンテキストに劣化させる
  * (note.com がチェックボックスをネイティブサポートするか元記事に記載が無いため)。
- * 参照定義(`definition` ノード)は本来不可視のため出力しない(劣化ではない)。
+ * 参照定義(`definition` ノード)は本来不可視のため出力しない(劣化ではない)。コードブロック
+ * の言語ヒント(```` ```lang ```` のトークン)も意図的に落とす——`<pre><code>` に
+ * `class="language-xxx"` 等は一切付与しない。note.com がシンタックスハイライト用にどの
+ * クラス名・属性規約を期待するか元記事に記載が無いため、まずは何も付与しない安全側の初期実装
+ * とし、実機確認で判明した場合に対応する(コードブロックの逐語性そのものは損なわれない)。
  *
  * **body_length(500 罠 3)**: `free_body` の HTML 長ではなく、可視テキストの Unicode
  * コードポイント数でなければならない(元記事)。`computeNoteBodyLength` は mdast の
  * テキスト内容(`mdast-util-to-string`)からこれを計算する——HTML 文字列を組み立てた後に
- * タグを正規表現で剥がすのではなく、構文木から直接テキストのみを取り出す。
+ * タグを正規表現で剥がすのではなく、構文木から直接テキストのみを取り出す。画像の alt
+ * テキストは `includeImageAlt: false` によりこのカウントに含めない(alt は本文として画面に
+ * 表示されるテキストではないため)。
  */
 
 import { randomUUID } from 'node:crypto';
@@ -81,6 +87,14 @@ const noteBodyMarkdownParser = unified().use(remarkParse).use(remarkGfm).freeze(
 
 /** `note2web-asset://<identifier>` プレースホルダの接頭辞(`assets/uploader.ts` と共有の契約)。 */
 const ASSET_PLACEHOLDER_PREFIX = 'note2web-asset://';
+
+/**
+ * `<a href>` として安全にアンカー化してよいスキーム(`http:`/`https:`/`mailto:` のみ)。
+ * `javascript:`/`data:` 等それ以外のスキームは note.com の本文 HTML(`free_body`)へ
+ * そのまま埋め込まない——リンクの内容をプレーンテキストとして出力する(下記
+ * `renderInlineNode` の `link` ケース参照)。
+ */
+const NOTE_LINK_SAFE_URL_PATTERN = /^(https?:|mailto:)/i;
 
 // ---------------------------------------------------------------------------
 // エラー型。
@@ -128,9 +142,14 @@ function escapeHtml(value: string): string {
 // body_length(モジュール冒頭 JSDoc「body_length」参照)。
 // ---------------------------------------------------------------------------
 
-/** 可視テキストの Unicode コードポイント数を数える(サロゲートペアを1文字として数える)。 */
+/**
+ * 可視テキストの Unicode コードポイント数を数える(サロゲートペアを1文字として数える)。
+ * `includeImageAlt: false` を指定し、画像の alt テキストはカウントに含めない——note.com の
+ * 可視文字カウンタは画像を選択して表示しても alt テキスト自体は本文として表示されないため、
+ * `body_length`(500 罠3)もそれに合わせて alt を除外する。
+ */
 function countVisibleCodePoints(tree: Root): number {
-  return [...mdastToString(tree)].length;
+  return [...mdastToString(tree, { includeImageAlt: false })].length;
 }
 
 /**
@@ -221,6 +240,11 @@ export function renderNoteBodyHtml(markdown: string, options: NoteHtmlOptions): 
         return '<br>';
       case 'link': {
         const link = node as Link;
+        if (!NOTE_LINK_SAFE_URL_PATTERN.test(link.url)) {
+          // http(s)/mailto 以外のスキーム(javascript:/data: 等)はアンカー化せず、
+          // リンクの内容をプレーンテキストとして出力する(モジュール冒頭 JSDoc参照)。
+          return renderInline(link.children);
+        }
         return `<a href="${escapeHtml(link.url)}">${renderInline(link.children)}</a>`;
       }
       case 'image':
@@ -261,9 +285,7 @@ export function renderNoteBodyHtml(markdown: string, options: NoteHtmlOptions): 
         const paragraph = node as Paragraph;
         const image = soleImage(paragraph);
         if (image !== undefined) {
-          const src = resolveImageSrc(image.url);
-          const alt = image.alt !== null && image.alt !== undefined ? escapeHtml(image.alt) : '';
-          return `<figure${attrs}><img src="${src}" alt="${alt}"></figure>`;
+          return `<figure${attrs}>${renderImageTag(image)}</figure>`;
         }
         return `<p${attrs}>${renderInline(paragraph.children)}</p>`;
       }
