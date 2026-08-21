@@ -117,6 +117,9 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
@@ -145,12 +148,71 @@ function stripLeadingHash(tag: string): string {
 }
 
 /**
- * 外部 URL を指す Markdown 画像参照(`![alt](http(s)://…)`)のパターン
- * (`renderNoteArticle` の JSDoc 参照)。添付経由の画像は `processNoteBody` が
- * `./images/...` のローカル相対パスへ解決済みなので、ここに掛かるのは添付を伴わない
- * `<img src="外部URL">` 由来の参照だけ。
+ * `findExternalImageUrl` 用の Markdown パーサ(`remark-parse` + `remark-gfm`。
+ * `src/transform/body.ts` のプロセッサと同様、ステートレスなのでモジュールスコープで
+ * 使い回す)。正規表現ではなく構文解析で画像ノードだけを検査する——正規表現だと
+ * コードフェンス・インラインコード中のリテラルな `![alt](https://…)` に誤反応して
+ * 画像ではない本文でノートを失敗させ、逆に参照形式(`![alt][ref]`)の画像は見逃す
+ * (PR #85 CodeRabbit レビュー)。
  */
-const EXTERNAL_IMAGE_REFERENCE_PATTERN = /!\[[^\]]*\]\(\s*https?:\/\//;
+const noteMarkdownParser = unified().use(remarkParse).use(remarkGfm).freeze();
+
+/** mdast ノードの再帰走査(`src/transform/body.ts` の `unwrapAutolinks` と同じ軽量パターン)。 */
+function visitMdastNodes(node: unknown, visit: (node: { type?: unknown }) => void): void {
+  if (typeof node !== 'object' || node === null) {
+    return;
+  }
+  visit(node as { type?: unknown });
+  const children = (node as { children?: unknown }).children;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      visitMdastNodes(child, visit);
+    }
+  }
+}
+
+/**
+ * 本文 Markdown を構文解析し、外部 URL(`http(s)://`)を指す**画像ノード**
+ * (インライン `![alt](URL)`・参照形式 `![alt][ref]` + 定義のいずれも)を探して
+ * 最初に見つかった URL を返す。コードブロック・インラインコード・エスケープ済みの
+ * 画像構文は画像ノードにならないため対象外(`renderNoteArticle` の JSDoc 参照)。
+ * 添付経由の画像は `processNoteBody` が `./images/...` のローカル相対パスへ解決済み
+ * なので、ここに掛かるのは添付を伴わない `<img src="外部URL">` 由来の参照だけ。
+ */
+function findExternalImageUrl(markdown: string): string | undefined {
+  const tree = noteMarkdownParser.parse(markdown);
+  const isExternal = (url: string): boolean => /^https?:\/\//i.test(url);
+
+  const definitionUrls = new Map<string, string>();
+  visitMdastNodes(tree, (node) => {
+    if (node.type === 'definition') {
+      const definition = node as { identifier: string; url: string };
+      definitionUrls.set(definition.identifier, definition.url);
+    }
+  });
+
+  let found: string | undefined;
+  visitMdastNodes(tree, (node) => {
+    if (found !== undefined) {
+      return;
+    }
+    if (node.type === 'image') {
+      const image = node as { url: string };
+      if (isExternal(image.url)) {
+        found = image.url;
+      }
+      return;
+    }
+    if (node.type === 'imageReference') {
+      const reference = node as { identifier: string };
+      const url = definitionUrls.get(reference.identifier);
+      if (url !== undefined && isExternal(url)) {
+        found = url;
+      }
+    }
+  });
+  return found;
+}
 
 /**
  * 本文に外部 URL の画像参照が含まれていることを表す(note.com の ProseMirror は外部 URL の
@@ -162,17 +224,20 @@ const EXTERNAL_IMAGE_REFERENCE_PATTERN = /!\[[^\]]*\]\(\s*https?:\/\//;
 export class NoteExternalImageError extends Error {
   /** 検証に失敗したノートの UUID。 */
   readonly noteUuid: string;
+  /** 検出された外部 URL(問題の画像を特定しやすくするため)。 */
+  readonly imageUrl: string;
 
-  constructor(noteUuid: string) {
+  constructor(noteUuid: string, imageUrl: string) {
     super(
       `note.com cannot render images referenced by external URL (design.md §5.7): note.com's ` +
         `ProseMirror editor shows markdown image syntax with an http(s) URL as literal text, and ` +
-        `noet skips http(s) references when uploading images; note "${noteUuid}" contains at ` +
-        'least one external-URL image reference (likely an <img src="…"> without an Apple Notes ' +
-        'attachment) — remove the image, or publish this note to a different service instead',
+        `noet skips http(s) references when uploading images; note "${noteUuid}" contains an ` +
+        `external-URL image reference (${imageUrl}, likely an <img src="…"> without an Apple ` +
+        'Notes attachment) — remove the image, or publish this note to a different service instead',
     );
     this.name = 'NoteExternalImageError';
     this.noteUuid = noteUuid;
+    this.imageUrl = imageUrl;
   }
 }
 
@@ -199,8 +264,9 @@ export const renderNoteArticle: NoteRenderer = ({
   note,
   markdown,
 }: RenderNoteInput): RenderedArticle => {
-  if (EXTERNAL_IMAGE_REFERENCE_PATTERN.test(markdown)) {
-    throw new NoteExternalImageError(note.uuid);
+  const externalImageUrl = findExternalImageUrl(markdown);
+  if (externalImageUrl !== undefined) {
+    throw new NoteExternalImageError(note.uuid, externalImageUrl);
   }
 
   const entries: FrontmatterEntry[] = [

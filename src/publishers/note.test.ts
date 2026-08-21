@@ -154,10 +154,50 @@ describe('renderNoteArticle with an already-resolved local image reference', () 
     },
   );
 
+  it('throws NoteExternalImageError for a reference-style external image (![alt][ref] + definition)', () => {
+    const note = buildNote();
+    const markdown = '![alt][pic]\n\n[pic]: https://example.com/a.png\n';
+    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+      NoteExternalImageError,
+    );
+  });
+
+  it('throws NoteExternalImageError for an angle-bracketed external image URL', () => {
+    const note = buildNote();
+    const markdown = '![alt](<https://example.com/a b.png>)\n';
+    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+      NoteExternalImageError,
+    );
+  });
+
+  // 正規表現ではなく構文解析で検査するため、コードブロック・インラインコード中の
+  // リテラルな画像構文には反応しない(PR #85 CodeRabbit レビュー)。
+  it('does not throw for a literal image syntax inside a fenced code block', () => {
+    const note = buildNote();
+    const markdown = '```md\n![example](https://example.com/a.png)\n```\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('![example](https://example.com/a.png)');
+  });
+
+  it('does not throw for a literal image syntax inside inline code', () => {
+    const note = buildNote();
+    const markdown = 'use `![alt](https://example.com/a.png)` syntax\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('`![alt](https://example.com/a.png)`');
+  });
+
   it('does not treat a plain external link (no "!") as an image reference', () => {
     const note = buildNote();
     const markdown = 'see [the docs](https://example.com/a.png) for details\n';
     const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
     expect(article.artifact).toContain('[the docs](https://example.com/a.png)');
+  });
+
+  it('includes the offending URL in the error message', () => {
+    const note = buildNote();
+    const markdown = '![alt](https://example.com/broken.png)\n';
+    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+      /https:\/\/example\.com\/broken\.png/,
+    );
   });
 });
