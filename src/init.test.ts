@@ -732,6 +732,120 @@ describe('runInit', () => {
       expect(envContent).toContain('R2_SECRET_ACCESS_KEY=');
     });
 
+    describe('note service: NOET_PATH env file entry (実機報告)', () => {
+      it('writes NOET_PATH into the env file with the answered value (not blank), unlike token *_env names', async () => {
+        const promptFn = makePromptFn({
+          ...SERVICE_ANSWERS.note,
+          'Generate the launchd': 'y',
+          'Path to the noet binary': '/opt/tools/noet',
+        });
+        const fs = createFakeFs();
+
+        await runInit(
+          buildOptions({
+            promptFn,
+            fileExistsFn: fs.fileExistsFn,
+            readFileFn: fs.readFileFn,
+            writeFileFn: fs.writeFileFn,
+            mkdirFn: fs.mkdirFn,
+            chmodFn: fs.chmodFn,
+            env: {},
+          }),
+        );
+
+        const envPath = `${HOME_DIR}/.config/note2web/env`;
+        const envContent = fs.files.get(envPath) ?? '';
+        expect(envContent).toContain('NOET_PATH=/opt/tools/noet');
+        // FR-30: 秘匿情報(access_key_id_env が指す名前)は引き続き値が空欄。
+        expect(envContent).toMatch(/R2_ACCESS_KEY_ID=\n/);
+      });
+
+      it('defaults the noet path prompt to ~/.cargo/bin/noet when answered blank', async () => {
+        const promptFn = makePromptFn({
+          ...SERVICE_ANSWERS.note,
+          'Generate the launchd': 'y',
+        });
+        const fs = createFakeFs();
+
+        await runInit(
+          buildOptions({
+            promptFn,
+            fileExistsFn: fs.fileExistsFn,
+            readFileFn: fs.readFileFn,
+            writeFileFn: fs.writeFileFn,
+            mkdirFn: fs.mkdirFn,
+            chmodFn: fs.chmodFn,
+            env: {},
+          }),
+        );
+
+        const envPath = `${HOME_DIR}/.config/note2web/env`;
+        const envContent = fs.files.get(envPath) ?? '';
+        expect(envContent).toContain('NOET_PATH=~/.cargo/bin/noet');
+      });
+
+      it('re-prompts until an absolute path is entered (relative NOET_PATH is rejected, PR #84 review)', async () => {
+        const promptFn = makePromptFn({
+          ...SERVICE_ANSWERS.note,
+          'Generate the launchd': 'y',
+          // 1回目は相対パス(拒否されて問い直し)、2回目は絶対パス。
+          'Path to the noet binary': ['./noet', '/opt/tools/noet'],
+        });
+        const fs = createFakeFs();
+
+        await runInit(
+          buildOptions({
+            promptFn,
+            fileExistsFn: fs.fileExistsFn,
+            readFileFn: fs.readFileFn,
+            writeFileFn: fs.writeFileFn,
+            mkdirFn: fs.mkdirFn,
+            chmodFn: fs.chmodFn,
+            env: {},
+          }),
+        );
+
+        // 問い直しのプロンプト文言(絶対パス要求)が実際に表示されている。
+        const askedQuestions = promptFn.mock.calls.map(([question]) => question);
+        expect(
+          askedQuestions.some((question) => question.includes('must be an absolute path')),
+        ).toBe(true);
+
+        const envPath = `${HOME_DIR}/.config/note2web/env`;
+        const envContent = fs.files.get(envPath) ?? '';
+        expect(envContent).toContain('NOET_PATH=/opt/tools/noet');
+        expect(envContent).not.toContain('NOET_PATH=./noet');
+      });
+
+      it('leaves an existing NOET_PATH line untouched on re-run (append-only contract)', async () => {
+        const envPath = `${HOME_DIR}/.config/note2web/env`;
+        const promptFn = makePromptFn({
+          ...SERVICE_ANSWERS.note,
+          'Generate the launchd': 'y',
+          'Path to the noet binary': '/opt/tools/noet-new',
+        });
+        const fs = createFakeFs({
+          [envPath]: '# pre-existing\nNOET_PATH=/opt/tools/noet-old\n',
+        });
+
+        await runInit(
+          buildOptions({
+            promptFn,
+            fileExistsFn: fs.fileExistsFn,
+            readFileFn: fs.readFileFn,
+            writeFileFn: fs.writeFileFn,
+            mkdirFn: fs.mkdirFn,
+            chmodFn: fs.chmodFn,
+            env: {},
+          }),
+        );
+
+        const envContent = fs.files.get(envPath) ?? '';
+        expect(envContent).toContain('NOET_PATH=/opt/tools/noet-old');
+        expect(envContent).not.toContain('/opt/tools/noet-new');
+      });
+    });
+
     it('notes that an old wrapper script left over from a previous version is no longer used, without touching it', async () => {
       const oldWrapperPath = `${HOME_DIR}/bin/note2web-sync.sh`;
       const promptFn = makePromptFn(LAUNCHD_ANSWERS);

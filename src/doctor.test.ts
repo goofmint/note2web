@@ -366,7 +366,7 @@ describe('runDoctorChecks', () => {
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
 
-    it('reports the missing "noet" command for note, naming it', async () => {
+    it('reports NOET_PATH as unset for note, without falling back to a PATH lookup for "noet"', async () => {
       const runSubprocessFn = vi.fn<
         (options: RunSubprocessOptions) => Promise<RunSubprocessResult>
       >(() => Promise.resolve(success()));
@@ -379,14 +379,18 @@ describe('runDoctorChecks', () => {
           exporter: { parser_path: parserPath, notes_container: '/dev/null' },
         }),
         {
-          commandExistsFn: (command) => Promise.resolve(command === 'ruby'),
+          commandExistsFn: (command) =>
+            Promise.resolve(command === 'ruby' || command === 'bundle' || command === 'noet'),
+          fileReadableFn: () => Promise.resolve(true),
           env: {},
           runSubprocessFn,
           dependencyRunSubprocessFn: fakeRubyBundleSubprocess(),
         },
       );
 
-      expect(error.problems.map((problem) => problem.message).join('\n')).toMatch(/"noet"/);
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/NOET_PATH/);
+      expect(messages).not.toMatch(/was not found on PATH/);
       expect(runSubprocessFn).not.toHaveBeenCalled();
     });
   });
