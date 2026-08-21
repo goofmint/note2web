@@ -8,9 +8,11 @@
  * 1. **launchd 生成のセキュリティ契約(PR #60 レビュー、issue #71 で node 直接起動へ改訂)**:
  *    README の「cron / launchd での定期実行」節が定める「env ファイル + plist」の2点構成を
  *    踏襲し、**秘匿情報(または `*_env` が指す値)を plist の `EnvironmentVariables` へ書かない**。
- *    値そのものは常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く。
- *    `EnvironmentVariables` に書いてよいのは非秘匿の `PATH` 一つだけ(理由は `buildPlist` の
- *    JSDoc を参照)。
+ *    秘匿情報の値は常に空欄のテンプレートとしてのみ `~/.config/note2web/env` に書く——ただし
+ *    `NOET_PATH`(実機報告。§5.7 NotePublisher の `noet` バイナリ解決先)のように秘匿情報
+ *    ではなく、かつ init の対話で既に値を集めているものは例外で、値入りの行として書く
+ *    (`ensureEnvFile`/`EnvFileEntry` 参照)。`EnvironmentVariables` に書いてよいのは
+ *    非秘匿の `PATH` 一つだけ(理由は `buildPlist` の JSDoc を参照)。
  * 2. **依存 CLI のアシスト**: ruby / apple_cloud_notes_parser / gh / noet が無い場合も
  *    **自動インストールは一切行わず**、手順を日本語で案内するだけに留める(`init` の目的は
  *    ブートストラップの補助であり、欠如を理由に失敗させない)。qiita は issue #82 で
@@ -625,9 +627,16 @@ async function collectDependencyWarnings(
     commandExistsFn: (command: string) => Promise<boolean>;
     fileExistsFn: (path: string) => Promise<boolean>;
     env: NodeJS.ProcessEnv;
+    /**
+     * `service === 'note'` のとき、直前に対話で尋ねた `NOET_PATH` の回答(`~` 展開前)。
+     * `noet` は PATH からではなく常にこのパスから解決される契約(`src/publishers/note.ts`
+     * の `resolveNoetCommand`、PATH フォールバックなし)であるため、依存警告も PATH ではなく
+     * このパスの実在を見る。
+     */
+    noetPath?: string;
   },
 ): Promise<string[]> {
-  const { commandExistsFn, fileExistsFn, env } = options;
+  const { commandExistsFn, fileExistsFn, env, noetPath } = options;
   const warnings: string[] = [];
 
   if (!(await commandExistsFn('ruby'))) {
@@ -676,11 +685,18 @@ async function collectDependencyWarnings(
       );
     }
   } else if (service === 'note') {
-    if (!(await commandExistsFn('noet'))) {
+    // 実機報告: `noet` は cargo install で `~/.cargo/bin/noet` に置かれることが多く、
+    // launchd の PATH はこれを含まないため、`noet` は PATH からではなく直前に集めた
+    // `NOET_PATH` の回答が指すパスから解決する契約(PATH フォールバックなし)。ここでの
+    // 依存警告も PATH ではなく、そのパスに実際にバイナリがあるかどうかを見る。
+    const resolvedNoetPath = noetPath !== undefined ? expandHome(noetPath) : undefined;
+    if (resolvedNoetPath === undefined || !(await fileExistsFn(resolvedNoetPath))) {
       warnings.push(
-        '[依存] noet コマンドが見つかりません。https://github.com/kako-jun/noet の手順に従って' +
-          'インストールしてください。加えて、note.com にログイン済みの実 Chrome ブラウザと noet 拡張機能が' +
-          '常時起動している必要があります(詳細は README の「note.com」節を参照)。',
+        `[依存] noet バイナリが見つかりません${resolvedNoetPath !== undefined ? `(${resolvedNoetPath})` : ''}。` +
+          'https://github.com/kako-jun/noet の手順に従ってインストールし、正しい絶対パスを ' +
+          'NOET_PATH に設定してください(env ファイルに init が書き込んだ値を必要なら編集してください)。' +
+          '加えて、note.com にログイン済みの実 Chrome ブラウザと noet 拡張機能が常時起動している必要があります' +
+          '(詳細は README の「note.com」節を参照)。',
       );
     }
   }
@@ -697,18 +713,34 @@ async function collectDependencyWarnings(
   return warnings;
 }
 
-/** env ファイルの1行を組み立てる(値は常に空欄。FR-30 / PR #60 レビューの契約)。 */
-function envFileLine(name: string): string {
-  return `# ${name}: 値をここに設定してください\n${name}=\n`;
+/**
+ * env ファイルに書き込む1エントリ。`value` を省略(または `undefined`)すると、これまでどおり
+ * 値が空欄のテンプレート行になる(FR-30: トークン等の秘匿情報は init が値を知る術も理由も
+ * 無く、常に空欄のまま利用者に記入させる契約)。`value` を与えると、その値を書き込んだ行に
+ * なる——`NOET_PATH` のように秘匿情報ではなく(値がエラーメッセージ等に出ても構わない)、
+ * かつ `note2web init` の対話で既に値を集めているものだけがこちらを使う。
+ */
+interface EnvFileEntry {
+  name: string;
+  value?: string;
+}
+
+/** env ファイルの1行を組み立てる(`EnvFileEntry` 参照。値の有無で空欄/値入りを切り替える)。 */
+function envFileLine(entry: EnvFileEntry): string {
+  if (entry.value !== undefined) {
+    return `# ${entry.name}: note2web init が設定した値(必要なら編集してください)\n${entry.name}=${entry.value}\n`;
+  }
+  return `# ${entry.name}: 値をここに設定してください\n${entry.name}=\n`;
 }
 
 /**
- * `~/.config/note2web/env` を作成、または既存ファイルに不足している変数名だけを追記する。
- * 既存の値は一切書き換えない(CORRECTION A)。
+ * `~/.config/note2web/env` を作成、または既存ファイルに不足しているエントリだけを追記する。
+ * 既存の値は一切書き換えない(CORRECTION A。名前が既にファイル中に存在する行なら、値入りの
+ * エントリであっても上書きせず「既存」として扱う——追記専用の契約は値の有無に関わらず同じ)。
  */
 async function ensureEnvFile(
   envPath: string,
-  requiredNames: readonly string[],
+  entries: readonly EnvFileEntry[],
   options: {
     fileExistsFn: (path: string) => Promise<boolean>;
     readFileFn: (path: string) => Promise<string>;
@@ -725,6 +757,8 @@ async function ensureEnvFile(
     const header =
       '# note2web 環境変数ファイル(chmod 600 で保護)。\n' +
       '# 設定 YAML の *_env が指す名前で、値を直接ここに記入してください(YAML には書きません)。\n' +
+      '# NOET_PATH のような非秘匿の設定値は init が対話で集めた値をそのまま書き込みます\n' +
+      '# (秘匿情報である *_env 系トークンは常に空欄のままです)。\n' +
       '#\n' +
       '# [Ruby 環境のヒント](issue #67)。rbenv / rvm / Homebrew の ruby を使っている場合、\n' +
       '# 対話シェルから直接 `note2web doctor`/`sync` を実行するときに、bundle exec ruby の\n' +
@@ -735,10 +769,10 @@ async function ensureEnvFile(
       '# 必要に応じて以下のような変数をここへ追記してください:\n' +
       '#   GEM_HOME=$HOME/.gem\n' +
       '#   BUNDLE_GEMFILE=/path/to/apple_cloud_notes_parser/Gemfile\n\n';
-    const body = requiredNames.map((name) => envFileLine(name)).join('\n');
+    const body = entries.map((entry) => envFileLine(entry)).join('\n');
     await writeFileFn(envPath, `${header}${body}`, { mode: 0o600 });
     await chmodFn(envPath, 0o600);
-    return { created: true, addedNames: [...requiredNames] };
+    return { created: true, addedNames: entries.map((entry) => entry.name) };
   }
 
   const existingContent = await readFileFn(envPath);
@@ -747,15 +781,15 @@ async function ensureEnvFile(
       (match) => match[1],
     ),
   );
-  const missingNames = requiredNames.filter((name) => !existingNames.has(name));
-  if (missingNames.length > 0) {
+  const missingEntries = entries.filter((entry) => !existingNames.has(entry.name));
+  if (missingEntries.length > 0) {
     const appendix =
       `\n# note2web init により追記(${new Date().toISOString()})。値をここに設定してください。\n` +
-      missingNames.map((name) => envFileLine(name)).join('\n');
+      missingEntries.map((entry) => envFileLine(entry)).join('\n');
     await writeFileFn(envPath, `${existingContent}${appendix}`, { mode: 0o600 });
   }
   await chmodFn(envPath, 0o600);
-  return { created: false, addedNames: missingNames };
+  return { created: false, addedNames: missingEntries.map((entry) => entry.name) };
 }
 
 /**
@@ -979,6 +1013,9 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
     };
 
     const requiredEnvNames = [assets.access_key_id_env, assets.secret_access_key_env];
+    // NOET_PATH のように、init が対話で集めた「値そのもの」を env ファイルへ書き込みたい
+    // エントリ(FR-30 のとおり秘匿情報ではないものだけがここに乗る。§4 コメント参照)。
+    const prefilledEnvEntries: EnvFileEntry[] = [];
 
     if (isGitModeService(service)) {
       config.git = await collectGitBlock(ask_, service, existingDefaults?.git);
@@ -990,6 +1027,18 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       requiredEnvNames.push(config.devto.api_key_env);
     } else if (service === 'note') {
       config.note = await collectNoteBlock(ask_, existingDefaults?.note);
+      // 実機報告: `noet` は `cargo install` で導入されることが多く、その場合
+      // `~/.cargo/bin/noet` に置かれる。launchd の PATH(`buildLaunchdPath`)はこの
+      // ディレクトリを含まないため、PATH 頼みでは無人実行下で `noet` が見つからない。
+      // `NOET_PATH` に絶対パスを持たせて解決する(`src/publishers/note.ts` の
+      // `resolveNoetCommand`、`src/dependencies.ts` の `case 'note'`)——PATH への
+      // フォールバックは行わないため、この値は必須(空文字を許さない)として尋ねる。
+      const noetPathAnswer = await askRequired(
+        ask_,
+        'Path to the noet binary (written to the env file as NOET_PATH)',
+        '~/.cargo/bin/noet',
+      );
+      prefilledEnvEntries.push({ name: 'NOET_PATH', value: noetPathAnswer });
     } else if (service === 'hatena') {
       config.hatena = await collectHatenaBlock(ask_, existingDefaults?.hatena);
       requiredEnvNames.push(config.hatena.api_key_env);
@@ -1037,7 +1086,12 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       service,
       parserLibEntryPoint,
       requiredEnvNames,
-      { commandExistsFn, fileExistsFn, env },
+      {
+        commandExistsFn,
+        fileExistsFn,
+        env,
+        noetPath: prefilledEnvEntries.find((entry) => entry.name === 'NOET_PATH')?.value,
+      },
     );
     summary.push(...dependencyWarnings);
 
@@ -1052,7 +1106,13 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       // カスタムパスを指定した場合も含む)。CLI の自動読み込み(issue #70、`src/cli.ts` の
       // `join(dirname(configPath), 'env')`)が探すパスと一致させる必要があるため。
       const envPath = join(dirname(targetPath), 'env');
-      const envResult = await ensureEnvFile(envPath, requiredEnvNames, {
+      // 秘匿情報(トークン等)は常に空欄のテンプレート行、`NOET_PATH` のような非秘匿の設定は
+      // 対話で集めた値入りの行として書く(`prefilledEnvEntries`、FR-30。`EnvFileEntry` 参照)。
+      const envEntries: EnvFileEntry[] = [
+        ...requiredEnvNames.map((name) => ({ name })),
+        ...prefilledEnvEntries,
+      ];
+      const envResult = await ensureEnvFile(envPath, envEntries, {
         fileExistsFn,
         readFileFn,
         writeFileFn,
@@ -1060,7 +1120,13 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
         chmodFn,
       });
       if (envResult.created) {
-        summary.push(`Created env file template: ${envPath} (chmod 600, values still blank)`);
+        summary.push(
+          prefilledEnvEntries.length > 0
+            ? `Created env file template: ${envPath} (chmod 600; ${prefilledEnvEntries
+                .map((entry) => entry.name)
+                .join(', ')} pre-filled with the value(s) you entered, other values still blank)`
+            : `Created env file template: ${envPath} (chmod 600, values still blank)`,
+        );
       } else if (envResult.addedNames.length > 0) {
         summary.push(
           `Appended missing variable name(s) to existing env file (${envPath}): ${envResult.addedNames.join(', ')}`,
@@ -1104,6 +1170,12 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
         summary.push('次に実行するコマンド(上から順に):');
         summary.push(`  1. env ファイルに値を記入する: \${EDITOR:-vi} ${shellQuote(envPath)}`);
         summary.push(`     (必要な変数: ${requiredEnvNames.join(', ')})`);
+        if (prefilledEnvEntries.length > 0) {
+          summary.push(
+            `     (${prefilledEnvEntries.map((entry) => entry.name).join(', ')} には入力済みの値が` +
+              '書き込まれています。必要なら確認・編集してください)',
+          );
+        }
         // この分岐は dist/cli.js が無い(=未ビルドで note2web コマンドも PATH に無い)状態
         // なので、PATH 上の `note2web` ではなく、ビルド後に成果物を node で直接実行する
         // 手順を案内する(issue #71 レビュー)。
@@ -1178,6 +1250,12 @@ export async function runInit(options: RunInitOptions = {}): Promise<InitResult>
       summary.push(
         `  1. 環境変数を設定する: export <変数名>=<値> (必要な変数: ${requiredEnvNames.join(', ')})`,
       );
+      for (const entry of prefilledEnvEntries) {
+        // env ファイルを生成しない場合、`NOET_PATH` のような対話で集めた値もどこにも
+        // 書き込まれない(env ファイル自体を作らないため)。忘れずに設定できるよう、
+        // 入力済みの値そのものを export コマンドの形でここに案内する。
+        summary.push(`     export ${entry.name}=${shellQuote(entry.value ?? '')}`);
+      }
       summary.push(`  2. 事前チェック: note2web doctor --config ${shellQuote(targetPath)}`);
       summary.push(`  3. 同期を実行: note2web sync --config ${shellQuote(targetPath)}`);
     }

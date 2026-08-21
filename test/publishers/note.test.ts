@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Config } from '../../src/config.js';
@@ -35,6 +35,14 @@ function buildConfig(workspace: string): Config {
 }
 
 const NOTE_UUID = '5c1c2c3d-0000-4000-8000-000000000001';
+
+/**
+ * `noet` の解決に使う `NOET_PATH`(`resolveNoetCommand`、実機報告)。PATH フォールバックが
+ * 廃止されたため、`publish()` を実際に呼ぶテストは全てこれを渡す必要がある——ホスト環境の
+ * `process.env.NOET_PATH` に依存すると、CI/実行環境によって偶然通ったり失敗したりする
+ * (テストが環境依存になる)のを避けるため、既定は本テストファイル内で固定する。
+ */
+const NOET_ENV: NodeJS.ProcessEnv = { NOET_PATH: '/opt/tools/noet' };
 
 function buildArticle(overrides: Partial<RenderedArticle> = {}): RenderedArticle {
   return {
@@ -150,7 +158,11 @@ describe('createNotePublisher', () => {
         }
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const article = buildArticle();
       const result = await publisher.publish(article, buildPrevState({ remoteId: 'existing-key' }));
@@ -158,7 +170,7 @@ describe('createNotePublisher', () => {
       expect(calls).toHaveLength(1);
       const call = calls[0];
       if (call === undefined) throw new Error('test setup: runner was not called');
-      expect(call.command).toBe('noet');
+      expect(call.command).toBe('/opt/tools/noet');
       expect(call.args).toEqual([
         'update',
         'existing-key',
@@ -178,7 +190,11 @@ describe('createNotePublisher', () => {
 
     it('falls back to prev.url when "noet update" output has no extractable URL', async () => {
       const { runner } = makeMockRunner(() => success('OK, updated.'));
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const result = await publisher.publish(
         buildArticle(),
@@ -200,7 +216,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'create') return success(createUrl('brand-new-key'));
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const result = await publisher.publish(buildArticle(), null);
 
@@ -225,7 +245,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'update') return success('updated without url output');
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const result = await publisher.publish(
         buildArticle({ title: 'Hello World' }),
@@ -245,7 +269,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'update') return success(createUrl('matched-key'));
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const result = await publisher.publish(buildArticle({ title: 'Hello World' }), null);
 
@@ -268,7 +296,12 @@ describe('createNotePublisher', () => {
         throw new Error('test setup: no create/update should have been sent');
       });
       const { logger, warnings } = createFakeLogger();
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner, logger });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        logger,
+        env: NOET_ENV,
+      });
 
       await expect(
         publisher.publish(buildArticle({ noteUuid: 'dup-note', title: 'Dup' }), null),
@@ -284,7 +317,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'list') return success(listLine('Some Other Article', 'other-key'));
         throw new Error('test setup: no create/update should have been sent');
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       await expect(publisher.publish(buildArticle({ title: 'Hello World' }), null)).rejects.toThrow(
         /could not confirm/,
@@ -297,7 +334,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'list') return success('some unstructured human-readable text\n');
         throw new Error('test setup: no create/update should have been sent');
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/could not confirm/);
       expect(calls.filter((call) => call.args[0] !== 'list')).toHaveLength(0);
@@ -309,7 +350,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'create') return success('Draft saved locally.');
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
         /no note\.com article URL/,
@@ -322,7 +367,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'create') return success(createUrl('cached-key'));
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const first = await publisher.publish(
         buildArticle({ noteUuid: 'u1', title: 'Same Title' }),
@@ -345,7 +394,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'create') return success(createUrl('concurrent-key'));
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const [first, second] = await Promise.all([
         publisher.publish(buildArticle({ noteUuid: 'c1', title: 'Concurrent Title' }), null),
@@ -361,7 +414,11 @@ describe('createNotePublisher', () => {
   describe('publish() failure paths', () => {
     it('rejects an artifactPath that escapes the workspace via traversal, without invoking the runner', async () => {
       const { runner, calls } = makeMockRunner();
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const article = buildArticle({ artifactPath: '../../etc/evil.md' });
       await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
@@ -370,7 +427,11 @@ describe('createNotePublisher', () => {
 
     it('rejects an absolute artifactPath, without invoking the runner', async () => {
       const { runner, calls } = makeMockRunner();
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const article = buildArticle({ artifactPath: '/etc/evil.md' });
       await expect(publisher.publish(article, null)).rejects.toThrow(/escapes/);
@@ -379,7 +440,11 @@ describe('createNotePublisher', () => {
 
     it('throws when article.artifactPath is undefined', async () => {
       const { runner, calls } = makeMockRunner();
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       const article = buildArticle({ artifactPath: undefined });
       await expect(publisher.publish(article, null)).rejects.toThrow(/artifactPath/);
@@ -392,7 +457,11 @@ describe('createNotePublisher', () => {
         if (call.args[0] === 'create') return failure('some noet CLI error detail');
         return undefined;
       });
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       try {
         await publisher.publish(buildArticle(), null);
@@ -407,7 +476,11 @@ describe('createNotePublisher', () => {
 
     it('throws a descriptive error on CLI failure, for update (known remoteId)', async () => {
       const { runner } = makeMockRunner(() => failure('connection refused'));
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       await expect(
         publisher.publish(buildArticle(), buildPrevState({ remoteId: 'some-key' })),
@@ -416,7 +489,11 @@ describe('createNotePublisher', () => {
 
     it('throws a descriptive error on CLI failure, for "noet list" itself', async () => {
       const { runner } = makeMockRunner(() => failure('extension not connected'));
-      const publisher = createNotePublisher({ config: buildConfig(workspaceRoot), runner });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: NOET_ENV,
+      });
 
       await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(
         /extension not connected/,
@@ -435,6 +512,78 @@ describe('createNotePublisher', () => {
       const config = buildConfig(workspaceRoot);
       const brokenConfig = { ...config, note: undefined };
       expect(() => createNotePublisher({ config: brokenConfig })).toThrow(/config\.note/);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // NOET_PATH の解決(実機報告: cargo install の noet が launchd の PATH に無い)。
+  // PATH フォールバックは廃止済みのため、未設定/空は明確なエラーになる
+  // (`src/publishers/note.ts` の `resolveNoetCommand` 参照)。
+  // -------------------------------------------------------------------------
+  describe('NOET_PATH resolution (resolveNoetCommand)', () => {
+    it('uses the absolute NOET_PATH value as the "noet" command for every invocation', async () => {
+      const { runner, calls } = makeMockRunner((call) => {
+        if (call.args[0] === 'list') return success('');
+        if (call.args[0] === 'create') return success(createUrl('key-1'));
+        return undefined;
+      });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: { NOET_PATH: '/opt/tools/noet' },
+      });
+
+      await publisher.publish(buildArticle(), null);
+
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.command).toBe('/opt/tools/noet');
+      }
+    });
+
+    it('expands a leading "~" in NOET_PATH against the home directory', async () => {
+      const { runner, calls } = makeMockRunner((call) => {
+        if (call.args[0] === 'list') return success('');
+        if (call.args[0] === 'create') return success(createUrl('key-1'));
+        return undefined;
+      });
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: { NOET_PATH: '~/bin/noet' },
+      });
+
+      await publisher.publish(buildArticle(), null);
+
+      const expected = join(homedir(), 'bin', 'noet');
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.command).toBe(expected);
+      }
+    });
+
+    it('rejects (no PATH fallback) when NOET_PATH is unset, without invoking the runner', async () => {
+      const { runner, calls } = makeMockRunner();
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: {},
+      });
+
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOET_PATH/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects (no PATH fallback) when NOET_PATH is the empty string, without invoking the runner', async () => {
+      const { runner, calls } = makeMockRunner();
+      const publisher = createNotePublisher({
+        config: buildConfig(workspaceRoot),
+        runner,
+        env: { NOET_PATH: '' },
+      });
+
+      await expect(publisher.publish(buildArticle(), null)).rejects.toThrow(/NOET_PATH/);
+      expect(calls).toHaveLength(0);
     });
   });
 });

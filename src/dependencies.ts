@@ -32,9 +32,14 @@
  *     モード」へ移行したため、この節にあった `node`/`npx` コマンド確認・
  *     `@qiita/qiita-cli` の解決確認・engine 確認は不要になった)
  *   - devto: 上記の共通チェックのみ(`DEVTO_API_KEY` は config.ts が既にチェック済み)
- *   - note: `noet` コマンド(design.md は「認証設定」も要求するが、現行の設定スキーマ
- *     (`src/config.ts` の `noteSchema`)は `workspace` のみで認証用の `*_env` を
- *     持たない — §13-4 の実装時確認課題であり、T-14 の時点では追加できるチェックが無い)
+ *   - note: `NOET_PATH`(`noet` バイナリの絶対パスを指す固定名の環境変数、実機報告)が
+ *     必須(未設定/空は problem として報告する — PATH フォールバックは意図的に行わない。
+ *     `src/publishers/note.ts` の `resolveNoetCommand` 参照)。値が設定されていれば
+ *     `expandHome` 後のパスの実在・読み取り可否のみを確認し、`noet` コマンドの PATH 探索
+ *     (`requireCommand('noet', ...)`)はもはや行わない。design.md は「認証設定」も要求するが、
+ *     現行の設定スキーマ(`src/config.ts` の `noteSchema`)は `workspace` のみで認証用の
+ *     `*_env` を持たない — §13-4 の実装時確認課題であり、T-14 の時点では追加できるチェックが
+ *     無い)
  *   - hatena: 上記の共通チェックのみ(`HATENA_API_KEY` は config.ts が既にチェック済み)
  *
  * `gh auth status` の実行・対象リポジトリへの push/PR 作成権限確認は本モジュールでは
@@ -374,8 +379,35 @@ export async function checkDependencies(
       break;
     }
     case 'note': {
-      await requireCommand('noet', 'design.md §5.7 NotePublisher');
-      // 認証設定の具体的なチェックは §13-4 の実装時確認課題(現行スキーマに *_env が無い)。
+      // 実機報告: `noet` は `cargo install` で導入されることが多く、その場合
+      // `~/.cargo/bin/noet` に置かれる。launchd の PATH(`buildLaunchdPath`、
+      // `src/init.ts`)はこのディレクトリを含まないため、PATH 探索
+      // (`requireCommand('noet', ...)`)は無人実行の前提と噛み合わない——本チェックは
+      // `noet` を PATH から探すことをやめ、`NOET_PATH`(絶対パス、`~` 展開に対応)が
+      // 設定されていることと、そのパスが実在し読み取り可能であることのみを確認する。
+      // `NOET_PATH` が未設定/空の場合、`src/publishers/note.ts` の `resolveNoetCommand` は
+      // PATH へフォールバックせず例外を投げる契約のため、ここでも同じ理由で
+      // problem として報告する(doctor/sync 冒頭で早期に検出する)。
+      const noetPathValue = env.NOET_PATH;
+      if (noetPathValue === undefined || noetPathValue === '') {
+        problems.push({
+          message:
+            'environment variable "NOET_PATH" is not set (design.md §5.7 NotePublisher); ' +
+            'set NOET_PATH in the env file (~/.config/note2web/env, written by "note2web init"; ' +
+            'default ~/.cargo/bin/noet) to the absolute path of the noet binary — falling back to ' +
+            'a PATH lookup is intentionally not supported',
+        });
+      } else {
+        const noetPath = expandHome(noetPathValue);
+        if (!(await fileReadableFn(noetPath))) {
+          problems.push({
+            message:
+              `noet binary not found at NOET_PATH="${noetPath}" (design.md §5.7 NotePublisher; ` +
+              'set NOET_PATH in the env file to the correct absolute path of the noet binary, ' +
+              'e.g. ~/.cargo/bin/noet)',
+          });
+        }
+      }
       break;
     }
     case 'hatena': {

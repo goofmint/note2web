@@ -85,6 +85,21 @@
  * タグ先頭の `#` は他サービス(Zenn/Qiita/dev.to)と同じ理由で1つだけ除去する
  * (`src/publishers/zenn.ts` の `stripLeadingHash` と同じ規約。design.md はタグの文字種
  * 変換に触れていないが、既存 Renderer 群との一貫性を優先する)。
+ *
+ * **`noet` コマンドの解決先(`NOET_PATH`、実機報告)**: `noet` は
+ * `cargo install` で導入されることが多く、その場合 `~/.cargo/bin/noet` に置かれる。
+ * launchd が生成する plist の `PATH`(`buildLaunchdPath`、`src/init.ts`)は rbenv/asdf/rvm の
+ * shim と OS 標準ディレクトリのみを対象にしており、`~/.cargo/bin` を含まない——対話シェルの
+ * `.zshrc` 等が PATH へ `~/.cargo/bin` を追加していても launchd 環境には反映されないため、
+ * 無人(launchd)実行では `required command "noet" was not found on PATH` で失敗する
+ * (実機報告)。本実装はこれを PATH 探索の拡張ではなく、環境変数 `NOET_PATH` に `noet`
+ * バイナリの絶対パスを持たせる方式で解決する(`resolveNoetCommand`)。`NOET_PATH` は
+ * `note2web init` が対話で尋ねて(既定 `~/.cargo/bin/noet`)env ファイルへ値入りで書き込む
+ * (`src/init.ts`)。**PATH へのフォールバックは意図的に行わない**——`NOET_PATH` が
+ * 未設定/空のまま `noet` の実行を試みてしまうと、対話シェルでは PATH が通っていて偶然
+ * 動いてしまい、launchd 環境でだけ壊れるという不可視の環境依存を再生産しかねないため、
+ * 未設定を早期に明確なエラーとして扱う(`src/dependencies.ts` の `case 'note'` が
+ * `doctor`/`sync` 冒頭で同じ理由により事前検出する)。
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -203,11 +218,36 @@ export interface CreateNotePublisherOptions {
   /**
    * 環境変数の参照元(テスト用)。既定は `process.env`。design.md §13-4 が明らかにした
    * とおり、note.com は認証をサーバー側の環境変数で受け渡す手段を持たない
-   * (`src/config.ts` の `noteSchema` にも `*_env` は無い)ため、本実装は現時点でこの
-   * オプションを読まない——他 Publisher ファクトリ(`createQiitaPublisher`/
-   * `createDevtoPublisher`)とのコンストラクタ形状の一貫性のためだけに残す。
+   * (`src/config.ts` の `noteSchema` にも `*_env` は無い)ため認証には使わないが、
+   * `noet` コマンド自体の解決に `NOET_PATH` を読む(`resolveNoetCommand` 参照。
+   * 実機報告 / launchd の PATH に `~/.cargo/bin` が無い問題への対応)。
    */
   env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * 実行する `noet` コマンドを解決する。`NOET_PATH`(絶対パス、`~` 展開に対応)が
+ * 非空で設定されていればそれを使う——`cargo install` された `noet` は `~/.cargo/bin/noet`
+ * に置かれることが多く、`note2web init` が生成する launchd の plist の PATH
+ * (`buildLaunchdPath`、`src/init.ts`)はこのディレクトリを含まないため、無人実行では
+ * PATH 上の `noet` を素朴に探すと見つからない(実機報告)。
+ *
+ * `NOET_PATH` が未設定・空文字の場合は **PATH へフォールバックせず、例外を投げる**。
+ * PATH 経由で解決してしまうと対話シェル(PATH に `~/.cargo/bin` が通っている)では
+ * 偶然動作し、launchd 環境でだけ壊れるという不可視の環境依存を再生産しかねないため、
+ * 未設定を早期に明確なエラーとして扱う(`src/dependencies.ts` の `case 'note'` が
+ * `doctor`/`sync` 冒頭で同じ理由により事前検出する)。
+ */
+function resolveNoetCommand(env: NodeJS.ProcessEnv): string {
+  const raw = env.NOET_PATH;
+  if (raw === undefined || raw === '') {
+    throw new Error(
+      'NotePublisher: environment variable "NOET_PATH" is not set; set it in the env file ' +
+        '(~/.config/note2web/env, written by "note2web init"; default ~/.cargo/bin/noet). ' +
+        'Falling back to PATH lookup is intentionally not supported (design.md §5.7)',
+    );
+  }
+  return expandHome(raw);
 }
 
 /** design.md §7 の `note` ブロック(`workspace` のみ)。 */
@@ -368,8 +408,7 @@ export class NoteAmbiguousTitleMatchError extends Error {
  * §6 依存表に明記された仕様である。
  */
 export function createNotePublisher(options: CreateNotePublisherOptions): Publisher {
-  // `options.env` は現時点では読まない(`CreateNotePublisherOptions.env` の JSDoc 参照)。
-  const { config, runner = runSubprocess, logger } = options;
+  const { config, runner = runSubprocess, logger, env = process.env } = options;
   const noteConfig = requireNoteConfig(config);
   const workspaceRoot = expandHome(noteConfig.workspace);
 
@@ -392,12 +431,12 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
     return run;
   }
 
-  async function ensureListFetched(): Promise<void> {
+  async function ensureListFetched(noetCommand: string): Promise<void> {
     if (listRows !== null) {
       return;
     }
     const result = await runner({
-      command: 'noet',
+      command: noetCommand,
       args: ['list'],
       cwd: workspaceRoot,
       timeoutMs: DEFAULT_TIMEOUTS.default,
@@ -414,6 +453,12 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
     article: RenderedArticle,
     prev: NoteState | null,
   ): Promise<PublishResult> {
+    // `noet` コマンド自体の解決は publish 実行のたびに行う(`src/publishers/qiita.ts` の
+    // `env[qiitaConfig.token_env]` 未設定チェックと同じく publish() 時点でのチェックとする
+    // ——`NOET_PATH` 未設定は依存チェック(`src/dependencies.ts`)でも事前検出されるが、
+    // 依存チェックをバイパスした呼び出し経路への防御として Publisher 側でも検証する)。
+    const noetCommand = resolveNoetCommand(env);
+
     if (article.artifactPath === undefined) {
       throw new Error(
         `NotePublisher.publish: note "${article.noteUuid}" has no artifactPath ` +
@@ -440,7 +485,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
     if (prev !== null && prev.remoteId !== null) {
       const remoteId = prev.remoteId;
       const result = await runner({
-        command: 'noet',
+        command: noetCommand,
         args: ['update', remoteId, absolutePath],
         cwd: workspaceRoot,
         timeoutMs: DEFAULT_TIMEOUTS.default,
@@ -450,7 +495,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
       return { result: 'updated', remoteId, url: extracted?.url ?? prev.url };
     }
 
-    await ensureListFetched();
+    await ensureListFetched(noetCommand);
     const rows = listRows ?? [];
     const matches = rows.filter((row) => row.title === article.title.trim());
 
@@ -473,7 +518,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
         throw new Error('internal error: matches.length === 1 but matches[0] is undefined');
       }
       const result = await runner({
-        command: 'noet',
+        command: noetCommand,
         args: ['update', match.key, absolutePath],
         cwd: workspaceRoot,
         timeoutMs: DEFAULT_TIMEOUTS.default,
@@ -499,7 +544,7 @@ export function createNotePublisher(options: CreateNotePublisherOptions): Publis
     }
 
     const result = await runner({
-      command: 'noet',
+      command: noetCommand,
       args: ['create', absolutePath],
       cwd: workspaceRoot,
       timeoutMs: DEFAULT_TIMEOUTS.default,

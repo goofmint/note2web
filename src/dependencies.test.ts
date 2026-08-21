@@ -218,23 +218,88 @@ describe('checkDependencies', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('requires the noet command for note', async () => {
-    const commands = new Set(['ruby', 'bundle']);
-    const error = await expectDependencyError(
+  describe('note dependency check (NOET_PATH; no PATH fallback for "noet")', () => {
+    const buildNoteConfig = (): Config =>
       buildConfig({
         service: 'note',
         git: undefined,
         note: { workspace: '~/src/note-content' },
         exporter: { parser_path: parserPath, notes_container: '/dev/null' },
-      }),
-      {
+      });
+
+    it('reports a problem naming NOET_PATH when it is unset, and never falls back to a PATH lookup for "noet"', async () => {
+      const commands = new Set(['ruby', 'bundle', 'noet']); // "noet" IS on PATH, but must be ignored.
+      const error = await expectDependencyError(buildNoteConfig(), {
         commandExistsFn: (command) => Promise.resolve(commands.has(command)),
         env: {},
         runSubprocessFn: fakeRubyBundleSubprocess(),
-      },
-    );
+      });
 
-    expect(error.problems.map((problem) => problem.message).join('\n')).toMatch(/"noet"/);
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toMatch(/NOET_PATH/);
+      expect(messages).toMatch(/note2web init/);
+      expect(messages).toMatch(/~\/\.cargo\/bin\/noet/);
+      // PATH フォールバックは行わない契約(たとえ "noet" が PATH 上にあっても未設定は問題)。
+      expect(messages).not.toMatch(/was not found on PATH/);
+    });
+
+    it('reports a problem when NOET_PATH is the empty string', async () => {
+      const commands = new Set(['ruby', 'bundle']);
+      const error = await expectDependencyError(buildNoteConfig(), {
+        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+        env: { NOET_PATH: '' },
+        runSubprocessFn: fakeRubyBundleSubprocess(),
+      });
+
+      expect(error.problems.map((problem) => problem.message).join('\n')).toMatch(/NOET_PATH/);
+    });
+
+    it('reports a problem containing the resolved path when NOET_PATH points at a missing/unreadable file', async () => {
+      const commands = new Set(['ruby', 'bundle']);
+      const noetPath = '/opt/tools/noet';
+      const error = await expectDependencyError(buildNoteConfig(), {
+        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+        env: { NOET_PATH: noetPath },
+        // NoteStore.sqlite 側の読み取り可否チェックは常に true を返し、noet バイナリの方だけ
+        // 読み取り不可にする(このテストが NOET_PATH 由来の problem だけを対象にするため)。
+        fileReadableFn: (path) => Promise.resolve(path !== noetPath),
+        runSubprocessFn: fakeRubyBundleSubprocess(),
+      });
+
+      const messages = error.problems.map((problem) => problem.message).join('\n');
+      expect(messages).toContain(noetPath);
+      expect(messages).toMatch(/NOET_PATH/);
+    });
+
+    it('passes (no problem) when NOET_PATH is set and the file is readable', async () => {
+      const commands = new Set(['ruby', 'bundle']);
+      await expect(
+        checkDependencies(buildNoteConfig(), {
+          commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+          env: { NOET_PATH: '/opt/tools/noet' },
+          fileReadableFn: () => Promise.resolve(true),
+          runSubprocessFn: fakeRubyBundleSubprocess(),
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('expands a leading ~ in NOET_PATH before checking readability', async () => {
+      const commands = new Set(['ruby', 'bundle']);
+      const checkedPaths: string[] = [];
+      await checkDependencies(buildNoteConfig(), {
+        commandExistsFn: (command) => Promise.resolve(commands.has(command)),
+        env: { NOET_PATH: '~/bin/noet' },
+        fileReadableFn: (path) => {
+          checkedPaths.push(path);
+          return Promise.resolve(true);
+        },
+        runSubprocessFn: fakeRubyBundleSubprocess(),
+      });
+
+      const expanded = checkedPaths.find((path) => path.endsWith(join('bin', 'noet')));
+      expect(expanded).toBeDefined();
+      expect(expanded?.startsWith('~')).toBe(false);
+    });
   });
 
   it('expands a leading ~ in exporter.parser_path when locating upstream lib/AppleNoteStore.rb', async () => {

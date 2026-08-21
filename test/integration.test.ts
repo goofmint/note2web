@@ -1368,7 +1368,12 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       const parser1 = makeFixtureRunner();
       const noet1 = makeNoetRunner();
       const { logger: logger1, events: events1 } = createFakeLogger();
-      const publisher1 = createNotePublisher({ config, runner: noet1.runner, logger: logger1 });
+      const publisher1 = createNotePublisher({
+        config,
+        runner: noet1.runner,
+        logger: logger1,
+        env: { NOET_PATH: '/opt/tools/noet' },
+      });
       const uploader1 = createFakeUploaderClient();
       const renderNote = resolveRenderer('note');
 
@@ -1431,7 +1436,12 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       const parser2 = makeFixtureRunner();
       const noet2 = makeNoetRunner();
       const { logger: logger2, events: events2 } = createFakeLogger();
-      const publisher2 = createNotePublisher({ config, runner: noet2.runner, logger: logger2 });
+      const publisher2 = createNotePublisher({
+        config,
+        runner: noet2.runner,
+        logger: logger2,
+        env: { NOET_PATH: '/opt/tools/noet' },
+      });
       const uploader2 = createFakeUploaderClient();
 
       const result2 = await runSync({
