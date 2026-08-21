@@ -54,13 +54,16 @@
  * 最初から満たさないことへの最小限の適応であり、HTML・添付・ハッシュタグ等コンテンツ本体は
  * 一切改変しない。
  *
- * **Qiita のタグ必須制約(design.md §5.7「除外後0個ならそのノートは失敗扱い」)** と
- * **note.com の画像非対応(design.md §13-6、`NoteImagesUnsupportedError`)** は、
- * 逆に fixture をそのまま使うだけで自然に発生する実際の失敗系列であり、issue #31 の
- * 受け入れ条件(note.com の画像ノート failed / 非画像ノート created)を満たす形で
- * そのままアサーションに使う。
+ * **Qiita のタグ必須制約(design.md §5.7「除外後0個ならそのノートは失敗扱い」)** は、
+ * fixture をそのまま使うだけで自然に発生する実際の失敗系列であり、そのままアサーションに
+ * 使う。一方 **note.com の画像添付(Whiteboard Sketch)** は、利用者決定(2026-08-21、
+ * design.md §5.7「画像」節)により noet 自身の画像アップロード機能(ローカル相対パス経由)
+ * を使うようになったため、他の4ノートと同じく created として扱われる——`<workspace>/
+ * images/` へ画像がコピーされ、本文の参照が `./images/<identifier>-<内容ハッシュ><ext>` に解決されている
+ * ことをこのファイルの note.com セクションで確認する。
  */
 
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1309,11 +1312,13 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
   });
 
   // -------------------------------------------------------------------------
-  // note.com: CLI モード(noet)。issue #31 の受け入れ条件そのもの(画像ノートは
-  // NoteImagesUnsupportedError で failed、非画像ノートは noet 経由で created)。
+  // note.com: CLI モード(noet)。利用者決定(2026-08-21、design.md §5.7「画像」節)に
+  // より、画像ノート(Whiteboard Sketch)も含め5件全てが noet 経由で created になる
+  // ——画像は R2/S3 ではなく `<workspace>/images/` へローカルコピーされ、本文中の
+  // 参照は `./images/<identifier>-<内容ハッシュ先頭16桁><ext>` という相対パスに解決される。
   // -------------------------------------------------------------------------
 
-  describe('note (CLI mode via noet, createNotePublisher + renderNoteArticle) — design.md §13-6 image split', () => {
+  describe('note (CLI mode via noet, createNotePublisher + renderNoteArticle) — design.md §5.7 local image copy', () => {
     let workspace: string;
 
     beforeEach(async () => {
@@ -1361,7 +1366,32 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       return { runner, calls };
     }
 
-    it('creates the 4 image-free notes via noet, fails the 1 image note with NoteImagesUnsupportedError (exit PARTIAL_FAILURE), then is fully idempotent', async () => {
+    // Whiteboard Sketch の描画(`embedded_objects[0]`)の識別子・拡張子(`test/fixtures/
+    // parser-output/json/all_notes_1.json` の "203" ノート参照)。`processNoteBody` の
+    // ローカルコピー経路(`assets/uploader.ts` 冒頭 JSDoc「note.com 向けの例外」)により
+    // `<workspace>/images/<identifier>-<内容ハッシュ先頭16桁>.png` へコピーされ、本文の
+    // 参照もこの相対パスになるはず(ハッシュ入りファイル名は PR #85 CodeRabbit レビュー:
+    // 画像バイトの差し替えを contentHash の変化として再配信判定に乗せるため)。
+    const WHITEBOARD_IMAGE_IDENTIFIER = '88888888-8888-4888-8888-888888888888';
+    const WHITEBOARD_IMAGE_FIXTURE_PATH = join(
+      FIXTURE_ROOT,
+      'files',
+      'Accounts',
+      '11111111-1111-4111-8111-111111111111',
+      'FallbackImages',
+      WHITEBOARD_IMAGE_IDENTIFIER,
+      'AAAAAAAAAAAAAAAAAAAAAA==',
+      'FallbackImage.png',
+    );
+    const whiteboardImageFileName = (): string => {
+      const hash = createHash('sha256')
+        .update(readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH))
+        .digest('hex')
+        .slice(0, 16);
+      return `${WHITEBOARD_IMAGE_IDENTIFIER}-${hash}.png`;
+    };
+
+    it('creates all 5 notes via noet, including the image note (Whiteboard Sketch) via a local image copy under workspace/images/, then is fully idempotent', async () => {
       const config = buildConfig();
 
       // --- run 1 ---------------------------------------------------------------
@@ -1390,47 +1420,51 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
         }),
       });
 
-      // issue #31 の受け入れ条件: 画像ノート(Whiteboard Sketch)のみ failed、残り4件は created。
+      // 利用者決定(2026-08-21、design.md §5.7「画像」節): 画像ノート(Whiteboard Sketch)
+      // も noet 自身の画像アップロード機能(ローカル相対パス経由)で created になり、
+      // 5件全てが成功する。
       expect(result1).toMatchObject({
-        exitCode: PARTIAL_FAILURE,
-        published: 4,
+        exitCode: SUCCESS,
+        published: 5,
         skipped: 0,
-        failed: 1,
+        failed: 0,
       });
-      expect(events1).toContain(`note_failed:${WHITEBOARD_SKETCH_UUID}`);
-      for (const uuid of [
-        SALES_TABLE_UUID,
-        GROCERY_CHECKLIST_UUID,
-        LAUNCH_NOTES_UUID,
-        OPS_LOG_UUID,
-      ]) {
+      for (const uuid of ALL_UUIDS) {
         expect(events1).toContain(`note_published:${uuid}:created`);
       }
 
-      // 画像ノートは renderNote 段(NoteImagesUnsupportedError)で落ちるため、noet は
-      // このノートに対して一切呼ばれていない(`noet create` の引数一覧を確認)。
+      // Whiteboard Sketch も他ノートと同じく `noet create` が呼ばれている。
       const createCalls = noet1.calls.filter((c) => c.args[0] === 'create');
-      expect(createCalls).toHaveLength(4);
+      expect(createCalls).toHaveLength(5);
       expect(createCalls.some((c) => c.args[1]?.includes(WHITEBOARD_SKETCH_UUID) === true)).toBe(
-        false,
+        true,
       );
       // `noet list`(0件確定)が run 内で1回だけ実行され、以後の照合はキャッシュを使う
       // (`ensureListFetched` の per-run キャッシュ。モジュール冒頭 JSDoc「3. 記事一覧の完全性」)。
       expect(noet1.calls.filter((c) => c.args[0] === 'list')).toHaveLength(1);
 
       const onDisk1 = readStateFile(statePath);
-      for (const uuid of [
-        SALES_TABLE_UUID,
-        GROCERY_CHECKLIST_UUID,
-        LAUNCH_NOTES_UUID,
-        OPS_LOG_UUID,
-      ]) {
+      for (const uuid of ALL_UUIDS) {
         expect(onDisk1.notes[uuid]?.remoteId).toMatch(/^[A-Za-z0-9_-]+$/);
         expect(onDisk1.notes[uuid]?.url).toMatch(/^https:\/\/note\.com\/example\/n\//);
       }
-      expect(onDisk1.notes[WHITEBOARD_SKETCH_UUID]).toBeUndefined();
-      // 画像自体はアップロード済み(§5.6 書き込みポイント1。ノート自身の failed とは独立)。
-      expect(Object.keys(onDisk1.assets)).toHaveLength(1);
+      // note.com 向けの画像はローカルコピー経路を通るため R2/S3 へは一切アップロードされず、
+      // `StateStore` のアセット状態にも記録されない(`assets/uploader.ts` 冒頭 JSDoc
+      // 「note.com 向けの例外」)。
+      expect(Object.keys(onDisk1.assets)).toHaveLength(0);
+      expect(uploader1.putObjectCalls).toHaveLength(0);
+
+      // 画像実体が `<workspace>/images/<identifier>-<内容ハッシュ>.png` へコピーされている。
+      const copiedImagePath = join(workspace, 'images', whiteboardImageFileName());
+      expect(existsSync(copiedImagePath)).toBe(true);
+      const originalBytes = readFileSync(WHITEBOARD_IMAGE_FIXTURE_PATH);
+      expect(readFileSync(copiedImagePath)).toEqual(originalBytes);
+
+      // ワークスペースに書き出された記事 Markdown が `./images/<identifier>-<内容ハッシュ>.png`
+      // という相対パス参照を含む(noet 自身がこれを解決してアップロードする契約。モジュール
+      // 冒頭 JSDoc 参照)。
+      const writtenArticle = readFileSync(join(workspace, `${WHITEBOARD_SKETCH_UUID}.md`), 'utf8');
+      expect(writtenArticle).toContain(`./images/${whiteboardImageFileName()}`);
 
       // --- run 2(冪等性)---------------------------------------------------------
       const parser2 = makeFixtureRunner();
@@ -1458,24 +1492,15 @@ describe('integration: full sync pipeline over the multi-note fixture (design.md
       });
 
       expect(result2).toMatchObject({
-        exitCode: PARTIAL_FAILURE,
+        exitCode: SUCCESS,
         published: 0,
-        skipped: 4,
-        failed: 1,
+        skipped: 5,
+        failed: 0,
       });
-      for (const uuid of [
-        SALES_TABLE_UUID,
-        GROCERY_CHECKLIST_UUID,
-        LAUNCH_NOTES_UUID,
-        OPS_LOG_UUID,
-      ]) {
+      for (const uuid of ALL_UUIDS) {
         expect(events2).toContain(`note_skipped:${uuid}`);
       }
-      // 画像ノートは renderNote が毎回例外を投げる設計(NFR-06 により毎回再試行される)ため、
-      // 2回目実行でも同じく failed のまま——これは noet 呼び出しには到達すらしないバグ無しの
-      // 既知挙動であることを、noet2 の呼び出しが1件も画像ノートに関連しないことで確認する。
-      expect(events2).toContain(`note_failed:${WHITEBOARD_SKETCH_UUID}`);
-      // 4件は skip されたため noet は一切呼ばれない(境界呼び出しゼロ)。
+      // 5件全て skip されたため noet は一切呼ばれない(境界呼び出しゼロ)。
       expect(noet2.calls).toHaveLength(0);
       expect(uploader2.putObjectCalls).toHaveLength(0);
     });

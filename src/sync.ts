@@ -56,6 +56,7 @@ import { checkGitModeAuthAndPermission } from './git-auth.js';
 import { acquireLock, lockPathFor, LockError, releaseLock, type LockHandle } from './lock.js';
 import type { Logger } from './logger.js';
 import type { Note } from './model/note.js';
+import { expandHome } from './paths.js';
 import { isGitModeService } from './publishers/mode.js';
 import { renderGenericArticle, type NoteRenderer } from './publishers/render.js';
 import type {
@@ -279,6 +280,11 @@ async function processNote(params: ProcessNoteParams): Promise<NoteOutcome> {
       noteUuid: note.uuid,
       service,
       assets: config.assets,
+      // note.com 向けの画像はローカルコピー経路(`assets/uploader.ts` 冒頭 JSDoc「note.com
+      // 向けの例外」参照)を通るため、ワークスペースの絶対パス(`~` 展開済み)を渡す。
+      // `note.ts` の `createNotePublisher` と同じく `expandHome` で展開する
+      // (`config.note.workspace` は生の設定値であり `~` を含みうる)。
+      noteWorkspace: config.note !== undefined ? expandHome(config.note.workspace) : undefined,
       state,
       client: uploaderClient,
       logger,

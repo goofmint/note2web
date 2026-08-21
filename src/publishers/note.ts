@@ -19,19 +19,32 @@
  * 完全無人(cron/launchd)で回すこと自体が構造的に不可能である点は README 相当の
  * ドキュメント(design.md §4・§6)に明記済み。
  *
- * **2. 画像: (b) 画像を含むノートは note.com 向けでは明示的に failed とする**(design.md
- * §13-6 が検討した2案のうち、noet の `--images` 経路が「統合テスト未実施」の未検証機能
- * であることを理由に、より安全側の (b) を採用。issue #30 自体の記述——「R2/S3 の URL の
- * まま送る」——は T-24 スパイク前の古い前提であり、design.md §13-6 の調査結果(note.com の
- * ProseMirror エディタは `![]()` を画像として解釈せずリテラルテキスト表示する)により
- * 上書きされている。§13-6「推奨対応」・tasks.md §5 の指示どおり、この T-25 実装では
- * design.md を issue のstale本文より優先する)。`renderNoteArticle` は本文
- * Markdown に画像参照記法(`![...]`。インライン `![alt](url)`・参照形式
- * `![alt][ref]`・ショートカット参照 `![alt]` のいずれも同じ `![` 始まりのため単一の
- * 正規表現で検出できる)が含まれる場合、`NoteImagesUnsupportedError` を投げる。
- * `src/sync.ts` の `processNote` は `renderNote` 呼び出しを独立した try/catch で
- * 囲んでおり、当該ノートのみを `'failed'` として隔離する(`QiitaNoTagsRemainingError` と
- * 同じパターン)。
+ * **2. 画像: (a) noet 自身の画像アップロード機能を、ローカルファイル参照で使う**(利用者
+ * 決定 2026-08-21。旧 §13-6 の2択のうち、当初採用していた (b)(画像を含むノートを
+ * note.com 向けでは明示的に failed とする)から方針転換した)。noet(kako-jun/noet, commit
+ * `e3a8562`)は `noet create`/`update` の実行時、本文 Markdown 中の画像参照
+ * (`extract_image_references`、正規表現 `!\[([^\]]*)\]\(([^)]+)\)`)を自動検出し、参照が
+ * `http://`/`https://` で始まらない場合(= ローカルファイルパス)は Markdown ファイルの
+ * 親ディレクトリ基準で実ファイルを解決し、note.com へ自前でアップロードしたうえで本文中の
+ * 参照を `st-note.com` の URL に置換してくれる(`apps/cli/src/commands/extension.rs` →
+ * `image_handler.rs::process_images`。alt テキストがそのまま note.com 側のキャプションに
+ * なる)。逆に `http(s)://` で始まる参照(R2/S3 の公開 URL 等)は**スキップ**され
+ * アップロードされない——note.com の ProseMirror エディタはそもそも `![]()` を画像として
+ * 解釈せずリテラルテキスト表示するため(§13-6 の調査結果は変わらず有効)、R2/S3 の URL を
+ * そのまま送る経路には意味が無い。したがって note.com 向けの画像添付は
+ * `assets/uploader.ts` の `processNoteBody` が(`service === 'note'` かつ画像の場合)R2/S3
+ * ではなく `<config.note.workspace>/images/<identifier><ext>` へのローカルコピーへ差し替え、
+ * `renderNoteArticle` に渡る本文には最初から `![alt](./images/<identifier><ext>)` という
+ * 相対パス参照だけが現れる(`renderNoteArticle` 自身は画像を検出・拒否しない——検証は
+ * アセット解決段階(`assets/uploader.ts`)で完結している)。**サポートされる画像形式は
+ * jpg/jpeg/png/gif/webp のみ**(noet の `read_image_as_base64`)で、それ以外の拡張子は
+ * アセット解決段階で `AssetUploadError` として弾かれ、当該ノートのみ `'failed'` になる。
+ * この noet の画像アップロード経路自体は upstream で「実装完了(コンパイル済み)、
+ * 統合テスト未実施」(`docs/IMAGE_FEATURE_STATUS.md`)のままであり、note2web 側でも
+ * 実機検証はできていない(§12 参照)——失敗した場合は他の失敗と同様にそのノートのみが
+ * `'failed'` として隔離され、次回実行で再試行される。また画像を多数含む記事では、
+ * 拡張機能側の1コマンドあたり60秒タイムアウト(`extension_client.rs` `COMMAND_TIMEOUT`)に
+ * 接近しうる点も変わらない(§5.7 レート制御の記述参照)。
  *
  * **3. 記事一覧の完全性(design.md §5.7・§13-4「照合の安全条件」)**: `noet list` は
  * `/notes` ページの DOM スクレイプであり、ページング処理を持たず初期表示分のみを対象と
@@ -104,6 +117,9 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { expandHome } from '../paths.js';
@@ -120,44 +136,6 @@ import {
 } from '../transform/frontmatter.js';
 
 // ---------------------------------------------------------------------------
-// Renderer: 画像非対応の検出とエラー型(モジュール冒頭 JSDoc「2. 画像」参照)。
-// ---------------------------------------------------------------------------
-
-/**
- * Markdown の画像記法の開始(`![`)を検出する。インライン形式(`![alt](url)`)・参照形式
- * (`![alt][ref]`)・ショートカット参照形式(`![alt]`)のいずれも `![` で始まるため、
- * 続きの構文を区別せず単一パターンで検出する(安全側に倒し、見逃しよりも過検出を選ぶ
- * ——モジュール冒頭 JSDoc「2. 画像」参照)。本 note2web の BodyTransformer
- * (`src/transform/body.ts`、remark-stringify 既定)は実際にはインライン形式しか
- * 生成しないため参照形式の実例は無いはずだが、防御的に含める。
- */
-const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*\]/;
-
-/**
- * ノートの本文 Markdown に画像参照が含まれていたことを表す(design.md §13-6「画像を
- * 含むノードは note.com 向けでは明示的に failed とし、エラーメッセージで非対応を伝える」
- * ——option (b))。`src/sync.ts` の `processNote` が `renderNote` 呼び出しを囲む
- * try/catch で捕捉し、当該ノートのみを `'failed'` として隔離する
- * (`QiitaNoTagsRemainingError` と同じパターン)。
- */
-export class NoteImagesUnsupportedError extends Error {
-  /** 画像を含んでいたノートの UUID。 */
-  readonly noteUuid: string;
-
-  constructor(noteUuid: string) {
-    super(
-      `note.com does not support images via note2web (design.md §13-6): note.com's ProseMirror ` +
-        "editor renders markdown image syntax as literal text rather than an image, and noet's " +
-        '"--images" upload path is unverified ("統合テスト未実施", noet\'s ' +
-        `docs/IMAGE_FEATURE_STATUS.md); note "${noteUuid}" contains at least one image reference ` +
-        '— remove the image(s) from this note, or publish it to a different service instead',
-    );
-    this.name = 'NoteImagesUnsupportedError';
-    this.noteUuid = noteUuid;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Renderer 本体(モジュール冒頭 JSDoc「frontmatter」参照)。
 // ---------------------------------------------------------------------------
 
@@ -170,6 +148,100 @@ function stripLeadingHash(tag: string): string {
 }
 
 /**
+ * `findExternalImageUrl` 用の Markdown パーサ(`remark-parse` + `remark-gfm`。
+ * `src/transform/body.ts` のプロセッサと同様、ステートレスなのでモジュールスコープで
+ * 使い回す)。正規表現ではなく構文解析で画像ノードだけを検査する——正規表現だと
+ * コードフェンス・インラインコード中のリテラルな `![alt](https://…)` に誤反応して
+ * 画像ではない本文でノートを失敗させ、逆に参照形式(`![alt][ref]`)の画像は見逃す
+ * (PR #85 CodeRabbit レビュー)。
+ */
+const noteMarkdownParser = unified().use(remarkParse).use(remarkGfm).freeze();
+
+/** mdast ノードの再帰走査(`src/transform/body.ts` の `unwrapAutolinks` と同じ軽量パターン)。 */
+function visitMdastNodes(node: unknown, visit: (node: { type?: unknown }) => void): void {
+  if (typeof node !== 'object' || node === null) {
+    return;
+  }
+  visit(node as { type?: unknown });
+  const children = (node as { children?: unknown }).children;
+  if (Array.isArray(children)) {
+    for (const child of children) {
+      visitMdastNodes(child, visit);
+    }
+  }
+}
+
+/**
+ * 本文 Markdown を構文解析し、外部 URL(`http(s)://`)を指す**画像ノード**
+ * (インライン `![alt](URL)`・参照形式 `![alt][ref]` + 定義のいずれも)を探して
+ * 最初に見つかった URL を返す。コードブロック・インラインコード・エスケープ済みの
+ * 画像構文は画像ノードにならないため対象外(`renderNoteArticle` の JSDoc 参照)。
+ * 添付経由の画像は `processNoteBody` が `./images/...` のローカル相対パスへ解決済み
+ * なので、ここに掛かるのは添付を伴わない `<img src="外部URL">` 由来の参照だけ。
+ */
+function findExternalImageUrl(markdown: string): string | undefined {
+  const tree = noteMarkdownParser.parse(markdown);
+  const isExternal = (url: string): boolean => /^https?:\/\//i.test(url);
+
+  const definitionUrls = new Map<string, string>();
+  visitMdastNodes(tree, (node) => {
+    if (node.type === 'definition') {
+      const definition = node as { identifier: string; url: string };
+      definitionUrls.set(definition.identifier, definition.url);
+    }
+  });
+
+  let found: string | undefined;
+  visitMdastNodes(tree, (node) => {
+    if (found !== undefined) {
+      return;
+    }
+    if (node.type === 'image') {
+      const image = node as { url: string };
+      if (isExternal(image.url)) {
+        found = image.url;
+      }
+      return;
+    }
+    if (node.type === 'imageReference') {
+      const reference = node as { identifier: string };
+      const url = definitionUrls.get(reference.identifier);
+      if (url !== undefined && isExternal(url)) {
+        found = url;
+      }
+    }
+  });
+  return found;
+}
+
+/**
+ * 本文に外部 URL の画像参照が含まれていることを表す(note.com の ProseMirror は外部 URL の
+ * 画像記法を画像として解釈せず、noet も `http(s)://` 参照をアップロード対象からスキップする
+ * ため、公開するとリテラルなテキストとして表示されてしまう。design.md §5.7「画像」節、
+ * PR #85 CodeRabbit レビュー)。`src/sync.ts` の `processNote` がこの例外を捕捉し、
+ * 当該ノートのみ `'failed'` として隔離する(NFR-06)。
+ */
+export class NoteExternalImageError extends Error {
+  /** 検証に失敗したノートの UUID。 */
+  readonly noteUuid: string;
+  /** 検出された外部 URL(問題の画像を特定しやすくするため)。 */
+  readonly imageUrl: string;
+
+  constructor(noteUuid: string, imageUrl: string) {
+    super(
+      `note.com cannot render images referenced by external URL (design.md §5.7): note.com's ` +
+        `ProseMirror editor shows markdown image syntax with an http(s) URL as literal text, and ` +
+        `noet skips http(s) references when uploading images; note "${noteUuid}" contains an ` +
+        `external-URL image reference (${imageUrl}, likely an <img src="…"> without an Apple ` +
+        'Notes attachment) — remove the image, or publish this note to a different service instead',
+    );
+    this.name = 'NoteExternalImageError';
+    this.noteUuid = noteUuid;
+    this.imageUrl = imageUrl;
+  }
+}
+
+/**
  * note.com 向け `NoteRenderer`(design.md §5.7 NotePublisher 節、§13-4、T-25)。
  * `config` は参照しない——note.com のファイルパスは常に `<uuid>.md`(Publisher が
  * `config.note.workspace` からの相対パスとして解決する)固定で、frontmatter の内容も
@@ -177,15 +249,24 @@ function stripLeadingHash(tag: string): string {
  * しない——note.com の frontmatter は ID の書き戻し欄を持たない(モジュール冒頭 JSDoc
  * 「記事 ID(key)の取得」参照。ID の追跡は Publisher 側の状態 JSON `remoteId` のみで行う)。
  *
- * 本文に画像参照が含まれる場合、frontmatter を組み立てる前に
- * `NoteImagesUnsupportedError` を投げる(モジュール冒頭 JSDoc「2. 画像」参照)。
+ * 画像について(モジュール冒頭 JSDoc「2. 画像」参照): `markdown` は `assets/uploader.ts` の
+ * `processNoteBody` を経由済みで、note.com 向けの添付画像参照は既に
+ * `./images/<identifier>-<内容ハッシュ><ext>` というローカル相対パスに解決されている
+ * (未対応の拡張子はその段階で `AssetUploadError` として弾かれている)。ここで追加検証
+ * するのは**外部 URL(`http(s)://`)の画像参照**のみ——添付経由ではない `<img src="外部URL">`
+ * が本文にあった場合、変換パイプラインはそれを `![](https://…)` として素通しするが、noet の
+ * `extract_image_references` は `http(s)://` 参照をアップロード対象からスキップするため、
+ * note.com 上ではリテラルなテキストとして表示されてしまう(design.md §5.7「画像」節)。
+ * 静かに壊れた記事を公開しないよう、`NoteExternalImageError` として当該ノートを失敗させる
+ * (PR #85 CodeRabbit レビュー)。
  */
 export const renderNoteArticle: NoteRenderer = ({
   note,
   markdown,
 }: RenderNoteInput): RenderedArticle => {
-  if (MARKDOWN_IMAGE_PATTERN.test(markdown)) {
-    throw new NoteImagesUnsupportedError(note.uuid);
+  const externalImageUrl = findExternalImageUrl(markdown);
+  if (externalImageUrl !== undefined) {
+    throw new NoteExternalImageError(note.uuid, externalImageUrl);
   }
 
   const entries: FrontmatterEntry[] = [

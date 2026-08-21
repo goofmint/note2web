@@ -128,9 +128,11 @@ export function createPublisher(config: Config, options: CreatePublisherOptions 
  *   持たせ、それを冪等判定のハッシュにも POST/PUT のリクエストボディにもそのまま使う
  *   (design.md §5.7 HatenaPublisher 行)。
  * - `note`: `renderNoteArticle`(`src/publishers/note.ts`、T-25)——`noet` が実際に読む
- *   `title`/`tags` の2キーのみの最小限 frontmatter を書き、本文に Markdown 画像参照が
- *   含まれる場合は `NoteImagesUnsupportedError` を投げる(design.md §5.7 NotePublisher 行、
- *   §13-6 の画像非対応方針)。
+ *   `title`/`tags` の2キーのみの最小限 frontmatter を書く。本文中の画像参照は
+ *   `renderNoteArticle` に渡る前に `assets/uploader.ts` の `processNoteBody` が
+ *   `<config.note.workspace>/images/` へのローカル相対パスへ解決済みのため、ここでは
+ *   画像の検出・拒否は行わない(design.md §5.7 NotePublisher 行「画像」節、利用者決定
+ *   2026-08-21)。
  * - それ以外: 型上到達不能(`ServiceName` は上記7値で尽きる)。`renderGenericArticle`
  *   (`src/publishers/render.ts`、T-14)を防御的なフォールバックとして返す——`runSync` 自身の
  *   既定値と同じにすることで、`renderNote` を明示的に渡す(cli.ts)場合と渡さない場合

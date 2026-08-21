@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NoteImagesUnsupportedError, renderNoteArticle } from './note.js';
+import { NoteExternalImageError, renderNoteArticle } from './note.js';
 import type { Note } from '../model/note.js';
 import type { Config } from '../config.js';
 import { computeContentHash } from '../transform/frontmatter.js';
@@ -122,63 +122,82 @@ describe('renderNoteArticle tags', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 画像非対応(design.md §13-6「option (b)」、モジュール冒頭 JSDoc「2. 画像」)。
+// 画像(利用者決定 2026-08-21、モジュール冒頭 JSDoc「2. 画像」参照)。
 // ---------------------------------------------------------------------------
+//
+// `renderNoteArticle` は添付経由の画像を検出・拒否しない——`assets/uploader.ts` の
+// `processNoteBody` が事前にローカル相対パス(`./images/<identifier>-<内容ハッシュ><ext>`)へ
+// 解決済みの本文を渡してくる前提。唯一の追加検証は外部 URL(`http(s)://`)の画像参照
+// (添付を伴わない `<img src>` 由来)を `NoteExternalImageError` として拒否すること
+// (PR #85 CodeRabbit レビュー。noet が http(s) 参照をスキップし、note.com 上で
+// リテラル表示になってしまうため)。
 
-describe('renderNoteArticle image detection (design.md §13-6, option (b))', () => {
-  it('throws NoteImagesUnsupportedError for an inline image reference', () => {
+describe('renderNoteArticle with an already-resolved local image reference', () => {
+  it('publishes normally: a "./images/<identifier><ext>" reference passes through unchanged', () => {
     const note = buildNote();
-    const markdown = 'text before\n\n![alt text](https://assets.example.com/notes/ab/ab12.png)\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
+    const markdown =
+      'text before\n\n![alt text](./images/88888888-8888-4888-8888-888888888888.png)\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain(
+      '![alt text](./images/88888888-8888-4888-8888-888888888888.png)',
     );
   });
 
-  it('throws NoteImagesUnsupportedError for a reference-style image', () => {
+  it.each(['https://example.com/a.png', 'http://example.com/a.png'])(
+    'throws NoteExternalImageError for an external-URL image reference (%s)',
+    (url) => {
+      const note = buildNote();
+      const markdown = `text\n\n![alt](${url})\n`;
+      expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+        NoteExternalImageError,
+      );
+    },
+  );
+
+  it('throws NoteExternalImageError for a reference-style external image (![alt][ref] + definition)', () => {
     const note = buildNote();
-    const markdown = '![alt text][img1]\n\n[img1]: https://assets.example.com/notes/ab/ab12.png\n';
+    const markdown = '![alt][pic]\n\n[pic]: https://example.com/a.png\n';
     expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
+      NoteExternalImageError,
     );
   });
 
-  it('throws NoteImagesUnsupportedError for a shortcut reference-style image', () => {
+  it('throws NoteExternalImageError for an angle-bracketed external image URL', () => {
     const note = buildNote();
-    const markdown = '![alt text]\n\n[alt text]: https://assets.example.com/notes/ab/ab12.png\n';
+    const markdown = '![alt](<https://example.com/a b.png>)\n';
     expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
-      NoteImagesUnsupportedError,
+      NoteExternalImageError,
     );
   });
 
-  it('does not throw for a note with no image references', () => {
+  // 正規表現ではなく構文解析で検査するため、コードブロック・インラインコード中の
+  // リテラルな画像構文には反応しない(PR #85 CodeRabbit レビュー)。
+  it('does not throw for a literal image syntax inside a fenced code block', () => {
     const note = buildNote();
-    const markdown = 'plain text, a [regular link](https://example.com/) is fine.\n';
-    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).not.toThrow();
+    const markdown = '```md\n![example](https://example.com/a.png)\n```\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('![example](https://example.com/a.png)');
   });
 
-  it('NoteImagesUnsupportedError carries the offending noteUuid', () => {
-    const note = buildNote({ uuid: 'note-uuid-under-test' });
-    const markdown = '![img](https://assets.example.com/x.png)\n';
-    try {
-      renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-      expect.unreachable('renderNoteArticle should have thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(NoteImagesUnsupportedError);
-      const typedError = error as NoteImagesUnsupportedError;
-      expect(typedError.noteUuid).toBe('note-uuid-under-test');
-      expect(typedError.message).toContain('note-uuid-under-test');
-    }
+  it('does not throw for a literal image syntax inside inline code', () => {
+    const note = buildNote();
+    const markdown = 'use `![alt](https://example.com/a.png)` syntax\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('`![alt](https://example.com/a.png)`');
   });
 
-  it('throws before rendering, so no RenderedArticle is ever produced for an image note', () => {
+  it('does not treat a plain external link (no "!") as an image reference', () => {
     const note = buildNote();
-    const markdown = '![img](https://assets.example.com/x.png)\n';
-    let rendered: unknown;
-    try {
-      rendered = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
-    } catch {
-      // 例外経路: 成果物は生成されない。
-    }
-    expect(rendered).toBeUndefined();
+    const markdown = 'see [the docs](https://example.com/a.png) for details\n';
+    const article = renderNoteArticle({ note, markdown, config: CONFIG, prev: null });
+    expect(article.artifact).toContain('[the docs](https://example.com/a.png)');
+  });
+
+  it('includes the offending URL in the error message', () => {
+    const note = buildNote();
+    const markdown = '![alt](https://example.com/broken.png)\n';
+    expect(() => renderNoteArticle({ note, markdown, config: CONFIG, prev: null })).toThrow(
+      /https:\/\/example\.com\/broken\.png/,
+    );
   });
 });
